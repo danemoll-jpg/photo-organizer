@@ -1,7 +1,9 @@
 # CLAUDE.md — Photo Organizer Project
 
 ## What this project is
-A local tool to organize ~25 years of family photos (35k+ files, likely more now) on a Windows PC. It has three phases, each independently useful and independently testable. Build and validate them one at a time, in order — do not jump ahead to Phase 2 or 3 until Phase 1 is working and confirmed by the user.
+A local tool to organize ~25 years of family photos (35k+ files, likely more now) on a Windows PC. It has multiple phases, each independently useful and independently testable. Build and validate them one at a time, in order — do not jump ahead to Phase 2 or 3 until Phase 1 is working and confirmed by the user.
+
+**Structural note:** Phase 1 originally shipped as a CLI (`main.py` with subcommands). It's being extended with a full desktop dashboard (Tkinter) that wraps the same underlying code — the CLI is not being replaced or removed, just given a GUI front end for day-to-day use. See TODO.md for current scope.
 
 ## Environment
 - Windows 11 Pro, Dell XPS 8930
@@ -12,13 +14,14 @@ A local tool to organize ~25 years of family photos (35k+ files, likely more now
 - GPU acceleration is available and should be used for Phase 3 (face detection/embedding). Driver-level check confirmed working (`nvidia-smi` shows the GTX 1660 Ti, WDDM driver, CUDA 13.3 runtime supported) — done in the Phase 0/1 session. Framework-level check (e.g. `torch.cuda.is_available()` or onnxruntime-gpu's equivalent) is still needed once Phase 3 picks a library — don't assume driver-level success means the framework will see the GPU too.
 
 ## Project state
-- Phase 0 and Phase 1 are built: venv + `requirements.txt`, `config.example.yaml`/`config.yaml`, `schema.sql` (full DB schema, all tables), and the Phase 1 CLI (`main.py` + `src/`). See `README.md` for setup/usage — don't re-derive commands from scratch, they're already documented there.
-- Phase 1 has been tested against synthetic fixtures only (`tests/make_sample_library.py`), not real photos yet. The real small-sample and full-library run + user log review are still outstanding — see TODO.md.
+- Phase 0 and Phase 1 core pipeline are built: venv + `requirements.txt`, `config.example.yaml`/`config.yaml`, `schema.sql` (full DB schema, all tables), and the Phase 1 CLI (`main.py` + `src/`). See `README.md` for setup/usage — don't re-derive commands from scratch, they're already documented there.
+- Phase 1 has been tested against synthetic fixtures only (`tests/make_sample_library.py`), not real photos yet.
+- Current/next session scope: fix the source-folder picker (additive across runs, native multi-select, no drill-in on reopen) and build the desktop dashboard on top of the existing CLI code. The real full-library run is intentionally deferred until after that — the user wants to get comfortable with the tool via the dashboard first. See TODO.md for the exact task list.
 
 ## Library facts (confirmed)
 - Image formats actually in the library: **JPG, PNG, HEIC**. No RAW formats.
 - `E:\Pics` (the destination root) is not a clean slate — it already contains a **mix** of files sorted into `YYYY/YYYY-MM` and loose/unsorted files at the top level. Any phase that touches `E:\Pics` should expect this mix, not assume it's empty or uniformly organized.
-- The user's other source photos are scattered across folders/drives they haven't fully enumerated — they want to pick them interactively (folder picker) rather than list them upfront. Don't assume a fixed source-folder list; the Phase 1 tool supports adding to it incrementally via `main.py pick-sources`.
+- The user's other source photos are scattered across folders/drives they haven't fully enumerated — they want to pick them interactively (folder picker, ideally multi-select) rather than list them upfront.
 
 ## Full spec
 See `photo-organizer-spec.md` in this project for the detailed phase-by-phase requirements. That file is the source of truth for scope. TODO.md tracks current status and next steps.
@@ -30,17 +33,20 @@ See `photo-organizer-spec.md` in this project for the detailed phase-by-phase re
 ## Non-negotiable cross-cutting rules
 1. **Resumability everywhere.** Every phase must be safely re-runnable without redoing work already done. Track processed files by content hash, not filename or path.
 2. **Never silently overwrite or destroy original photos.** Phase 1 uses copy-verify-delete: copy to destination, verify via hash comparison, only then delete the source. A failed verification must leave the source in place and get logged — never delete on an unverified copy. Collision handling must never overwrite an existing file.
-3. **Log everything.** Every phase needs a log the user can read after the fact to answer "what happened to file X and why."
+3. **Log everything.** Every phase needs a log the user can read after the fact to answer "what happened to file X and why." The dashboard's log viewer reads these same log files — don't create a second, separate logging path for the GUI.
 4. **Config, not hardcoding.** Source/dest paths, backend choice (local model vs Claude API for captioning), batch sizes, and GPU on/off should live in a config file.
 5. **JSONL for intermediate outputs** (Phase 2 captions, Phase 3 face embeddings) — appendable, resumable. SQLite is the final data layer, loaded from JSONL.
 6. **Primary key = file content hash** across all DB tables, since paths will move during Phase 1 and duplicates/re-exports are likely across 25 years of photos.
+7. **The GUI is a wrapper, not a parallel implementation.** The dashboard should call the same underlying functions/modules the CLI uses, not duplicate logic. `main.py`'s commands must keep working directly.
 
 ## Session model
 - The user runs a **fresh Code session for each phase** (to keep individual sessions from ballooning). This means CLAUDE.md must always contain full standing context — don't assume memory of prior sessions.
 - TODO.md is scoped to the current active phase only. Work only within that phase. Do not start, scaffold, or "get ahead" on later phases even if it seems efficient — the user and Claude (chat) review and re-scope TODO.md between sessions before the next phase begins.
 - If something in a later phase is blocked or ambiguous because of a decision only that phase would resolve, flag it in your summary at the end of the session rather than jumping ahead to resolve it.
+- **Always keep TODO.md current as work happens** — check items off as they're completed, add new sub-tasks if scope details get decided mid-session, and note any judgment calls made along the way (like the existing duplicate-handling note) so they're visible rather than buried in code.
+- **Update CLAUDE.md too when something durable changes** — a structural decision (like the CLI→dashboard change), a new confirmed environment fact, or a new cross-cutting rule belongs here, not just in TODO.md. TODO.md is for task status; CLAUDE.md is for standing context that the next fresh session needs to know without being told again.
+- End every session with a written summary: what was built/changed, what was tested and how, and anything the user or the next session should know. This is in addition to updating the files themselves, not instead of it.
 
 ## Working style
 - The user works in IT and is comfortable with technical detail and code — no need to oversimplify or avoid technical terms. Surface real trade-offs plainly.
 - Confirm scope and design questions before writing code, especially anything involving cost (cloud API calls) or irreversible file operations.
-- Update TODO.md as work progresses so the user (and Claude in chat) can track status without reading code.

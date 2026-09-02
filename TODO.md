@@ -23,11 +23,25 @@ Check items off as completed. Add sub-tasks as needed once implementation detail
 - [x] Implement dry-run mode — `main.py scan` (always) / `main.py run` (config-driven) / `run --dry-run` (forced)
 - [x] Implement logging (per-file outcome + date source used) — `logs/organize_<timestamp>.log`
 - [x] Test on a small sample folder first — synthetic fixtures in `tests/make_sample_library.py`, covering EXIF/filename/filesystem/unsorted date sources, HEIC, exact-hash duplicate, filename collision, an already-correctly-placed file, and a loose file at dest root. All verified working, including a simulated copy-verification failure (source left untouched, no partial file left behind) and re-run idempotency (second run = pure no-op).
-- [ ] Run on full library, review log with user — **not done**, needs real source folders (see below)
-- [ ] **Checkpoint: confirm with user before this phase is marked done**
+- [ ] `pick-sources` must be additive across runs: if `config.yaml` already has `source_folders` entries, running it again should add to that list (skipping exact duplicates already present), not overwrite it. User expects to run this again later as more old-photo locations are found, and eventually as their ongoing one-folder "dump and process" workflow (see note below). Confirm this is already the behavior; fix if not.
+- [ ] Replace the current single-select folder dialog with true multi-select: use the `IFileOpenDialog` COM interface with `FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT` (via `comtypes` or `pywin32`) so the user can ctrl/shift-click multiple sibling folders in one dialog instead of looping one-at-a-time. If that hits real friction, fall back to a custom Tkinter checkbox/tree list of a chosen parent directory's subfolders — but try native multi-select first.
+- [ ] Whatever the picker mechanism ends up being, reopening it for another round should NOT default into the folder just added (forces the user to navigate back up and rescroll) — default the starting location to the PARENT of the last folder picked.
+- [ ] Run on full library, review log with user — **deferred, not blocking this session**. User wants the picker fixes and dashboard done first, to get comfortable with how the tool behaves, before committing to the real full-library run. Do not treat this as required to close out this session.
+- [ ] **Checkpoint: confirm with user before this phase is marked fully done** (picker fixes + dashboard can be confirmed as their own milestone even before the full run happens)
+
+## ACTIVE: Phase 1 — Desktop Dashboard (replaces raw CLI for day-to-day use)
+User wants a full simple desktop GUI rather than running CLI commands directly. Scope:
+- [ ] **Source folder management panel** — view current `source_folders` list, add folders (via the multi-select picker being fixed above), remove a folder from the list
+- [ ] **Dry-run button** — triggers the equivalent of `main.py scan`, displays results in the dashboard (counts by outcome: to-be-moved, already-sorted no-op, duplicates skipped, flagged-unsorted) rather than requiring the user to read raw console output
+- [ ] **Run button** — triggers the real copy-verify-delete pass (`main.py run`), with a confirmation step before starting since it's a destructive-on-source operation
+- [ ] **Progress indicator** — live status while a run is in progress (e.g. "1,204 / 35,000 processed"), not just a spinner, since full-library runs will take a while
+- [ ] **Log viewer** — shows the current/most recent run's log inside the dashboard (tail + scrollback), so the user isn't opening log files manually in a text editor
+- [ ] Framework choice: Tkinter is the natural fit (ships with Python, no extra install, matches the Windows-native picker work already in progress) — use it unless there's a strong reason not to; flag if choosing otherwise
+- [ ] This is a GUI wrapper around the existing CLI/library code, not a rewrite — `main.py`'s commands should remain usable directly too, in case the user wants to script something later
+- [ ] Test the full flow (add folders → dry-run → review → run → view log) end to end before reporting back
 
 ## Open questions for the active phase (surface these, don't guess)
-- Exact paths of the "other folders" scattered with photos — user wants to pick these interactively rather than list them now. Run `venv\Scripts\python main.py pick-sources` (opens a native folder-picker dialog, one folder per pick, asks "add another?") to populate `config.yaml`'s `source_folders`. Needs to be run at the physical machine (GUI dialog) — not something to drive remotely/headlessly.
+- Exact paths of the "other folders" scattered with photos — user wants to pick these interactively rather than list them now. Run `python main.py pick-sources` (opens a native folder-picker dialog, one folder per pick, asks "add another?") to populate `config.yaml`'s `source_folders`. Needs to be run at the physical machine (GUI dialog) — not something to drive remotely/headlessly.
 - Real small-sample and full-library run + log review with the user — blocked on the above.
 
 ## Confirmed for the active phase
@@ -36,6 +50,7 @@ Check items off as completed. Add sub-tasks as needed once implementation detail
 - Image formats: JPG, PNG, HEIC (no RAW)
 - `E:\Pics` itself is a **mix** of already-organized (`YYYY/YYYY-MM`) and loose/unsorted files — not a clean slate. The tool always scans `dest_root` as an implicit source in addition to whatever's in `source_folders`, and recognizes files already sitting at their correct destination path (no-op, just a DB record — no copy/delete).
 - Duplicate handling: an exact-hash duplicate found under a *second* path is **skipped and left in place**, not deleted. Phase 1 does not clean up duplicate originals — only the copy-verify-delete of the first-seen instance is destructive, and only after verification. This was a judgment call (see session summary) — flag if you'd rather duplicates get cleaned up too once verified against the already-sorted copy.
+- Source folders don't need manual removal/pruning after they're fully processed: copy-verify-delete empties them of files as it goes, so a re-scan of an already-processed folder is just a fast no-op. This also means the user's intended long-term workflow — clear the historical backlog, then settle into one ongoing "dump new photos here" folder they periodically re-run the tool against — is already supported by the existing `source_folders` design once the list naturally narrows down to that one active folder. No special "steady-state mode" needs to be built.
 
 ---
 
