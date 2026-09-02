@@ -18,12 +18,49 @@ Then edit `config.yaml` (gitignored — machine-specific paths live here, never 
   ```bash
   venv\Scripts\python main.py pick-sources
   ```
-  This opens the native folder picker repeatedly (one folder per pick, asks
-  "add another?" each time) and writes your selections into `config.yaml`.
+  This opens the native Windows folder picker with **multi-select**
+  (ctrl/shift-click several sibling folders in one dialog), asks "pick
+  another batch?" between rounds, and writes your selections into
+  `config.yaml` — additively, on top of whatever's already there, never
+  overwriting it. Each dialog opens at the *parent* of the last folder you
+  picked, not inside it, so you don't have to navigate back up every round.
+  If the native dialog can't be created on this machine for some reason, it
+  falls back to the old single-folder-at-a-time picker automatically.
   `dest_root` (`E:\Pics`) is *always* scanned too, in addition to whatever you
   pick — it already has a mix of sorted and loose files, and this catches the
   loose ones without you having to list it separately.
 - `dry_run` — leave as `true` until you've reviewed a scan's output.
+
+## Desktop dashboard
+
+```bash
+venv\Scripts\python dashboard.py
+```
+
+A Tkinter GUI wrapper around the same code the CLI uses — it doesn't
+duplicate any scan/date-resolve/copy-verify-delete logic, it just calls into
+`src/organize.py`, `src/pick_sources.py`, `src/config.py`, etc. directly.
+
+- **Source folders** — see/add (native multi-select picker)/remove entries
+  in `source_folders`. Removing a folder here only forgets it as a scan
+  source; it never touches files in it.
+- **Dry Run (preview)** — same as `main.py scan`; results panel shows counts
+  by outcome (would-sort, would-flag-unsorted, already-in-place no-op,
+  duplicates skipped, errors).
+- **Run for real...** — same as `main.py run --execute`; asks for explicit
+  confirmation first (lists the source folders and dest, explains the
+  copy-verify-delete safety model) before touching any files.
+- **Cancel** — becomes active during a run; stops the run *between* files
+  (never mid-copy/verify), so a cancelled real run can't leave a partial
+  file behind. Already-processed files stay processed (hash-based
+  resumability), so a cancelled run is always safe to just re-run later.
+- **Progress** — live "N / total processed" bar while a run is going.
+- **Log viewer** — pick any `logs/organize_*.log` from the dropdown to
+  browse it, or leave "Auto-tail active run" checked to watch the current
+  run's log live. Same log files the CLI writes — no separate GUI-only log.
+
+`main.py`'s CLI commands keep working exactly as before; the dashboard is an
+additional front end, not a replacement.
 
 ## Usage
 

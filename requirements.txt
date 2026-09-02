@@ -5,3 +5,4 @@ Pillow>=10.4          # image handling + EXIF (JPEG/PNG)
 pillow-heif>=0.18      # registers HEIC/HEIF support with Pillow (Apple photos)
 PyYAML>=6.0            # config.yaml loading
 tqdm>=4.66              # progress bars for long scans/runs
+comtypes>=1.4           # native IFileOpenDialog multi-select folder picker (Windows-only)

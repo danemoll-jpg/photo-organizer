@@ -20,6 +20,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from tqdm import tqdm
 
@@ -33,19 +34,28 @@ from .scanner import scan_folders
 @dataclass
 class RunStats:
     scanned: int = 0
-    already_known: int = 0       # hash already in DB from a prior run -> skipped entirely
+    already_known: int = 0       # hash already in DB from a prior run -> skipped entirely (duplicate)
     already_in_place: int = 0     # correctly located already, DB record added, no file op
     sorted: int = 0                # copy-verify-delete succeeded, dated file
     unsorted: int = 0               # copy-verify-delete succeeded, routed to needs_review
     errors: int = 0                  # verify failed / copy failed / unexpected — source untouched
-    dry_run_planned: int = 0          # would-be actions under --dry-run, nothing touched
+    dry_run_already_in_place: int = 0  # [dry-run] would be a no-op, already correctly placed
+    dry_run_sorted: int = 0             # [dry-run] would be moved into YYYY/YYYY-MM
+    dry_run_unsorted: int = 0            # [dry-run] would be flagged into _unsorted/needs_review
+
+    @property
+    def dry_run_planned(self) -> int:
+        """Total planned actions under dry-run (back-compat combined count)."""
+        return self.dry_run_already_in_place + self.dry_run_sorted + self.dry_run_unsorted
 
     def summary(self) -> str:
         return (
             f"scanned={self.scanned} already_known={self.already_known} "
             f"already_in_place={self.already_in_place} sorted={self.sorted} "
             f"unsorted={self.unsorted} errors={self.errors} "
-            f"dry_run_planned={self.dry_run_planned}"
+            f"dry_run_planned={self.dry_run_planned} "
+            f"(would_sort={self.dry_run_sorted} would_flag_unsorted={self.dry_run_unsorted} "
+            f"would_noop_in_place={self.dry_run_already_in_place})"
         )
 
 
@@ -116,7 +126,7 @@ def _process_one(path: Path, cfg: Config, conn, logger: logging.Logger,
 
     if already_in_place:
         if cfg.dry_run:
-            stats.dry_run_planned += 1
+            stats.dry_run_already_in_place += 1
             logger.info(f"[DRY RUN] already in place, would record: {path} (date_source={source})")
             return
         stats.already_in_place += 1
@@ -129,8 +139,12 @@ def _process_one(path: Path, cfg: Config, conn, logger: logging.Logger,
     dest_path = dest_dir / dest_name
 
     if cfg.dry_run:
-        stats.dry_run_planned += 1
-        action = "flag as unsorted" if source == "unsorted" else "sort"
+        if source == "unsorted":
+            stats.dry_run_unsorted += 1
+            action = "flag as unsorted"
+        else:
+            stats.dry_run_sorted += 1
+            action = "sort"
         logger.info(f"[DRY RUN] would {action}: {path} -> {dest_path} (date_source={source})")
         return
 
@@ -203,7 +217,16 @@ def _record(conn, file_hash: str, current_path: Path, original_path: Path, filen
     })
 
 
-def run_phase1(cfg: Config, conn, logger: logging.Logger) -> RunStats:
+def run_phase1(cfg: Config, conn, logger: logging.Logger,
+                progress_cb: Callable[[int, int], None] | None = None,
+                stop_check: Callable[[], bool] | None = None) -> RunStats:
+    """Runs Phase 1 end to end. `progress_cb(scanned, total)` — if given —
+    is called after every file, so a caller (e.g. the dashboard) can drive a
+    live progress bar without duplicating this loop. `stop_check()` — if
+    given and it returns True — stops the run *between* files (never
+    mid-copy/verify), so a cancel can't leave a partial file behind; already
+    -processed files stay processed since resumability is by content hash.
+    The CLI leaves both as None and behaves exactly as before."""
     stats = RunStats()
     name_cache: dict[Path, set[str]] = {}
 
@@ -217,15 +240,21 @@ def run_phase1(cfg: Config, conn, logger: logging.Logger) -> RunStats:
     # behavior (and would rescan freshly-copied files this same run).
     logger.info("Scanning source folders...")
     files = list(scan_folders(roots, cfg.extensions_normalized))
-    logger.info(f"Found {len(files)} candidate files. Processing...")
+    total = len(files)
+    logger.info(f"Found {total} candidate files. Processing...")
 
     for path in tqdm(files, desc="Phase 1", unit="file"):
+        if stop_check is not None and stop_check():
+            logger.info(f"STOPPED by user request after {stats.scanned}/{total} files.")
+            break
         stats.scanned += 1
         try:
             _process_one(path, cfg, conn, logger, name_cache, stats)
         except Exception as e:  # keep the run alive for a single bad file
             stats.errors += 1
             logger.error(f"UNEXPECTED ERROR on {path}: {e!r}")
+        if progress_cb is not None:
+            progress_cb(stats.scanned, total)
 
     logger.info(f"RUN COMPLETE: {stats.summary()}")
     return stats

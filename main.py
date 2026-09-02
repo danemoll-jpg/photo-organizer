@@ -11,37 +11,11 @@
 from __future__ import annotations
 
 import argparse
-import logging
-import sys
-from datetime import datetime
-from pathlib import Path
 
 from src.config import load_config
 from src.db import connect, init_db
+from src.logging_setup import setup_logging
 from src.organize import run_phase1
-
-
-def setup_logging(log_dir: Path) -> logging.Logger:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = log_dir / f"organize_{timestamp}.log"
-
-    logger = logging.getLogger("photo_organizer")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
-    file_handler.setFormatter(fmt)
-    logger.addHandler(file_handler)
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(console_handler)
-
-    logger.info(f"Log file: {log_path}")
-    return logger
 
 
 def cmd_init_db(args) -> None:
@@ -90,7 +64,7 @@ def _do_run(force_dry_run: bool, force_execute: bool, skip_confirm: bool) -> Non
             return
 
     init_db(cfg.db_path_abs)  # safe/idempotent — CREATE TABLE IF NOT EXISTS
-    logger = setup_logging(cfg.log_dir_abs)
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
     logger.info(f"Starting Phase 1 run — dry_run={dry_run}")
 
     cfg.dry_run = dry_run  # CLI flags (if any) take precedence over the config.yaml value
