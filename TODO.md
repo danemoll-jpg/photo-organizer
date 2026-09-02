@@ -7,30 +7,35 @@ Check items off as completed. Add sub-tasks as needed once implementation detail
 ---
 
 ## ACTIVE: Phase 0 — Setup
-- [ ] Confirm image formats present in the actual photo library (jpg, heic, png, RAW variants?) with the user
-- [ ] Confirm source folder(s) and desired destination root path
-- [ ] Set up project structure, config file format, and dependency management (venv/requirements)
-- [ ] Verify GPU/CUDA is usable from Python on this machine (needed later for Phase 3 — worth confirming early)
-- [ ] Design SQLite schema (photos, tags, faces, people tables) keyed by file hash — full schema now, even though only `photos` is populated this early, so later phases don't require migrations
+- [x] Confirm image formats present in the actual photo library — JPG + PNG + HEIC (no RAW)
+- [x] Confirm desired destination root path — `E:\Pics` (already known before this session)
+- [ ] Confirm exact source folder(s) — not enumerated yet. User wants to pick them interactively rather than list them upfront; the mechanism exists (`main.py pick-sources`) but hasn't been run
+- [x] Set up project structure, config file format, and dependency management (venv/requirements) — see `README.md`
+- [x] Verify GPU/CUDA is usable from Python on this machine — `nvidia-smi` confirms driver + GTX 1660 Ti visible (WDDM driver, CUDA 13.3 runtime supported). Framework-level check (torch/onnxruntime `cuda.is_available()`) deferred to Phase 3 since the backend isn't chosen yet — not needed for Phase 1 (no GPU work here)
+- [x] Design SQLite schema (photos, tags, faces, people tables) keyed by file hash — see `schema.sql`, full schema created now
 
 ## ACTIVE: Phase 1 — Date-Based Folder Sort
-- [ ] Build file scanner (recursive, filters to supported image formats)
-- [ ] Implement date resolution chain: EXIF → filename pattern → filesystem date → flag as unsorted
-- [ ] Implement content-hash-based dedup/skip-if-already-processed
-- [ ] Implement copy-verify-delete: copy to destination, verify via hash comparison, delete source only after verification passes (leave source + log error if verification fails)
-- [ ] Implement collision handling (never overwrite)
-- [ ] Implement dry-run mode
-- [ ] Implement logging (per-file outcome + date source used)
-- [ ] Test on a small sample folder first
-- [ ] Run on full library, review log with user
+- [x] Build file scanner (recursive, filters to supported image formats) — `src/scanner.py`
+- [x] Implement date resolution chain: EXIF → filename pattern → filesystem date → flag as unsorted — `src/date_resolver.py`
+- [x] Implement content-hash-based dedup/skip-if-already-processed — `src/hashing.py` + `src/db.py` (sha256, PK)
+- [x] Implement copy-verify-delete: copy to destination, verify via hash comparison, delete source only after verification passes (leave source + log error if verification fails) — `src/organize.py`
+- [x] Implement collision handling (never overwrite) — hash-suffixed filename on collision, `src/organize.py::_pick_available_name`
+- [x] Implement dry-run mode — `main.py scan` (always) / `main.py run` (config-driven) / `run --dry-run` (forced)
+- [x] Implement logging (per-file outcome + date source used) — `logs/organize_<timestamp>.log`
+- [x] Test on a small sample folder first — synthetic fixtures in `tests/make_sample_library.py`, covering EXIF/filename/filesystem/unsorted date sources, HEIC, exact-hash duplicate, filename collision, an already-correctly-placed file, and a loose file at dest root. All verified working, including a simulated copy-verification failure (source left untouched, no partial file left behind) and re-run idempotency (second run = pure no-op).
+- [ ] Run on full library, review log with user — **not done**, needs real source folders (see below)
 - [ ] **Checkpoint: confirm with user before this phase is marked done**
 
 ## Open questions for the active phase (surface these, don't guess)
-- Exact photo file formats in the library
+- Exact paths of the "other folders" scattered with photos — user wants to pick these interactively rather than list them now. Run `venv\Scripts\python main.py pick-sources` (opens a native folder-picker dialog, one folder per pick, asks "add another?") to populate `config.yaml`'s `source_folders`. Needs to be run at the physical machine (GUI dialog) — not something to drive remotely/headlessly.
+- Real small-sample and full-library run + log review with the user — blocked on the above.
 
 ## Confirmed for the active phase
 - Destination root: `E:\Pics`
 - Folder structure: `E:\Pics\YYYY\YYYY-MM\` (year folder containing month subfolders, month subfolder named `YYYY-MM` — not a bare `MM`)
+- Image formats: JPG, PNG, HEIC (no RAW)
+- `E:\Pics` itself is a **mix** of already-organized (`YYYY/YYYY-MM`) and loose/unsorted files — not a clean slate. The tool always scans `dest_root` as an implicit source in addition to whatever's in `source_folders`, and recognizes files already sitting at their correct destination path (no-op, just a DB record — no copy/delete).
+- Duplicate handling: an exact-hash duplicate found under a *second* path is **skipped and left in place**, not deleted. Phase 1 does not clean up duplicate originals — only the copy-verify-delete of the first-seen instance is destructive, and only after verification. This was a judgment call (see session summary) — flag if you'd rather duplicates get cleaned up too once verified against the already-sorted copy.
 
 ---
 

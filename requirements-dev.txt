@@ -1,0 +1,4 @@
+# Dev-only dependencies — not needed to run the tool, only for
+# tests/make_sample_library.py (writes synthetic EXIF for test fixtures).
+-r requirements.txt
+piexif>=1.1.3

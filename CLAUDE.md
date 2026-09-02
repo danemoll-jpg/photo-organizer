@@ -8,7 +8,17 @@ A local tool to organize ~25 years of family photos (35k+ files, likely more now
 - Intel i7-9700 (8 cores / 8 threads)
 - NVIDIA GTX 1660 Ti, 6GB VRAM
 - 64GB RAM
-- GPU acceleration is available and should be used for Phase 3 (face detection/embedding). Confirm CUDA/driver setup works before writing GPU-dependent code — don't assume it's pre-configured.
+- Only Python 3.14 is installed (no other version via `py -0p`). It's new enough that GPU-framework wheels (torch, onnxruntime-gpu, insightface's deps) may lag — verify wheel availability for 3.14 early in whichever session picks the Phase 3 backend, don't assume it.
+- GPU acceleration is available and should be used for Phase 3 (face detection/embedding). Driver-level check confirmed working (`nvidia-smi` shows the GTX 1660 Ti, WDDM driver, CUDA 13.3 runtime supported) — done in the Phase 0/1 session. Framework-level check (e.g. `torch.cuda.is_available()` or onnxruntime-gpu's equivalent) is still needed once Phase 3 picks a library — don't assume driver-level success means the framework will see the GPU too.
+
+## Project state
+- Phase 0 and Phase 1 are built: venv + `requirements.txt`, `config.example.yaml`/`config.yaml`, `schema.sql` (full DB schema, all tables), and the Phase 1 CLI (`main.py` + `src/`). See `README.md` for setup/usage — don't re-derive commands from scratch, they're already documented there.
+- Phase 1 has been tested against synthetic fixtures only (`tests/make_sample_library.py`), not real photos yet. The real small-sample and full-library run + user log review are still outstanding — see TODO.md.
+
+## Library facts (confirmed)
+- Image formats actually in the library: **JPG, PNG, HEIC**. No RAW formats.
+- `E:\Pics` (the destination root) is not a clean slate — it already contains a **mix** of files sorted into `YYYY/YYYY-MM` and loose/unsorted files at the top level. Any phase that touches `E:\Pics` should expect this mix, not assume it's empty or uniformly organized.
+- The user's other source photos are scattered across folders/drives they haven't fully enumerated — they want to pick them interactively (folder picker) rather than list them upfront. Don't assume a fixed source-folder list; the Phase 1 tool supports adding to it incrementally via `main.py pick-sources`.
 
 ## Full spec
 See `photo-organizer-spec.md` in this project for the detailed phase-by-phase requirements. That file is the source of truth for scope. TODO.md tracks current status and next steps.

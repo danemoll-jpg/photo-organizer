@@ -1,0 +1,48 @@
+# Photo Organizer — Configuration
+#
+# Copy this file to config.yaml and edit for your machine.
+# config.yaml is gitignored (it holds machine-specific paths and stays local).
+#
+#   copy config.example.yaml config.yaml
+#
+# source_folders can also be populated interactively:
+#   venv\Scripts\python main.py pick-sources
+
+# --- Phase 1: Date-Based Folder Sort ---
+
+# Folders to scan for photos. E:\Pics (the destination root) is scanned too,
+# since it already has a mix of sorted and loose files — the tool recognizes
+# files already correctly placed and leaves them alone.
+source_folders: []
+
+# Destination root. Final layout is <dest_root>\YYYY\YYYY-MM\<filename>
+dest_root: "E:\\Pics"
+
+# Extensions to treat as photos (case-insensitive). Confirmed library formats:
+# JPG, PNG, HEIC.
+supported_extensions: [".jpg", ".jpeg", ".png", ".heic"]
+
+# Files with no usable date (no EXIF, no filename pattern, no filesystem date)
+# land here instead of being guessed at. Relative to dest_root.
+unsorted_subfolder: "_unsorted\\needs_review"
+
+# Safety default: true means no files are copied/moved/deleted, only logged
+# and previewed. Flip to false (or pass --run on the CLI) once a dry-run
+# looks correct.
+dry_run: true
+
+# Hash algorithm used for content-based dedup and copy verification.
+hash_algorithm: "sha256"
+
+# On a filename collision at the destination (different file, same name),
+# this many hex chars of the source file's hash are appended to the stem.
+collision_suffix_length: 8
+
+# --- Database / logging ---
+db_path: "data/photo_organizer.db"
+log_dir: "logs"
+
+# --- Phase 2/3 (reserved — not used by Phase 0/1) ---
+captioning_backend: "local"   # "local" | "claude_api"
+gpu_enabled: true
+batch_size: 500
