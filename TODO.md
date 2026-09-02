@@ -27,7 +27,10 @@ Check items off as completed. Add sub-tasks as needed once implementation detail
 
 ## Open questions for the active phase (surface these, don't guess)
 - Exact photo file formats in the library
-- Confirm source/destination paths
+
+## Confirmed for the active phase
+- Destination root: `E:\Pics`
+- Folder structure: `E:\Pics\YYYY\YYYY-MM\` (year folder containing month subfolders, month subfolder named `YYYY-MM` — not a bare `MM`)
 
 ---
 

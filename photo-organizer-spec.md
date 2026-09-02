@@ -16,7 +16,7 @@
   2. Filename pattern if it encodes a date (many phone/camera exports do, e.g. `IMG_20180304_...`)
   3. File system created/modified date (least reliable — flag these)
   4. If nothing usable: route to an `_unsorted/needs_review/` folder rather than guessing
-- Destination structure: `<dest_root>/YYYY/MM/`. Preserve original filename; on collision, append a short hash or counter — never silently overwrite.
+- Destination structure: `<dest_root>/YYYY/YYYY-MM/` (matches the user's existing convention — top-level year folder containing month subfolders named `YYYY-MM`, not just `MM`). Preserve original filename; on collision, append a short hash or counter — never silently overwrite.
 - **Copy-verify-delete workflow** (not a raw move): copy each file to its destination, verify the copy (hash comparison between source and destination), and only delete the source original after verification passes. If verification fails, leave the source untouched and log it as an error rather than deleting. This gets the end state the user wants (files relocated, not duplicated) without the risk of a plain move.
 - Dry-run mode: print/log the planned moves without touching files first.
 - Must be safely re-runnable: skip files already sorted (track by content hash, not just filename, since duplicates/re-exports are likely across 25 years and multiple devices).
