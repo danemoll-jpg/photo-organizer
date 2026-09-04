@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 
+from tqdm import tqdm
+
 from src.config import load_config
 from src.db import connect, init_db
 from src.logging_setup import setup_logging
@@ -69,11 +71,26 @@ def _do_run(force_dry_run: bool, force_execute: bool, skip_confirm: bool) -> Non
 
     cfg.dry_run = dry_run  # CLI flags (if any) take precedence over the config.yaml value
 
+    # CLI-only progress bar, driven by the same progress_cb the dashboard
+    # uses for its Tk bar — run_phase1 itself stays presentation-agnostic
+    # (it must not touch stdout/stderr directly: the dashboard runs under
+    # pythonw.exe, which has neither).
+    pbar: tqdm | None = None
+
+    def _progress_cb(done: int, total: int) -> None:
+        nonlocal pbar
+        if pbar is None:
+            pbar = tqdm(total=total, desc="Phase 1", unit="file")
+        pbar.n = done
+        pbar.refresh()
+
     conn = connect(cfg.db_path_abs)
     try:
-        stats = run_phase1(cfg, conn, logger)
+        stats = run_phase1(cfg, conn, logger, progress_cb=_progress_cb)
     finally:
         conn.close()
+        if pbar is not None:
+            pbar.close()
 
     print("\n--- Summary ---")
     print(stats.summary())

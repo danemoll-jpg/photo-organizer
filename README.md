@@ -37,6 +37,12 @@ Then edit `config.yaml` (gitignored — machine-specific paths live here, never 
 venv\Scripts\python dashboard.py
 ```
 
+Or just double-click **`Launch Dashboard.bat`** in this folder, or the
+**"Photo Organizer"** shortcut on the Desktop (created once via
+`New-Object -ComObject WScript.Shell` — see git history if you ever need to
+recreate it on another machine). Both launch `dashboard.py` with
+`pythonw.exe` — no console window.
+
 A Tkinter GUI wrapper around the same code the CLI uses — it doesn't
 duplicate any scan/date-resolve/copy-verify-delete logic, it just calls into
 `src/organize.py`, `src/pick_sources.py`, `src/config.py`, etc. directly.

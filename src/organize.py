@@ -22,8 +22,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from tqdm import tqdm
-
 from .config import Config
 from .date_resolver import resolve_date
 from .db import is_known_hash, upsert_photo
@@ -221,12 +219,14 @@ def run_phase1(cfg: Config, conn, logger: logging.Logger,
                 progress_cb: Callable[[int, int], None] | None = None,
                 stop_check: Callable[[], bool] | None = None) -> RunStats:
     """Runs Phase 1 end to end. `progress_cb(scanned, total)` — if given —
-    is called after every file, so a caller (e.g. the dashboard) can drive a
-    live progress bar without duplicating this loop. `stop_check()` — if
-    given and it returns True — stops the run *between* files (never
-    mid-copy/verify), so a cancel can't leave a partial file behind; already
-    -processed files stay processed since resumability is by content hash.
-    The CLI leaves both as None and behaves exactly as before."""
+    is called after every file, so a caller can drive its own progress
+    display (a tqdm bar for the CLI, a Tk progress bar for the dashboard)
+    without duplicating this loop or this module owning any particular
+    output stream — important since the dashboard runs under pythonw.exe,
+    which has no stdout/stderr to write to. `stop_check()` — if given and
+    it returns True — stops the run *between* files (never mid-copy/verify),
+    so a cancel can't leave a partial file behind; already-processed files
+    stay processed since resumability is by content hash."""
     stats = RunStats()
     name_cache: dict[Path, set[str]] = {}
 
@@ -243,7 +243,7 @@ def run_phase1(cfg: Config, conn, logger: logging.Logger,
     total = len(files)
     logger.info(f"Found {total} candidate files. Processing...")
 
-    for path in tqdm(files, desc="Phase 1", unit="file"):
+    for path in files:
         if stop_check is not None and stop_check():
             logger.info(f"STOPPED by user request after {stats.scanned}/{total} files.")
             break
