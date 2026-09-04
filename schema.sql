@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS photos (
     original_path       TEXT NOT NULL,            -- path where this file was first seen
     filename             TEXT NOT NULL,             -- final filename (post collision handling)
     file_size            INTEGER NOT NULL,           -- bytes
+    file_mtime           REAL,                        -- st_mtime at time of recording; NULL for pre-migration rows.
+                                                        -- Fast-path pre-check: path+size+mtime match => skip full
+                                                        -- hash on rescan. NULL/mismatch => fall back to full hash.
     date_taken            TEXT,                        -- resolved date, ISO 8601 (YYYY-MM-DD[THH:MM:SS])
     date_taken_year       INTEGER,                       -- denormalized for fast filtering
     date_taken_month      INTEGER,                        -- 1-12, denormalized
@@ -28,6 +31,13 @@ CREATE TABLE IF NOT EXISTS photos (
 
 CREATE INDEX IF NOT EXISTS idx_photos_date ON photos(date_taken_year, date_taken_month);
 CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
+-- Support the path+size+mtime fast-path pre-check (see organize.py) without
+-- a table scan: rescans look a file up by its current path first (covers
+-- dest_root re-scans and unmoved already-in-place files), falling back to
+-- original_path for the rare case a copy succeeded but the source delete
+-- didn't (see organize.py module docstring).
+CREATE INDEX IF NOT EXISTS idx_photos_current_path ON photos(current_path);
+CREATE INDEX IF NOT EXISTS idx_photos_original_path ON photos(original_path);
 
 -- Phase 2: tag vocabulary.
 CREATE TABLE IF NOT EXISTS tags (

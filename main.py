@@ -21,8 +21,12 @@ from src.organize import run_phase1
 
 
 def cmd_init_db(args) -> None:
+    import logging
     cfg = load_config()
-    init_db(cfg.db_path_abs)
+    logger = logging.getLogger("photo_organizer")
+    logger.addHandler(logging.StreamHandler())
+    logger.setLevel(logging.INFO)
+    init_db(cfg.db_path_abs, logger=logger)
     print(f"Database ready at {cfg.db_path_abs}")
 
 
@@ -65,8 +69,8 @@ def _do_run(force_dry_run: bool, force_execute: bool, skip_confirm: bool) -> Non
             print("Aborted. No files were touched.")
             return
 
-    init_db(cfg.db_path_abs)  # safe/idempotent — CREATE TABLE IF NOT EXISTS
     logger, _log_path = setup_logging(cfg.log_dir_abs)
+    init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent — CREATE TABLE IF NOT EXISTS + any pending migration
     logger.info(f"Starting Phase 1 run — dry_run={dry_run}")
 
     cfg.dry_run = dry_run  # CLI flags (if any) take precedence over the config.yaml value

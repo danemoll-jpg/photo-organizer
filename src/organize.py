@@ -24,7 +24,7 @@ from typing import Callable
 
 from .config import Config
 from .date_resolver import resolve_date
-from .db import is_known_hash, upsert_photo
+from .db import find_by_path, is_known_hash, upsert_photo
 from .hashing import hash_file
 from .scanner import scan_folders
 
@@ -33,6 +33,7 @@ from .scanner import scan_folders
 class RunStats:
     scanned: int = 0
     already_known: int = 0       # hash already in DB from a prior run -> skipped entirely (duplicate)
+    fast_path_hits: int = 0       # subset of already_known resolved via path+size+mtime, no hash computed
     already_in_place: int = 0     # correctly located already, DB record added, no file op
     sorted: int = 0                # copy-verify-delete succeeded, dated file
     unsorted: int = 0               # copy-verify-delete succeeded, routed to needs_review
@@ -49,6 +50,7 @@ class RunStats:
     def summary(self) -> str:
         return (
             f"scanned={self.scanned} already_known={self.already_known} "
+            f"(fast_path={self.fast_path_hits} full_hash_confirmed={self.already_known - self.fast_path_hits}) "
             f"already_in_place={self.already_in_place} sorted={self.sorted} "
             f"unsorted={self.unsorted} errors={self.errors} "
             f"dry_run_planned={self.dry_run_planned} "
@@ -95,6 +97,34 @@ def _cleanup_partial(tmp_path: Path, logger: logging.Logger) -> None:
 
 def _process_one(path: Path, cfg: Config, conn, logger: logging.Logger,
                   name_cache: dict[Path, set[str]], stats: RunStats) -> None:
+    # Fast-path pre-check: if this exact path was already recorded with the
+    # same size and mtime, it's overwhelmingly likely to be byte-identical
+    # to what a full hash would find anyway — skip re-reading its content.
+    # Any actual change (including one that happens to preserve size but
+    # not mtime, or vice versa) fails this check and falls through to the
+    # full hash below, which stays the ground truth. See db.find_by_path.
+    try:
+        st = path.stat()
+    except OSError as e:
+        stats.errors += 1
+        logger.error(f"ERROR statting {path}: {e}")
+        return
+
+    existing = find_by_path(conn, str(path))
+    if (
+        existing is not None
+        and existing["file_mtime"] is not None
+        and existing["file_size"] == st.st_size
+        and existing["file_mtime"] == st.st_mtime
+    ):
+        stats.already_known += 1
+        stats.fast_path_hits += 1
+        logger.info(
+            f"SKIP already-processed (fast path: path+size+mtime match, no hash) "
+            f"hash={existing['file_hash'][:12]} path={path}"
+        )
+        return
+
     try:
         file_hash = hash_file(path, cfg.hash_algorithm)
     except OSError as e:
@@ -196,15 +226,17 @@ def _record(conn, file_hash: str, current_path: Path, original_path: Path, filen
             dt, date_source: str, status: str, verified: int) -> None:
     from datetime import datetime
     try:
-        size = current_path.stat().st_size
+        st = current_path.stat()
+        size, mtime = st.st_size, st.st_mtime
     except OSError:
-        size = 0
+        size, mtime = 0, None
     upsert_photo(conn, {
         "file_hash": file_hash,
         "current_path": str(current_path),
         "original_path": str(original_path),
         "filename": filename,
         "file_size": size,
+        "file_mtime": mtime,
         "date_taken": dt.isoformat() if dt else None,
         "date_taken_year": dt.year if dt else None,
         "date_taken_month": dt.month if dt else None,

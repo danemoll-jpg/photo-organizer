@@ -257,9 +257,9 @@ class DashboardApp:
         try:
             cfg = load_config()
             cfg = replace(cfg, dry_run=dry_run)  # CLI flag equivalent of --dry-run/--execute
-            init_db(cfg.db_path_abs)
             logger, log_path = setup_logging(cfg.log_dir_abs, echo_to_console=False)
             self.msg_queue.put(("log_started", log_path))
+            init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent — CREATE TABLE IF NOT EXISTS + any pending migration
             logger.info(f"Starting Phase 1 run from dashboard — dry_run={dry_run}")
 
             conn = connect(cfg.db_path_abs)
@@ -315,7 +315,10 @@ class DashboardApp:
     @staticmethod
     def _format_stats(stats: RunStats, dry_run: bool, was_stopped: bool) -> str:
         lines = [f"Scanned: {stats.scanned:,}" + ("  (stopped early by user)" if was_stopped else "")]
-        lines.append(f"Duplicates skipped (hash already known): {stats.already_known:,}")
+        lines.append(
+            f"Duplicates skipped (hash already known): {stats.already_known:,} "
+            f"(fast path, no re-hash: {stats.fast_path_hits:,})"
+        )
         if dry_run:
             lines.append(f"Would stay in place (already correctly sorted): {stats.dry_run_already_in_place:,}")
             lines.append(f"Would be sorted into YYYY/YYYY-MM: {stats.dry_run_sorted:,}")
