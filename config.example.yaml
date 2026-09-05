@@ -22,6 +22,12 @@ dest_root: "E:\\Pics"
 # JPG, PNG, HEIC.
 supported_extensions: [".jpg", ".jpeg", ".png", ".heic"]
 
+# Phase 1b: extensions to treat as videos (case-insensitive). Scanned and
+# sorted through the same pipeline as photos, but dated via container
+# metadata (not EXIF) and routed into a Video subfolder within the month
+# folder: <dest_root>\YYYY\YYYY-MM\Video\ — never mixed with photo files.
+video_extensions: [".mp4", ".mov", ".avi"]
+
 # Files with no usable date (no EXIF, no filename pattern, no filesystem date)
 # land here instead of being guessed at. Relative to dest_root.
 unsorted_subfolder: "_unsorted\\needs_review"

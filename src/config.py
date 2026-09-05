@@ -28,6 +28,9 @@ class Config:
     captioning_backend: str = "local"
     gpu_enabled: bool = True
     batch_size: int = 500
+    # Phase 1b: video formats, scanned and sorted alongside photos but with
+    # their own date-resolution chain and destination subfolder (see organize.py).
+    video_extensions: list[str] = field(default_factory=lambda: [".mp4", ".mov", ".avi"])
 
     # --- derived, absolute paths ---
     @property
@@ -55,6 +58,17 @@ class Config:
     @property
     def extensions_normalized(self) -> set[str]:
         return {e.lower() if e.startswith(".") else f".{e.lower()}" for e in self.supported_extensions}
+
+    @property
+    def video_extensions_normalized(self) -> set[str]:
+        return {e.lower() if e.startswith(".") else f".{e.lower()}" for e in self.video_extensions}
+
+    @property
+    def all_extensions_normalized(self) -> set[str]:
+        """Photo + video extensions combined — what the scanner filters on.
+        Media-type dispatch (which date resolver, which dest subfolder) happens
+        per-file in organize.py via video_extensions_normalized, not here."""
+        return self.extensions_normalized | self.video_extensions_normalized
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -87,6 +101,7 @@ def load_config(path: Path | None = None) -> Config:
         captioning_backend=raw.get("captioning_backend", "local"),
         gpu_enabled=raw.get("gpu_enabled", True),
         batch_size=raw.get("batch_size", 500),
+        video_extensions=raw.get("video_extensions", [".mp4", ".mov", ".avi"]),
     )
 
 

@@ -207,7 +207,7 @@ class DashboardApp:
         dlg.resizable(False, False)
 
         msg = (
-            "About to COPY-VERIFY-DELETE photos from:\n"
+            "About to COPY-VERIFY-DELETE photos/videos from:\n"
             + "\n".join(f"  - {f}" for f in self.cfg.source_folders)
             + f"\n  - {self.cfg.dest_root}  (loose/misplaced files already there)\n\n"
             + f"into: {self.cfg.dest_root}\\YYYY\\YYYY-MM\\\n\n"

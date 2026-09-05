@@ -12,6 +12,15 @@ no copy, no delete, just a DB record so future runs don't re-check it.
 Exact-content duplicates found under a second, different path are SKIPPED
 (left in place, not deleted) once their hash is already known — Phase 1
 does not delete duplicate originals. See TODO.md / session summary.
+
+Phase 1b: video files (per cfg.video_extensions) are scanned and sorted
+alongside photos through this exact same pipeline — same hashing, copy-
+verify-delete, collision handling, and logging. The only two differences
+are (1) date resolution uses resolve_video_date's container-metadata-first
+chain instead of resolve_date's EXIF-first chain, and (2) a dated video's
+destination gets an extra 'Video' subfolder within its YYYY-MM month
+folder, so photos and videos never share a directory. See
+video_date_resolver.py.
 """
 from __future__ import annotations
 
@@ -27,6 +36,7 @@ from .date_resolver import resolve_date
 from .db import find_by_path, is_known_hash, upsert_photo
 from .hashing import hash_file
 from .scanner import scan_folders
+from .video_date_resolver import resolve_video_date
 
 
 @dataclass
@@ -137,11 +147,14 @@ def _process_one(path: Path, cfg: Config, conn, logger: logging.Logger,
         logger.info(f"SKIP already-processed hash={file_hash[:12]} path={path}")
         return
 
-    dt, source = resolve_date(path)
+    is_video = path.suffix.lower() in cfg.video_extensions_normalized
+    dt, source = resolve_video_date(path) if is_video else resolve_date(path)
     if source == "unsorted":
         dest_dir = cfg.unsorted_path
     else:
         dest_dir = cfg.dest_root_path / f"{dt.year:04d}" / f"{dt.year:04d}-{dt.month:02d}"
+        if is_video:
+            dest_dir = dest_dir / "Video"
 
     wanted_name = path.name
     candidate_dest = dest_dir / wanted_name
@@ -271,7 +284,7 @@ def run_phase1(cfg: Config, conn, logger: logging.Logger,
     # run — walking it lazily while mutating it has undefined iteration
     # behavior (and would rescan freshly-copied files this same run).
     logger.info("Scanning source folders...")
-    files = list(scan_folders(roots, cfg.extensions_normalized))
+    files = list(scan_folders(roots, cfg.all_extensions_normalized))
     total = len(files)
     logger.info(f"Found {total} candidate files. Processing...")
 

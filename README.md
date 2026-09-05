@@ -1,8 +1,9 @@
 # Photo Organizer
 
-Local tool to sort ~25 years of family photos into `E:\Pics\YYYY\YYYY-MM\`.
+Local tool to sort ~25 years of family photos (and, since Phase 1b, videos)
+into `E:\Pics\YYYY\YYYY-MM\`.
 See [`photo-organizer-spec.md`](photo-organizer-spec.md) for the full design and
-[`TODO.md`](TODO.md) for current phase status. This README covers Phase 0/1 setup and usage.
+[`TODO.md`](TODO.md) for current phase status. This README covers Phase 0/1/1b setup and usage.
 
 ## Setup (one-time)
 
@@ -97,6 +98,28 @@ Re-running is always safe: anything already recorded by hash is skipped.
 3. Filesystem date (earlier of modified/created time) — least reliable, still logged as such
 4. Nothing usable → routed to `<dest_root>\_unsorted\needs_review\` instead of guessed
 
+## Phase 1b — video files (MP4, MOV, AVI)
+
+Videos are scanned and sorted through the exact same pipeline as photos —
+same hashing/dedup, copy-verify-delete, collision handling, and logging.
+Two differences:
+
+- **Date resolution** uses the video's own container creation-date metadata
+  (read via [`hachoir`](https://hachoir.readthedocs.io/), no ffmpeg/MediaInfo
+  install required) as the first step, since videos don't carry EXIF. The
+  rest of the chain is identical to photos:
+  1. Container creation-date metadata (`date_source=container`)
+  2. Filename pattern (same patterns as photos — `VID_...`, `PXL_...`, etc.)
+  3. Filesystem date — least reliable, still logged as such
+  4. Nothing usable → `_unsorted\needs_review\`, same as photos
+- **Destination**: a dated video lands in `<dest_root>\YYYY\YYYY-MM\Video\`
+  — a subfolder within the month, so videos never mix with photos in the
+  same folder listing. (Unsorted videos land in the same
+  `_unsorted\needs_review\` folder as unsorted photos — no separate bucket.)
+
+Extensions are configured via `video_extensions` in `config.yaml`, the same
+way `supported_extensions` configures photo formats.
+
 ## Safety guarantees
 
 - **Copy-verify-delete**, never a raw move: a file is copied to its destination,
@@ -118,5 +141,11 @@ venv\Scripts\python tests\make_sample_library.py
 
 Builds a small synthetic library covering every date-resolution path, a
 duplicate, a filename collision, an already-correctly-placed file, and a HEIC
-file. Prints the `source_folders` / `dest_root` values to drop into
-`config.yaml` for a dry run against it.
+file — plus the video-side equivalents (filename-pattern/filesystem-date
+video, a video duplicate, a video collision, an already-correctly-placed
+video under `.../Video/`, and a loose video at dest's root). The one video
+path these fixtures deliberately don't cover is "container metadata found" —
+that needs a real MP4/MOV container to mean anything, so it's verified
+against real video files instead (see the Phase 1b session summary). Prints
+the `source_folders` / `dest_root` values to drop into `config.yaml` for a
+dry run against it.

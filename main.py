@@ -58,7 +58,7 @@ def _do_run(force_dry_run: bool, force_execute: bool, skip_confirm: bool) -> Non
         print("Run `python main.py pick-sources` to add more, or edit config.yaml directly.\n")
 
     if not dry_run and not skip_confirm:
-        print(f"About to COPY-VERIFY-DELETE photos from:")
+        print(f"About to COPY-VERIFY-DELETE photos/videos from:")
         for f in cfg.source_folders:
             print(f"  - {f}")
         print(f"  - {cfg.dest_root} (for loose/misplaced files already there)")

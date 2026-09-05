@@ -24,6 +24,24 @@
 
 **Out of scope for this phase:** any content analysis, dedup beyond exact-hash collisions.
 
+## Phase 1b — Video File Organization
+
+**Goal:** Extend Phase 1's date-based sort to also cover the video files (MP4, MOV, AVI) that were mixed into the same source folders all along but were never in scope for the original image-only scanner.
+
+**Requirements:**
+- Extend the scanner to also recognize MP4, MOV, AVI, configured via a `video_extensions` config key alongside Phase 1's `supported_extensions`.
+- Destination: `<dest_root>/YYYY/YYYY-MM/Video/` — same year/month resolution as photos, routed into a `Video` subfolder within the month folder so videos never mix with photos in the same directory listing. Unsorted videos share the same `_unsorted/needs_review/` folder as unsorted photos — no separate bucket.
+- Date resolution needs its own chain, since videos don't carry EXIF:
+  1. Video container creation-date metadata (its EXIF equivalent)
+  2. Filename pattern (reuse the same patterns as photos — `IMG_`/`VID_`/`PXL_`-style, etc.)
+  3. File system created/modified date — least reliable, flag as such
+  4. Nothing usable → `_unsorted/needs_review/`, same as photos
+- Reuse Phase 1's copy-verify-delete, hashing/dedup, collision handling, and logging exactly as-is — these are already format-agnostic and must not be reimplemented for video.
+- Dashboard/CLI: same scan/dry-run/run flow as Phase 1, not a separate mode. A photo-vs-video breakdown in the results panel is a nice-to-have, not required.
+- Test against real video files where practical, not just synthetic fixtures, given Phase 1's precedent of synthetic-only testing missing real bugs.
+
+**Out of scope for this phase:** extending Phase 2 (captioning) or Phase 3 (face detection) to video — that's a different problem (frame selection) not being designed here; no placeholders for it.
+
 ## Phase 2 — Content Tagging / Description
 
 **Goal:** For each photo, produce a caption/tags and store them in a structured, DB-loadable format.

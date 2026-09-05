@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS photos (
     date_taken            TEXT,                        -- resolved date, ISO 8601 (YYYY-MM-DD[THH:MM:SS])
     date_taken_year       INTEGER,                       -- denormalized for fast filtering
     date_taken_month      INTEGER,                        -- 1-12, denormalized
-    date_source            TEXT NOT NULL,                   -- 'exif' | 'filename' | 'filesystem' | 'unsorted'
+    date_source            TEXT NOT NULL,                   -- 'exif' | 'container' | 'filename' | 'filesystem' | 'unsorted'
+                                                             -- ('container' = Phase 1b video container metadata, exif's video equivalent)
     status                  TEXT NOT NULL DEFAULT 'sorted',  -- 'sorted' | 'unsorted' | 'error'
     caption                  TEXT,                              -- Phase 2 output, NULL until then
     processed_at              TEXT NOT NULL,                     -- ISO timestamp, when Phase 1 recorded this row

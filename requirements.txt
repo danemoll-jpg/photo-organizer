@@ -1,4 +1,4 @@
-# Photo Organizer — Phase 0/1 dependencies
+# Photo Organizer — Phase 0/1/1b dependencies
 # Install into venv: python -m venv venv && venv\Scripts\pip install -r requirements.txt
 
 Pillow>=10.4          # image handling + EXIF (JPEG/PNG)
@@ -6,3 +6,4 @@ pillow-heif>=0.18      # registers HEIC/HEIF support with Pillow (Apple photos)
 PyYAML>=6.0            # config.yaml loading
 tqdm>=4.66              # progress bars for long scans/runs
 comtypes>=1.4           # native IFileOpenDialog multi-select folder picker (Windows-only)
+hachoir>=3.3            # Phase 1b: video container creation-date metadata (MP4/MOV/AVI) — pure Python, no ffmpeg/MediaInfo binary needed
