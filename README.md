@@ -244,9 +244,12 @@ tailed for reading. Nothing here edits captions/tags, and it never runs
 organize/caption/extract-gps itself.
 
 - **Grid/browse view**: paginated (cursor-based, not `OFFSET` — stays fast
-  no matter how deep you page into 100k+ rows), with date-range and folder
-  filters. A photo not yet captioned shows clearly as "Not yet captioned",
-  never as an error.
+  no matter how deep you page into 100k+ rows), with date-range, folder,
+  tag, caption-keyword, and GPS/location filters (place-name substring, or
+  a has/no-location toggle). Every filter applies to the viewer/slideshow
+  below too, not just the grid — a tag-filtered slideshow only shows
+  matching photos. A photo not yet captioned shows clearly as "Not yet
+  captioned", never as an error.
 - **Viewer/slideshow mode**: click any photo to open it full-size with its
   path, date, caption, tags, and location alongside. Forward/Back step one
   at a time; Play starts an auto-advance slideshow at a fully configurable
@@ -255,12 +258,23 @@ organize/caption/extract-gps itself.
   last photo on a page — or just letting the slideshow run — transparently
   keeps going into the next page's photos; there's no page-boundary
   dead-end.
-- **People/faces**: a reserved section is always present, showing a
-  "Phase 3 not built yet" placeholder — so this tool won't need a UI
-  rebuild once face detection lands, only that field needing real data.
+- **Random navigation**: a **Random** button jumps to a random photo within
+  the currently active filters (a one-off "surprise me", separate from
+  slideshow order below). The slideshow's **Order** control toggles between
+  Chronological (the default above) and Random — switching to Random (or
+  changing filters while it's selected) mints a fresh shuffle, so Play and
+  manual Next/Prev step through a genuinely random, repeat-free sequence of
+  the current filtered set rather than the same order every time.
+- **People/faces**: a reserved section (and matching filter control) is
+  always present, showing a "Phase 3 not built yet"/"Not available yet"
+  placeholder — so this tool won't need a UI rebuild once face detection
+  lands, only that field/filter needing to go live.
 - **Live captions**: `captions.jsonl` is tailed incrementally on every
   request, so newly-captioned photos from the in-progress background run
-  show up without restarting this tool.
+  show up without restarting this tool — including for the tag/caption
+  filters above, which read this same live cache rather than the DB's
+  `caption`/`tags` columns (those only reflect the last `load-captions`
+  run).
 - Video files are excluded from every view here — Phase 2 never captions
   video by design, so showing them would mean a permanent, misleading
   "not yet captioned" that will never resolve.
@@ -388,3 +402,17 @@ an error), and the live `captions.jsonl` tail correctly picking up a
 newly-appended line — as well as tolerating a corrupt/incomplete trailing
 one — without restarting the tool. No Ollama/GPU dependency, unlike the
 Phase 2 pipeline test above.
+
+```bash
+venv\Scripts\python tests\test_phase2c.py
+```
+
+Covers Phase 2c's viewer v2 additions: the new tag/caption-keyword/GPS-
+location filters individually, the inert people/faces filter confirmed
+truly ignored server-side, `/api/random` and `/api/nav?mode=random`
+respecting active filters, and — the case most likely to hide a subtle bug
+— filter+random *combinations*: a full random-order permutation visiting
+every matching photo exactly once with no repeats (both the no-filter
+Feistel-permutation path and the tag-filtered cached-shuffle path), correct
+`null` handling past the end of a shuffled sequence, and same-seed
+reproducibility. No Ollama/GPU dependency.

@@ -75,6 +75,7 @@ body {
   font-size: 13px;
 }
 .filters button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+.filters select:disabled { opacity: 0.55; cursor: not-allowed; }
 .filters-hint { color: var(--muted); font-size: 12px; margin-left: auto; }
 .filters-hint code { background: var(--badge-bg); padding: 1px 4px; border-radius: 3px; }
 
@@ -204,6 +205,8 @@ body {
 }
 .viewer-controls button.play { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
 .viewer-controls button.play.playing { background: var(--danger); border-color: var(--danger); }
+.order-label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-left: 12px; }
+.order-label select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--text); font-size: 13px; }
 .interval-label { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .interval-label input { width: 60px; padding: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--text); }
 
@@ -211,4 +214,5 @@ body {
   .viewer-panel { grid-template-columns: 1fr; grid-template-rows: 1fr auto auto; }
   .viewer-details { grid-column: 1; grid-row: 2; border-left: none; border-top: 1px solid var(--border); padding-top: 16px; }
   .viewer-controls { grid-column: 1; grid-row: 3; flex-wrap: wrap; }
+  .order-label { margin-left: 0; }
 }

@@ -16,6 +16,21 @@
   <label>From <input type="date" id="f-date-from"></label>
   <label>To <input type="date" id="f-date-to"></label>
   <label>Folder contains <input type="text" id="f-folder" placeholder="e.g. 2025-01 or katyas phone2"></label>
+  <label>Tag <input type="text" id="f-tag" placeholder="e.g. beach"></label>
+  <label>Caption contains <input type="text" id="f-caption-kw" placeholder="e.g. birthday cake"></label>
+  <label>Location <input type="text" id="f-location" placeholder="e.g. Woodstock, GA"></label>
+  <label>GPS
+    <select id="f-has-location">
+      <option value="">Any</option>
+      <option value="yes">Has location</option>
+      <option value="no">No location</option>
+    </select>
+  </label>
+  <label>People/Faces
+    <select id="f-people" disabled title="Face detection isn't built yet (Phase 3) — this filter will work once it is.">
+      <option>Not available yet</option>
+    </select>
+  </label>
   <button id="f-apply">Apply</button>
   <button id="f-reset" class="secondary">Reset</button>
   <span class="filters-hint">Path is relative to <code>{{ dest_root }}</code></span>
@@ -64,8 +79,15 @@
 
     <div class="viewer-controls">
       <button id="viewer-prev" title="Previous (&larr;)">&larr; Prev</button>
+      <button id="viewer-random" title="Jump to a random matching photo">&#128256; Random</button>
       <button id="viewer-playpause" class="play">&#9654; Play</button>
       <button id="viewer-next" title="Next (&rarr;)">Next &rarr;</button>
+      <label class="order-label">Order
+        <select id="viewer-order">
+          <option value="chronological" selected>Chronological</option>
+          <option value="random">Random</option>
+        </select>
+      </label>
       <label class="interval-label">Every
         <input type="number" id="viewer-interval" min="1" max="600" step="0.5" value="{{ slideshow_seconds }}">
         sec

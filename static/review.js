@@ -1,16 +1,31 @@
-/* Phase 2b review tool — front-end. Talks to review_tool.py's read-only
+/* Phase 2b/2c review tool — front-end. Talks to review_tool.py's read-only
  * JSON API. Two independent-but-filter-synced views:
  *   - grid: keyset-paginated browse (see /api/photos)
  *   - viewer: single-photo step navigation + auto-advance slideshow
  *     (see /api/nav) — cursor-based, so stepping past a grid page's last
  *     photo, or letting a slideshow run indefinitely, never hits a page
  *     boundary; each step is just "the next matching row after this path".
+ *
+ * Phase 2c additions:
+ *   - Filters: tag, caption keyword, GPS/location (+ a disabled, visibly
+ *     inert people/faces control — Phase 3 doesn't exist yet). Every
+ *     filter (old and new) is read by currentFilterParams() and sent to
+ *     every endpoint the grid AND the viewer use, so a filtered slideshow
+ *     only ever shows matching photos, same as the grid.
+ *   - Viewer "Random" button (one-off jump, /api/random) — independent of...
+ *   - ...the viewer's order toggle (Chronological/Random), which governs
+ *     manual Prev/Next and auto-advance while active. Random order uses
+ *     /api/nav?mode=random&seed=&idx= — see stepRandomNav below — which
+ *     gives a repeat-free pseudo-random sequence over the CURRENT filtered
+ *     set without ever fetching/shuffling it client-side. A fresh seed is
+ *     minted whenever order is switched to Random (or filters change while
+ *     it's active), matching "fresh shuffle every time it starts".
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
 
   const state = {
-    filters: { date_from: "", date_to: "", folder: "" },
+    filters: { date_from: "", date_to: "", folder: "", tag: "", caption_kw: "", location: "", has_location: "" },
     pageSize: cfg.pageSize,
     grid: { items: [], firstCursor: null, lastCursor: null, hasNext: false, hasPrev: false, pageNum: 1 },
     viewer: {
@@ -19,6 +34,9 @@
       playing: false,
       intervalMs: Math.max(1, cfg.slideshowSeconds) * 1000,
       timer: null,
+      order: "chronological",  // Phase 2c: "chronological" | "random"
+      randomSeed: null,        // minted fresh whenever random order (re)starts
+      randomIdx: 0,
     },
   };
 
@@ -41,6 +59,8 @@
   const viewerLocation = el("viewer-location");
   const viewerPlayPause = el("viewer-playpause");
   const viewerInterval = el("viewer-interval");
+  const viewerRandomBtn = el("viewer-random");
+  const viewerOrderSelect = el("viewer-order");
 
   // ---- persisted slideshow interval (per-browser convenience only) ----
   try {
@@ -63,7 +83,25 @@
   }
 
   function currentFilterParams() {
-    return { date_from: state.filters.date_from, date_to: state.filters.date_to, folder: state.filters.folder };
+    // Note: no "people" param — the people/faces filter is deliberately
+    // inert (disabled control, Phase 3 doesn't exist yet) and never sent.
+    return {
+      date_from: state.filters.date_from,
+      date_to: state.filters.date_to,
+      folder: state.filters.folder,
+      tag: state.filters.tag,
+      caption_kw: state.filters.caption_kw,
+      location: state.filters.location,
+      has_location: state.filters.has_location,
+    };
+  }
+
+  // Random 31-bit int as a string — used to seed a fresh random-order
+  // permutation server-side (see review_tool.py's _feistel_permute /
+  // _random_order_for). Doesn't need to be cryptographically random, just
+  // different each time random order (re)starts.
+  function mintSeed() {
+    return String((Math.random() * 0x7fffffff) | 0);
   }
 
   async function fetchJSON(url) {
@@ -160,15 +198,31 @@
     state.filters.date_from = el("f-date-from").value;
     state.filters.date_to = el("f-date-to").value;
     state.filters.folder = el("f-folder").value.trim();
+    state.filters.tag = el("f-tag").value.trim();
+    state.filters.caption_kw = el("f-caption-kw").value.trim();
+    state.filters.location = el("f-location").value.trim();
+    state.filters.has_location = el("f-has-location").value;
     loadGridPage({ resetPageNum: true });
     refreshStats();
+    // The filtered set just changed size/membership -- any in-progress
+    // random-order slideshow's seed/idx no longer means anything
+    // meaningful against it, so start it fresh (matches "fresh shuffle
+    // every time it starts" -- a filter change is effectively a restart).
+    if (state.viewer.open && state.viewer.order === "random") startRandomOrder();
+    else { state.viewer.randomSeed = null; state.viewer.randomIdx = 0; }
   }
   el("f-apply").addEventListener("click", applyFilters);
-  el("f-folder").addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+  for (const id of ["f-folder", "f-tag", "f-caption-kw", "f-location"]) {
+    el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
+  }
   el("f-reset").addEventListener("click", () => {
     el("f-date-from").value = "";
     el("f-date-to").value = "";
     el("f-folder").value = "";
+    el("f-tag").value = "";
+    el("f-caption-kw").value = "";
+    el("f-location").value = "";
+    el("f-has-location").value = "";
     applyFilters();
   });
 
@@ -200,6 +254,14 @@
   function openViewer(item) {
     state.viewer.open = true;
     viewerEl.hidden = false;
+    // A fresh grid click is a deliberate jump to *this* photo -- always
+    // show it, regardless of the sticky order-mode preference. Reset the
+    // random walk so the next Next/Play under random order starts a new
+    // shuffle from idx 0 rather than resuming mid-walk from wherever a
+    // previous viewer session left off (which would land on an unrelated
+    // photo with no connection to the one just clicked).
+    state.viewer.randomSeed = null;
+    state.viewer.randomIdx = 0;
     renderViewerItem(item);
   }
 
@@ -212,9 +274,13 @@
   document.addEventListener("keydown", (e) => {
     if (!state.viewer.open) return;
     if (e.key === "Escape") closeViewer();
-    else if (e.key === "ArrowRight") stepViewer("next", { manual: true });
-    else if (e.key === "ArrowLeft") stepViewer("prev", { manual: true });
-    else if (e.key === " ") { e.preventDefault(); toggleSlideshow(); }
+    else if (e.key === "ArrowRight") {
+      if (state.viewer.order === "random") stepRandomNav("next", { manual: true });
+      else stepViewer("next", { manual: true });
+    } else if (e.key === "ArrowLeft") {
+      if (state.viewer.order === "random") stepRandomNav("prev", { manual: true });
+      else stepViewer("prev", { manual: true });
+    } else if (e.key === " ") { e.preventDefault(); toggleSlideshow(); }
   });
 
   async function stepViewer(dir, { manual = false } = {}) {
@@ -232,15 +298,88 @@
     renderViewerItem(data.item);
   }
 
-  el("viewer-next").addEventListener("click", () => stepViewer("next", { manual: true }));
-  el("viewer-prev").addEventListener("click", () => stepViewer("prev", { manual: true }));
+  // ---------------------------------------------------------------------
+  // Random navigation (Phase 2c)
+  // ---------------------------------------------------------------------
+
+  // One-off "surprise me" jump, independent of the order toggle below.
+  async function jumpRandom() {
+    pauseSlideshow();
+    const data = await fetchJSON(`/api/random?${qs(currentFilterParams())}`);
+    if (data.item === null) {
+      viewerNoMore.hidden = false;
+      viewerNoMore.textContent = "No photos match the current filters.";
+      return;
+    }
+    renderViewerItem(data.item);
+  }
+  viewerRandomBtn.addEventListener("click", jumpRandom);
+
+  // Fetches idx 0 of a brand-new random-order seed and shows it -- used
+  // both when the order toggle is switched to Random and when the active
+  // filters change while it's already selected (see applyFilters above).
+  async function startRandomOrder() {
+    state.viewer.randomSeed = mintSeed();
+    state.viewer.randomIdx = 0;
+    const params = { ...currentFilterParams(), mode: "random", seed: state.viewer.randomSeed, idx: 0 };
+    const data = await fetchJSON(`/api/nav?${qs(params)}`);
+    viewerNoMore.hidden = true;
+    if (data.item === null) {
+      viewerNoMore.hidden = false;
+      viewerNoMore.textContent = "No photos match the current filters.";
+      return;
+    }
+    renderViewerItem(data.item);
+  }
+
+  // Step the random-order sequence by +1/-1. Unlike stepViewer, "prev" is
+  // just idx-1 -- a pure function of the seed, so no server-side history
+  // is needed to step backward through the same shuffle.
+  async function stepRandomNav(dir, { manual = false } = {}) {
+    if (manual) pauseSlideshow();
+    if (state.viewer.randomSeed === null) return startRandomOrder();
+    state.viewer.randomIdx = dir === "next"
+      ? state.viewer.randomIdx + 1
+      : Math.max(0, state.viewer.randomIdx - 1);
+    const params = {
+      ...currentFilterParams(), mode: "random",
+      seed: state.viewer.randomSeed, idx: state.viewer.randomIdx,
+    };
+    const data = await fetchJSON(`/api/nav?${qs(params)}`);
+    if (data.item === null) {
+      viewerNoMore.hidden = false;
+      viewerNoMore.textContent = "Reached the end of the shuffled order — no more matching photos.";
+      pauseSlideshow();
+      return;
+    }
+    renderViewerItem(data.item);
+  }
+
+  viewerOrderSelect.addEventListener("change", (e) => {
+    state.viewer.order = e.target.value;
+    if (state.viewer.order === "random") startRandomOrder();
+  });
+
+  el("viewer-next").addEventListener("click", () => {
+    if (state.viewer.order === "random") stepRandomNav("next", { manual: true });
+    else stepViewer("next", { manual: true });
+  });
+  el("viewer-prev").addEventListener("click", () => {
+    if (state.viewer.order === "random") stepRandomNav("prev", { manual: true });
+    else stepViewer("prev", { manual: true });
+  });
+
+  function autoStep() {
+    if (state.viewer.order === "random") stepRandomNav("next");
+    else stepViewer("next");
+  }
 
   function startSlideshow() {
     state.viewer.playing = true;
     viewerPlayPause.textContent = "⏸ Pause";
     viewerPlayPause.classList.add("playing");
     clearInterval(state.viewer.timer);
-    state.viewer.timer = setInterval(() => stepViewer("next"), state.viewer.intervalMs);
+    state.viewer.timer = setInterval(autoStep, state.viewer.intervalMs);
   }
   function pauseSlideshow() {
     state.viewer.playing = false;
