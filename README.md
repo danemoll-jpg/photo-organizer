@@ -232,7 +232,22 @@ this machine):
    editing rows through Access while a run might be active risks a write
    conflict.
 5. `tags`/`faces`/`people` are also available to link the same way, but
-   stay empty until Phase 2's JSONL is loaded into the DB and Phase 3 runs.
+   `tags`/`photo_tags` stay empty until you load captions (below), and
+   `faces`/`people` stay empty until Phase 3 runs. Heads up:
+   `photo_tags.confidence` is also a REAL column — expect the same
+   `#Deleted` issue there if you link `photo_tags` directly.
+
+**Loading captions into the database:** Phase 2 only ever writes
+`captions.jsonl` (see above) — it doesn't touch the database. To make
+captions/tags show up in `photos`/`photos_access` (and thus in Access),
+run the loader:
+```bash
+venv\Scripts\python main.py load-captions
+```
+Fills in `photos.caption` and populates `tags`/`photo_tags` by matching
+`file_hash`. Safe to re-run any time as captioning progresses — it's a
+full, idempotent reload of whatever's currently in `captions.jsonl`, not
+an incremental one, so nothing to track between runs.
 
 ## Safety guarantees
 

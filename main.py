@@ -20,6 +20,7 @@ from tqdm import tqdm
 from src.caption import run_phase2
 from src.config import load_config
 from src.db import connect, init_db
+from src.load_captions import load_captions
 from src.logging_setup import setup_logging
 from src.organize import run_phase1
 
@@ -142,6 +143,19 @@ def cmd_caption(args) -> None:
     print(f"\nOutput: {cfg.captions_path_abs}")
 
 
+def cmd_load_captions(args) -> None:
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
+    init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent
+    conn = connect(cfg.db_path_abs)
+    try:
+        stats = load_captions(cfg.captions_path_abs, conn, logger)
+    finally:
+        conn.close()
+    print("\n--- Summary ---")
+    print(stats.summary())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -160,6 +174,8 @@ def main() -> None:
     caption_parser.add_argument("--limit", metavar="FOLDER",
                                  help="Caption only this one folder instead of the full dest_root tree (try a small batch first)")
     caption_parser.set_defaults(func=cmd_caption)
+
+    sub.add_parser("load-captions", help="Load data/captions.jsonl into the SQLite DB (photos.caption + tags)").set_defaults(func=cmd_load_captions)
 
     args = parser.parse_args()
     args.func(args)
