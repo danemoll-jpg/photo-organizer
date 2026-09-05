@@ -7,13 +7,17 @@
     venv\\Scripts\\python main.py run                # honors config.yaml's dry_run
     venv\\Scripts\\python main.py run --execute        # forces a real run (asks to confirm)
     venv\\Scripts\\python main.py run --dry-run          # forces a preview even if config says execute
+    venv\\Scripts\\python main.py caption                # Phase 2: caption already-organized photos via Ollama
+    venv\\Scripts\\python main.py caption --limit <folder>  # caption just one folder first
 """
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from tqdm import tqdm
 
+from src.caption import run_phase2
 from src.config import load_config
 from src.db import connect, init_db
 from src.logging_setup import setup_logging
@@ -103,8 +107,43 @@ def _do_run(force_dry_run: bool, force_execute: bool, skip_confirm: bool) -> Non
         print("Review the log above, then run with --execute to actually apply it.")
 
 
+def cmd_caption(args) -> None:
+    cfg = load_config()
+
+    if args.limit:
+        # --limit <folder>: scan just this one folder instead of dest_root's
+        # full tree -- lets a real run be tried against one small folder
+        # first, same "batched real runs, no new code needed" pattern as
+        # Phase 1 (see CLAUDE.md rule 8).
+        source_folders = [Path(args.limit)]
+    else:
+        source_folders = None  # defaults to cfg.dest_root_path inside run_phase2
+
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
+    logger.info(f"Starting Phase 2 (captioning) run — model={cfg.ollama_model}")
+
+    pbar: tqdm | None = None
+
+    def _progress_cb(done: int, total: int) -> None:
+        nonlocal pbar
+        if pbar is None:
+            pbar = tqdm(total=total, desc="Phase 2", unit="file")
+        pbar.n = done
+        pbar.refresh()
+
+    try:
+        stats = run_phase2(cfg, logger, progress_cb=_progress_cb, source_folders=source_folders)
+    finally:
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(stats.summary())
+    print(f"\nOutput: {cfg.captions_path_abs}")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1")
+    parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-db", help="Create the SQLite database and schema").set_defaults(func=cmd_init_db)
@@ -116,6 +155,11 @@ def main() -> None:
     run_parser.add_argument("--dry-run", action="store_true", help="Force a preview even if config.yaml has dry_run: false")
     run_parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt before a real run")
     run_parser.set_defaults(func=cmd_run)
+
+    caption_parser = sub.add_parser("caption", help="Run Phase 2 (captioning via local Ollama vision model)")
+    caption_parser.add_argument("--limit", metavar="FOLDER",
+                                 help="Caption only this one folder instead of the full dest_root tree (try a small batch first)")
+    caption_parser.set_defaults(func=cmd_caption)
 
     args = parser.parse_args()
     args.func(args)

@@ -7,3 +7,4 @@ PyYAML>=6.0            # config.yaml loading
 tqdm>=4.66              # progress bars for long scans/runs
 comtypes>=1.4           # native IFileOpenDialog multi-select folder picker (Windows-only)
 hachoir>=3.3            # Phase 1b: video container creation-date metadata (MP4/MOV/AVI) — pure Python, no ffmpeg/MediaInfo binary needed
+ollama>=0.6              # Phase 2: local vision-model captioning client (talks to the Ollama server over HTTP; server itself is a separate install, not this package)

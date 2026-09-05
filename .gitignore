@@ -39,3 +39,4 @@ Thumbs.db
 # --- Sample/test images if you keep a local test folder in-repo ---
 samples/
 test_images/
+phase2_sample/

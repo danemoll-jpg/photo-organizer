@@ -28,6 +28,14 @@ class Config:
     captioning_backend: str = "local"
     gpu_enabled: bool = True
     batch_size: int = 500
+    # Phase 2: local vision-model captioning via Ollama. Model name is
+    # config-driven (rule 4) specifically so switching qwen3-vl:2b <->
+    # minicpm-v4.6 (or anything else pulled locally) never needs a code
+    # change — see src/caption.py and CLAUDE.md's Phase 2 notes.
+    ollama_model: str = "qwen3-vl:2b"
+    ollama_host: str = "http://localhost:11434"
+    captions_path: str = "data/captions.jsonl"
+    caption_max_dimension: int = 1024
     # Phase 1b: video formats, scanned and sorted alongside photos but with
     # their own date-resolution chain and destination subfolder (see organize.py).
     video_extensions: list[str] = field(default_factory=lambda: [".mp4", ".mov", ".avi"])
@@ -44,6 +52,11 @@ class Config:
     @property
     def db_path_abs(self) -> Path:
         p = Path(self.db_path)
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def captions_path_abs(self) -> Path:
+        p = Path(self.captions_path)
         return p if p.is_absolute() else REPO_ROOT / p
 
     @property
@@ -102,6 +115,10 @@ def load_config(path: Path | None = None) -> Config:
         gpu_enabled=raw.get("gpu_enabled", True),
         batch_size=raw.get("batch_size", 500),
         video_extensions=raw.get("video_extensions", [".mp4", ".mov", ".avi"]),
+        ollama_model=raw.get("ollama_model", "qwen3-vl:2b"),
+        ollama_host=raw.get("ollama_host", "http://localhost:11434"),
+        captions_path=raw.get("captions_path", "data/captions.jsonl"),
+        caption_max_dimension=raw.get("caption_max_dimension", 1024),
     )
 
 

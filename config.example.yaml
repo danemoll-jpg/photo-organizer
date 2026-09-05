@@ -48,7 +48,33 @@ collision_suffix_length: 8
 db_path: "data/photo_organizer.db"
 log_dir: "logs"
 
-# --- Phase 2/3 (reserved — not used by Phase 0/1) ---
-captioning_backend: "local"   # "local" | "claude_api"
+# --- Phase 2: Content Tagging / Captioning ---
+
+# "local" is the only implemented backend (Ollama, below) — Claude API was
+# considered and explicitly decided against for this project after real
+# cost estimates at 100k+ scale (see CLAUDE.md); not built.
+captioning_backend: "local"
 gpu_enabled: true
+
+# How many captioned images between disk checkpoints (fsync) during a
+# Phase 2 run — bounds how much work an ungraceful crash could lose.
+# Also reused as Phase 1's batch-size knob (currently unused there).
 batch_size: 500
+
+# Ollama server + model. Must already be pulled (`ollama pull <name>`)
+# before running Phase 2 — see README.md. Swapping models (e.g. to
+# minicpm-v4.6 if qwen3-vl:2b's quality disappoints) is just this one
+# line, no code change.
+ollama_model: "qwen3-vl:2b"
+ollama_host: "http://localhost:11434"
+
+# Where Phase 2 appends its JSONL output (file_hash, path, caption, tags,
+# date_taken, model_used, processed_at, +file_size/file_mtime for the
+# resume fast-path). Loading this into the SQLite DB is a separate,
+# not-yet-built step.
+captions_path: "data/captions.jsonl"
+
+# Images are downscaled (longest edge) to this many pixels before being
+# sent to the model — full-size phone photos are far bigger than any
+# vision encoder actually looks at; keeps inference time/memory bounded.
+caption_max_dimension: 1024

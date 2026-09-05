@@ -40,6 +40,25 @@ CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
 CREATE INDEX IF NOT EXISTS idx_photos_current_path ON photos(current_path);
 CREATE INDEX IF NOT EXISTS idx_photos_original_path ON photos(original_path);
 
+-- Read-only view for the user's MS Access ODBC link (see README.md /
+-- CLAUDE.md's Data access notes — Access as an optional query front-end,
+-- for the user's own use). Access showed every row of the linked `photos`
+-- table as "#Deleted": the SQLite ODBC driver doesn't reliably report
+-- file_hash's PRIMARY KEY to Access as a usable unique row identifier, so
+-- Access falls back to matching a row by comparing every column's value —
+-- and file_mtime (REAL/floating point) doesn't round-trip byte-for-byte
+-- through ODBC, so that match silently fails on every row. Casting it to
+-- TEXT here sidesteps the float comparison entirely. Purely additive (a
+-- view, not a copy) and always live — link this instead of `photos`
+-- directly for Access browsing.
+CREATE VIEW IF NOT EXISTS photos_access AS
+SELECT
+    file_hash, current_path, original_path, filename, file_size,
+    date_taken, date_taken_year, date_taken_month, date_source,
+    status, caption, processed_at, phase1_verified,
+    CAST(file_mtime AS TEXT) AS file_mtime
+FROM photos;
+
 -- Phase 2: tag vocabulary.
 CREATE TABLE IF NOT EXISTS tags (
     tag_id      INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -120,6 +120,113 @@ Two differences:
 Extensions are configured via `video_extensions` in `config.yaml`, the same
 way `supported_extensions` configures photo formats.
 
+## Phase 2 — captioning (JPG/PNG/HEIC only, via Ollama)
+
+Captions and tags each already-organized photo using a local vision model
+served by [Ollama](https://ollama.com) — free, runs on the GTX 1660 Ti, no
+cloud API involved (that option was considered and explicitly decided
+against for this project; see `CLAUDE.md`). Video is out of scope for this
+phase (see `photo-organizer-spec.md`).
+
+**One-time setup:**
+```bash
+winget install Ollama.Ollama
+ollama pull qwen3-vl:2b
+```
+Ollama installs as a background service (starts automatically, listens on
+`http://localhost:11434`) — no need to run `ollama serve` manually.
+
+**Usage:**
+```bash
+# Caption everything under dest_root not already in captions.jsonl
+venv\Scripts\python main.py caption
+
+# Try one folder first before the full library
+venv\Scripts\python main.py caption --limit "E:\Pics\2024"
+```
+
+Output is appended to `data/captions.jsonl` (one JSON object per line:
+`file_hash`, `path`, `caption`, `tags`, `date_taken`, `model_used`,
+`processed_at`, plus `file_size`/`file_mtime` backing the resume fast-path
+below) — not loaded into the SQLite DB yet, that's a separate future step.
+
+- **Resumable by content hash**, same as Phase 1 — re-running only
+  captions files not already in `captions.jsonl`. A path+size+mtime
+  fast-path (same fix Phase 1 needed for its destination rescan, applied
+  here from the start) means an unchanged file is recognized without
+  being re-hashed.
+- **Checkpointed**: flushed to disk every `batch_size` (config, default
+  500) images captioned, so a crash loses at most that many.
+- **Read-only against your photos, append-only against the JSONL** — never
+  modifies, moves, or deletes an original file.
+- **Real throughput on this hardware: ~7-9 seconds/image** (`qwen3-vl:2b`).
+  At 100k+ files, budget roughly 8-9 days of continuous run time — this is
+  a multi-day background job, not something to expect to finish overnight.
+  Safe to run alongside Phase 1/1b (they never touch the GPU — no resource
+  contention), and safe to stop/resume any time (`Ctrl+C`, or the
+  dashboard's Cancel button once Phase 2 gets one).
+- Model is config-driven (`ollama_model` in `config.yaml`) — switching to
+  `minicpm-v4.6` (also pulled, see below) if `qwen3-vl:2b`'s quality
+  disappoints is a one-line change, no code edit needed.
+
+**Quality expectations:** a small (1-2B parameter) local model gives
+simple, functional captions/tags good enough for search and filtering
+(e.g. "a family gathered around a table" / tags: `people, indoor, dinner,
+table`) — not vivid, nuanced descriptions. On very low-detail or ambiguous
+images it can occasionally hallucinate specifics that aren't there; worth
+a skim of early output before trusting it at scale.
+
+## Viewing the database
+
+`data/photo_organizer.db` is a plain SQLite file — no server, no login.
+Options for looking inside it, easiest first:
+
+**Just ask** — if you're working with Claude Code, it can run read-only
+queries against it directly in chat any time.
+
+**DB Browser for SQLite** — free GUI, browse tables/run SQL without
+knowing SQL well:
+```bash
+winget install DBBrowserForSQLite.DBBrowserForSQLite
+```
+Open the app → **Open Database** → point it at `data\photo_organizer.db`.
+
+**Command line** — Python's `sqlite3` module needs no install:
+```bash
+venv\Scripts\python -c "import sqlite3; c=sqlite3.connect('data/photo_organizer.db'); [print(r) for r in c.execute('SELECT * FROM photos LIMIT 5')]"
+```
+
+**MS Access, via ODBC linked tables** (set up and confirmed working on
+this machine):
+1. Install the [SQLite ODBC Driver](http://www.ch-werner.de/sqliteodbc/)
+   — download `sqliteodbc_w64.exe` (64-bit, matches 64-bit Office/Access;
+   note the site serves it over plain HTTP, no HTTPS cert — it's still the
+   long-standing canonical source for this driver). Run the installer;
+   it needs admin/UAC approval.
+2. In Access: **External Data → New Data Source → From Other Sources →
+   ODBC Database → Link to the data source by creating a linked table.**
+3. In the ODBC picker: **Machine Data Source** tab → **New...** →
+   **System DSN** → **SQLite3 ODBC Driver**. Name the DSN (e.g.
+   `PhotoOrganizer`) and browse to `data\photo_organizer.db`.
+4. Pick that DSN, then link **`photos_access`** — **not** the raw
+   `photos` table.
+
+   Why: linking `photos` directly shows every row as `#Deleted` in
+   Access. The SQLite ODBC driver doesn't reliably expose `photos`'
+   `file_hash` PRIMARY KEY to Access as a usable row identifier, so Access
+   falls back to matching a row by comparing every column's value — and
+   `file_mtime` (a floating-point column) doesn't round-trip byte-for-byte
+   through ODBC, so that comparison silently fails on every row.
+   `photos_access` (defined in `schema.sql`) is the same data with
+   `file_mtime` cast to text, which sidesteps the problem. It's a live
+   view (always current, not a snapshot) — just presented as read-only in
+   Access, which is also the recommended way to treat this link generally:
+   `photo_organizer.db` gets written to by every real Phase 1/1b/2 run, so
+   editing rows through Access while a run might be active risks a write
+   conflict.
+5. `tags`/`faces`/`people` are also available to link the same way, but
+   stay empty until Phase 2's JSONL is loaded into the DB and Phase 3 runs.
+
 ## Safety guarantees
 
 - **Copy-verify-delete**, never a raw move: a file is copied to its destination,
@@ -149,3 +256,16 @@ that needs a real MP4/MOV container to mean anything, so it's verified
 against real video files instead (see the Phase 1b session summary). Prints
 the `source_folders` / `dest_root` values to drop into `config.yaml` for a
 dry run against it.
+
+```bash
+venv\Scripts\python tests\test_phase2_pipeline.py [model_name]
+```
+
+Builds a small synthetic photo (+ one video, to confirm it's correctly
+skipped) library in an isolated temp dir and exercises Phase 2 end to end:
+first run captions everything with all required JSONL fields present, a
+second run is a pure no-op (resume fast-path), changing one file's content
+triggers exactly one new record, and a corrupted trailing JSONL line
+doesn't break resume. Requires Ollama running locally with the model
+already pulled — this hits the real model, not a mock, since captioning
+quality/behavior is the whole point of the phase.
