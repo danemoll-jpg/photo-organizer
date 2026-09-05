@@ -24,23 +24,27 @@
 
 **Out of scope for this phase:** any content analysis, dedup beyond exact-hash collisions.
 
-## Phase 1b — Video File Organization
+## Phase 1b — Video File Organization (added after initial Phase 1 rollout)
 
-**Goal:** Extend Phase 1's date-based sort to also cover the video files (MP4, MOV, AVI) that were mixed into the same source folders all along but were never in scope for the original image-only scanner.
+**Context:** Photos are already organized via Phase 1. Video files (MP4, MOV, AVI) were mixed in with the photo library the whole time and were never in scope for the original scanner (image-formats-only). This adds video files to the same organizing pass, without extending content analysis (Phase 2/3) to them.
+
+**Goal:** Move/copy every video file into the same `YYYY/YYYY-MM/` structure Phase 1 already uses, but into a `Video` subfolder within each month folder, keeping them separate from photos.
 
 **Requirements:**
-- Extend the scanner to also recognize MP4, MOV, AVI, configured via a `video_extensions` config key alongside Phase 1's `supported_extensions`.
-- Destination: `<dest_root>/YYYY/YYYY-MM/Video/` — same year/month resolution as photos, routed into a `Video` subfolder within the month folder so videos never mix with photos in the same directory listing. Unsorted videos share the same `_unsorted/needs_review/` folder as unsorted photos — no separate bucket.
-- Date resolution needs its own chain, since videos don't carry EXIF:
-  1. Video container creation-date metadata (its EXIF equivalent)
-  2. Filename pattern (reuse the same patterns as photos — `IMG_`/`VID_`/`PXL_`-style, etc.)
+- Extend the scanner to also recognize MP4, MOV, and AVI (in addition to the existing JPG/PNG/HEIC image formats).
+- Destination structure for video: `<dest_root>/YYYY/YYYY-MM/Video/` — same year/month resolution as photos, just routed into a `Video` subfolder instead of directly into the month folder.
+- **Date resolution chain for video is NOT the same as EXIF** — video files carry creation dates in their own container metadata (e.g. QuickTime/MP4 "creation time" atom), which needs a different metadata reader (e.g. `hachoir`, `pymediainfo`, or `ffprobe` if available). The overall chain shape is the same as Phase 1's, just with a video-appropriate first step:
+  1. Video container creation-date metadata (format-appropriate — MP4/MOV vs AVI may need different readers)
+  2. Filename pattern (same logic as Phase 1, e.g. `VID_20180304_...`)
   3. File system created/modified date — least reliable, flag as such
-  4. Nothing usable → `_unsorted/needs_review/`, same as photos
-- Reuse Phase 1's copy-verify-delete, hashing/dedup, collision handling, and logging exactly as-is — these are already format-agnostic and must not be reimplemented for video.
-- Dashboard/CLI: same scan/dry-run/run flow as Phase 1, not a separate mode. A photo-vs-video breakdown in the results panel is a nice-to-have, not required.
-- Test against real video files where practical, not just synthetic fixtures, given Phase 1's precedent of synthetic-only testing missing real bugs.
+  4. If nothing usable: route to `_unsorted/needs_review/`, same as photos
+- Copy-verify-delete, hashing/dedup, collision handling, and logging all reuse the exact same logic Phase 1 already built for photos — these are format-agnostic and should NOT be reimplemented separately for video.
+- Dashboard and CLI should treat video as part of the same scan/dry-run/run flow, not a separate mode — same buttons, same log, same confirmation step. Results panel should be able to break down counts by photo vs. video if that's a natural, low-effort addition; not a hard requirement.
 
-**Out of scope for this phase:** extending Phase 2 (captioning) or Phase 3 (face detection) to video — that's a different problem (frame selection) not being designed here; no placeholders for it.
+**Explicitly out of scope:**
+- Phase 2 (content tagging/captioning) does NOT extend to video. Captioning a still photo and analyzing video content are different problems (which frame(s) to even examine), and this is not being designed or guessed at here.
+- Phase 3 (face detection/clustering) does NOT extend to video, for the same reason.
+- Both are open questions for a possible future phase, not something to build a placeholder for now.
 
 ## Phase 2 — Content Tagging / Description
 
@@ -98,3 +102,28 @@
 - Automatic duplicate/near-duplicate detection beyond exact hash match.
 - Editing/rotating/modifying original image files in any way.
 - Any cloud upload/storage — everything stays local.
+
+## Phase 2b — Review/Spot-Check Tool (new, added while Phase 2's full run is in progress)
+
+**Context:** Phase 2's full captioning run takes ~8-9 days. The user wants to spot-check progress periodically — see what's been captioned so far, browse photos with their captions/tags, and catch problems early rather than only discovering issues after the run finishes.
+
+**Goal:** A standalone local tool (opens in the browser, not a dashboard tab) for scrolling through the library and reviewing what's been captured, live, while Phase 2 is still running.
+
+**Requirements:**
+- Standalone, separate from `dashboard.py` — the user explicitly wants this as its own tool, not another dashboard panel.
+- Per-photo display: the image itself, its current file path (which folder/location it lives in post-organize), date taken, caption, tags, and GPS-derived location (see below).
+- **Must work against a partially-completed library.** Photos not yet captioned should display clearly as "not yet captioned" (or similar), not error out or be silently skipped. As Phase 2 continues running in the background, re-loading/refreshing the tool should surface newly-captioned photos without restarting anything.
+- **Placeholder space for people/faces (Phase 3), even though empty for now.** Phase 3 doesn't exist yet — this tool should have a reserved area/field for per-photo people/face info so it doesn't need a rebuild once Phase 3 lands, but it's fine (expected) for that area to show nothing / "not yet available" until then.
+- **Pagination/filtering required at this scale** — 100k+ photos means never loading everything into one page. Support browsing/paging, and at least basic filtering (by date range and/or folder) so the user can jump to a specific area of the library rather than only scrolling linearly.
+- **Photo viewer / slideshow mode.** Beyond just a browsable grid, the user wants to use this as an actual photo viewer: forward/back navigation buttons to step through photos one at a time, plus an auto-advance slideshow mode that changes photos automatically every few seconds. The interval must be fully configurable by the user (not a fixed hardcoded delay), with an obvious way to start/stop auto-advance and step manually at any time (manual navigation should pause auto-advance rather than fight with it). Navigation must work seamlessly across pagination boundaries — stepping "next" past the last photo on a page should transparently load the next page, not dead-end or require the user to manually re-paginate.
+- Data source: should read live from whatever's most current — likely a combination of the SQLite DB (path/date, populated by Phase 1/1b) and `captions.jsonl` (caption/tags, written incrementally by the in-progress Phase 2 run) rather than requiring the user to manually re-run the JSONL→SQLite loader every time they want to check progress.
+
+**New scope: GPS-based location extraction (not previously part of any phase).**
+- Extract GPS EXIF coordinates from photos where present (most modern phone photos; expect very sparse-to-absent coverage on older/pre-GPS-era photos, e.g. 2004-era digicam shots).
+- Convert raw coordinates to a human-readable place name via **offline/free reverse-geocoding** (no API key, no per-lookup cost, no internet dependency) — consistent with this project's existing local-only, free-tooling approach (Ollama for captioning, no cloud costs). A library-based offline solution (e.g. a city-level offline geocoding database) is preferred over a paid/online geocoding API.
+- Video GPS support is a genuine open question — whether the existing video metadata reader reliably exposes GPS data from MOV/MP4 containers is unconfirmed. Investigate, but don't let this block the rest of the tool; graceful "no location available" for video is an acceptable fallback if it doesn't pan out easily.
+- This needs a new DB field/column (or equivalent) to store extracted location data per photo, separate from the existing caption/tags fields.
+
+**Explicitly out of scope for this addition:**
+- Editing captions/tags from within this tool — read-only review, not an editing interface (not requested, don't build it unasked).
+- Any daughter-facing considerations — this is the user's own personal review tool, unrelated to Phase 4's Plex-integrated daughter search feature, even though both will eventually browse similar data.
