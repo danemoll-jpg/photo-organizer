@@ -59,6 +59,28 @@ SELECT
     CAST(file_mtime AS TEXT) AS file_mtime
 FROM photos;
 
+-- Read-only view for browsing captions/tags together in Access, one row
+-- per captioned photo (only photos with a caption -- the whole point is
+-- to see what Phase 2 has produced so far, not the 165k+ not-yet-
+-- captioned rows too). Tags are flattened into one comma-separated
+-- column rather than linking the tags/photo_tags join tables directly,
+-- for two reasons: (1) it's simpler to browse as a single flat table in
+-- Access, no manual join needed there, and (2) photo_tags.confidence is
+-- also a REAL column and would very likely hit the exact same #Deleted
+-- issue file_mtime did on photos -- sidestepped entirely by not linking
+-- that table directly. Purely additive (a view, not a copy) and always
+-- live. Link this instead of tags/photo_tags for Access browsing.
+CREATE VIEW IF NOT EXISTS captions_access AS
+SELECT
+    p.file_hash, p.filename, p.current_path,
+    p.date_taken, p.date_taken_year, p.date_taken_month,
+    p.caption,
+    (SELECT GROUP_CONCAT(t.tag_name, ', ')
+     FROM photo_tags pt JOIN tags t ON t.tag_id = pt.tag_id
+     WHERE pt.file_hash = p.file_hash) AS tags
+FROM photos p
+WHERE p.caption IS NOT NULL;
+
 -- Phase 2: tag vocabulary.
 CREATE TABLE IF NOT EXISTS tags (
     tag_id      INTEGER PRIMARY KEY AUTOINCREMENT,
