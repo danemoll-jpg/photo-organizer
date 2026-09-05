@@ -31,6 +31,13 @@ Panels:
 - Log viewer — tails the active Phase 1 run's log, or browse any older
   logs/*.log (including old Phase 2 runs, if you want to review one)
 
+Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
+body (see _make_collapsible()), so a section you're not using right now
+(e.g. Source folders, once already configured, or Phase 1's Run panel
+while doing Phase 2 work) can be tucked away to make room for whatever
+you actually want to look at, especially the Log viewer at the bottom
+(which expands to fill whatever vertical space is free).
+
 Note on _poll_queue / _tail_tick: both are perpetually-self-rescheduling
 Tk `after()` callbacks, so a single unhandled exception inside either one
 would silently stop ALL future progress/log updates for the rest of the
@@ -86,12 +93,48 @@ class DashboardApp:
         self.root.after(500, self._tail_tick)
 
     # ------------------------------------------------------------------ UI
+    def _make_collapsible(self, title: str, fill: str = "x", expand: bool = False,
+                           start_expanded: bool = True) -> ttk.Frame:
+        """Builds a section with a header (toggle triangle + title) and a
+        body frame the caller packs its real widgets into; returns the
+        body. Collapsing just pack_forget()s the body -- there's no
+        scrollable container to fight with, so other sections (especially
+        the Log viewer, which expands to fill whatever's left) simply
+        reclaim the freed vertical space through normal pack layout, no
+        extra bookkeeping needed."""
+        outer = ttk.Frame(self.root, relief="groove", borderwidth=1)
+        outer.pack(fill=fill, expand=expand, padx=8, pady=6)
+
+        header = ttk.Frame(outer)
+        header.pack(fill="x")
+        toggle_btn = ttk.Button(header, width=3)
+        toggle_btn.pack(side="left", padx=(2, 4), pady=2)
+        ttk.Label(header, text=title, font=("Segoe UI", 9, "bold")).pack(side="left", pady=2)
+
+        body = ttk.Frame(outer)
+        state = {"expanded": start_expanded}
+
+        def _apply() -> None:
+            if state["expanded"]:
+                body.pack(fill=fill, expand=expand, padx=0, pady=(0, 2))
+                toggle_btn.configure(text="▼")  # ▼
+            else:
+                body.pack_forget()
+                toggle_btn.configure(text="▶")  # ▶
+
+        def _toggle() -> None:
+            state["expanded"] = not state["expanded"]
+            _apply()
+
+        toggle_btn.configure(command=_toggle)
+        _apply()
+        return body
+
     def _build_ui(self) -> None:
-        pad = {"padx": 8, "pady": 6}
+        pad = {"padx": 6, "pady": 6}
 
         # --- Source folders panel ---
-        src_frame = ttk.LabelFrame(self.root, text="Source folders")
-        src_frame.pack(fill="x", **pad)
+        src_frame = self._make_collapsible("Source folders")
 
         list_row = ttk.Frame(src_frame)
         list_row.pack(fill="x", padx=6, pady=(6, 0))
@@ -109,8 +152,7 @@ class DashboardApp:
         self.dest_label.pack(side="right")
 
         # --- Actions panel ---
-        act_frame = ttk.LabelFrame(self.root, text="Run")
-        act_frame.pack(fill="x", **pad)
+        act_frame = self._make_collapsible("Run (Phase 1: photo/video organize)")
 
         act_btn_row = ttk.Frame(act_frame)
         act_btn_row.pack(fill="x", padx=6, pady=6)
@@ -132,8 +174,7 @@ class DashboardApp:
         self.results_text.pack(fill="x", padx=6, pady=(0, 6))
 
         # --- Phase 2: Captioning panel ---
-        cap_frame = ttk.LabelFrame(self.root, text="Phase 2 — Captioning (local Ollama vision model)")
-        cap_frame.pack(fill="x", **pad)
+        cap_frame = self._make_collapsible("Phase 2 — Captioning (local Ollama vision model)")
 
         cap_info_row = ttk.Frame(cap_frame)
         cap_info_row.pack(fill="x", padx=6, pady=(6, 0))
@@ -172,8 +213,7 @@ class DashboardApp:
         self.caption_log_text.configure(yscrollcommand=cap_log_scroll.set)
 
         # --- Log viewer panel ---
-        log_frame = ttk.LabelFrame(self.root, text="Log viewer")
-        log_frame.pack(fill="both", expand=True, **pad)
+        log_frame = self._make_collapsible("Log viewer", fill="both", expand=True)
 
         log_top = ttk.Frame(log_frame)
         log_top.pack(fill="x", padx=6, pady=(6, 0))
