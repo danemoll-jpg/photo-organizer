@@ -16,7 +16,28 @@ Panels:
 - Dry Run — safe preview, populates the results panel with counts by outcome
 - Run for real — copy-verify-delete, gated behind a confirmation dialog
 - Progress — live "N / total processed" while a run is active
-- Log viewer — tails the active run's log, or browse older logs/*.log
+- Phase 2: Captioning — runs src.caption.run_phase2 (same function
+  `main.py caption` calls) against the whole dest_root tree via Ollama.
+  Non-destructive (read-only against photos, append-only to
+  captions.jsonl), so no confirmation gate like Phase 1's — just an FYI
+  about expected duration. Independent of the Phase 1 panel above: both
+  can run at once (confirmed no GPU contention, see CLAUDE.md), each with
+  its own progress bar/worker thread, AND its own dedicated live log tail
+  right in its own panel — it does not share/hijack the Log viewer panel
+  below, which stays focused on Phase 1's (much bigger) logs and manual
+  browsing. Both panels' logs are still the exact same
+  logs/organize_<timestamp>.log files the CLI writes — no second logging
+  path, just two independent *views* onto that shared log directory.
+- Log viewer — tails the active Phase 1 run's log, or browse any older
+  logs/*.log (including old Phase 2 runs, if you want to review one)
+
+Note on _poll_queue / _tail_tick: both are perpetually-self-rescheduling
+Tk `after()` callbacks, so a single unhandled exception inside either one
+would silently stop ALL future progress/log updates for the rest of the
+session (worse under pythonw.exe, which has no console to even show a
+traceback — see CLAUDE.md's tqdm/hachoir silent-crash pattern). Each
+message/tail call is individually wrapped so one bad one can't take the
+whole loop down with it.
 """
 from __future__ import annotations
 
@@ -28,6 +49,7 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from src.caption import CaptionStats, run_phase2
 from src.config import CONFIG_PATH, EXAMPLE_CONFIG_PATH, Config, load_config, save_source_folders
 from src.db import connect, init_db
 from src.logging_setup import setup_logging
@@ -39,8 +61,8 @@ class DashboardApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Photo Organizer — Dashboard")
-        self.root.geometry("880x720")
-        self.root.minsize(700, 560)
+        self.root.geometry("880x900")
+        self.root.minsize(700, 640)
 
         self.cfg: Config | None = None
         self.worker: threading.Thread | None = None
@@ -49,6 +71,14 @@ class DashboardApp:
         self.current_log_path: Path | None = None
         self._log_read_pos = 0
         self._tailing = False
+
+        # Phase 2 (captioning) has its own independent worker/progress —
+        # safe to run at the same time as Phase 1 above (no GPU contention,
+        # see CLAUDE.md), so it doesn't share Phase 1's busy state.
+        self.caption_worker: threading.Thread | None = None
+        self.caption_stop_requested = False
+        self._caption_log_path: Path | None = None
+        self._caption_log_read_pos = 0
 
         self._build_ui()
         self.root.after(50, self._load_config_or_onboard)
@@ -101,6 +131,46 @@ class DashboardApp:
         self.results_text = tk.Text(act_frame, height=6, state="disabled", wrap="word")
         self.results_text.pack(fill="x", padx=6, pady=(0, 6))
 
+        # --- Phase 2: Captioning panel ---
+        cap_frame = ttk.LabelFrame(self.root, text="Phase 2 — Captioning (local Ollama vision model)")
+        cap_frame.pack(fill="x", **pad)
+
+        cap_info_row = ttk.Frame(cap_frame)
+        cap_info_row.pack(fill="x", padx=6, pady=(6, 0))
+        self.caption_model_label = ttk.Label(cap_info_row, text="model: (loading config...)")
+        self.caption_model_label.pack(side="left")
+
+        cap_btn_row = ttk.Frame(cap_frame)
+        cap_btn_row.pack(fill="x", padx=6, pady=6)
+        self.caption_btn = ttk.Button(cap_btn_row, text="Start Captioning", command=self._on_caption_start)
+        self.caption_btn.pack(side="left")
+        self.caption_cancel_btn = ttk.Button(cap_btn_row, text="Cancel", command=self._on_caption_cancel, state="disabled")
+        self.caption_cancel_btn.pack(side="left", padx=(6, 0))
+
+        cap_prog_row = ttk.Frame(cap_frame)
+        cap_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.caption_progress = ttk.Progressbar(cap_prog_row, mode="determinate")
+        self.caption_progress.pack(fill="x", side="left", expand=True)
+        self.caption_status_label = ttk.Label(cap_prog_row, text="Idle", width=28, anchor="e")
+        self.caption_status_label.pack(side="right", padx=(6, 0))
+
+        self.caption_results_text = tk.Text(cap_frame, height=5, state="disabled", wrap="word")
+        self.caption_results_text.pack(fill="x", padx=6, pady=(0, 6))
+
+        # Dedicated live log tail for Phase 2, separate from the shared Log
+        # viewer panel below (which stays focused on Phase 1's much bigger
+        # logs / manual browsing of any log). Always tails whichever log
+        # the current/most recent captioning run wrote to, independent of
+        # whatever the shared viewer's dropdown is pointed at.
+        ttk.Label(cap_frame, text="Live captioning log:").pack(anchor="w", padx=6)
+        cap_log_body = ttk.Frame(cap_frame)
+        cap_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.caption_log_text = tk.Text(cap_log_body, height=10, state="disabled", wrap="none")
+        self.caption_log_text.pack(side="left", fill="both", expand=True)
+        cap_log_scroll = ttk.Scrollbar(cap_log_body, orient="vertical", command=self.caption_log_text.yview)
+        cap_log_scroll.pack(side="right", fill="y")
+        self.caption_log_text.configure(yscrollcommand=cap_log_scroll.set)
+
         # --- Log viewer panel ---
         log_frame = ttk.LabelFrame(self.root, text="Log viewer")
         log_frame.pack(fill="both", expand=True, **pad)
@@ -144,6 +214,9 @@ class DashboardApp:
     def _reload_cfg(self) -> None:
         self.cfg = load_config()
         self.dest_label.configure(text=f"dest_root: {self.cfg.dest_root}  (always scanned too)")
+        self.caption_model_label.configure(
+            text=f"model: {self.cfg.ollama_model}  (via {self.cfg.ollama_host})  —  scans {self.cfg.dest_root} for JPG/PNG/HEIC"
+        )
         self._refresh_folder_list()
 
     def _refresh_folder_list(self) -> None:
@@ -276,23 +349,48 @@ class DashboardApp:
             self.msg_queue.put(("error", str(e)))
 
     def _poll_queue(self) -> None:
+        # Each message is handled inside its own try/except: one bad
+        # message (e.g. a widget update that throws) must never silently
+        # kill this polling loop for the rest of the session — that would
+        # freeze every future progress/log update with no visible error
+        # (worse under pythonw.exe, where there's no console to even show
+        # a traceback — same class of silent-failure risk as the
+        # tqdm/hachoir bugs in CLAUDE.md). Falls back to printing to stdout
+        # (a no-op, safely swallowed, under pythonw.exe) rather than
+        # letting `self.root.after(200, self._poll_queue)` below never run.
         try:
             while True:
                 msg = self.msg_queue.get_nowait()
-                kind = msg[0]
-                if kind == "log_started":
-                    log_path = msg[1]
-                    self._switch_to_log(log_path)
-                elif kind == "progress":
-                    _, done, total = msg
-                    self.progress.configure(maximum=max(total, 1), value=done)
-                    self.status_label.configure(text=f"{done:,} / {total:,} processed")
-                elif kind == "done":
-                    _, stats, dry_run, was_stopped = msg
-                    self._on_run_done(stats, dry_run, was_stopped)
-                elif kind == "error":
-                    _, err = msg
-                    self._on_run_error(err)
+                try:
+                    kind = msg[0]
+                    if kind == "log_started":
+                        log_path = msg[1]
+                        self._switch_to_log(log_path)
+                    elif kind == "progress":
+                        _, done, total = msg
+                        self.progress.configure(maximum=max(total, 1), value=done)
+                        self.status_label.configure(text=f"{done:,} / {total:,} processed")
+                    elif kind == "done":
+                        _, stats, dry_run, was_stopped = msg
+                        self._on_run_done(stats, dry_run, was_stopped)
+                    elif kind == "error":
+                        _, err = msg
+                        self._on_run_error(err)
+                    elif kind == "caption_log_started":
+                        log_path = msg[1]
+                        self._start_caption_log_tail(log_path)
+                    elif kind == "caption_progress":
+                        _, done, total = msg
+                        self.caption_progress.configure(maximum=max(total, 1), value=done)
+                        self.caption_status_label.configure(text=f"{done:,} / {total:,} processed")
+                    elif kind == "caption_done":
+                        _, stats, was_stopped = msg
+                        self._on_caption_done(stats, was_stopped)
+                    elif kind == "caption_error":
+                        _, err = msg
+                        self._on_caption_error(err)
+                except Exception:
+                    pass  # see docstring above -- never let one bad message stop future polling
         except queue.Empty:
             pass
         self.root.after(200, self._poll_queue)
@@ -336,6 +434,105 @@ class DashboardApp:
         self.results_text.insert("1.0", text)
         self.results_text.configure(state="disabled")
 
+    # ------------------------------------------------- Phase 2: captioning
+    def _caption_busy(self) -> bool:
+        return self.caption_worker is not None and self.caption_worker.is_alive()
+
+    def _on_caption_start(self) -> None:
+        if self._caption_busy():
+            return
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            f"About to caption every JPG/PNG/HEIC under {self.cfg.dest_root} not already in "
+            f"data/captions.jsonl, using Ollama model '{self.cfg.ollama_model}'.\n\n"
+            "This only reads photos and appends to captions.jsonl — it never modifies, "
+            "moves, or deletes any original file.\n\n"
+            "At ~7-9s/image, a 100k+ file library can take several days. Safe to Cancel "
+            "and resume any time — already-captioned files are skipped on the next run.\n\n"
+            "Start now?",
+        ):
+            return
+        self.caption_stop_requested = False
+        self.caption_progress.configure(value=0, maximum=1)
+        self.caption_status_label.configure(text="Starting...")
+        self._set_caption_results_text("")
+        self.caption_btn.configure(state="disabled")
+        self.caption_cancel_btn.configure(state="normal")
+
+        self.caption_worker = threading.Thread(target=self._caption_worker, daemon=True)
+        self.caption_worker.start()
+
+    def _on_caption_cancel(self) -> None:
+        self.caption_stop_requested = True
+        self.caption_status_label.configure(text="Stopping...")
+
+    def _caption_worker(self) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push messages through self.msg_queue for the main thread to apply.
+        try:
+            cfg = load_config()
+            logger, log_path = setup_logging(cfg.log_dir_abs, echo_to_console=False)
+            self.msg_queue.put(("caption_log_started", log_path))
+            logger.info(f"Starting Phase 2 (captioning) run from dashboard — model={cfg.ollama_model}")
+            stats = run_phase2(
+                cfg, logger,
+                progress_cb=lambda done, total: self.msg_queue.put(("caption_progress", done, total)),
+                stop_check=lambda: self.caption_stop_requested,
+            )
+            self.msg_queue.put(("caption_done", stats, self.caption_stop_requested))
+        except Exception as e:
+            self.msg_queue.put(("caption_error", str(e)))
+
+    def _on_caption_done(self, stats: CaptionStats, was_stopped: bool) -> None:
+        self.caption_btn.configure(state="normal")
+        self.caption_cancel_btn.configure(state="disabled")
+        self.caption_status_label.configure(text="Stopped early" if was_stopped else "Done")
+        lines = [f"Scanned: {stats.scanned:,}" + ("  (stopped early by user)" if was_stopped else "")]
+        lines.append(f"Already captioned (resumed, skipped): {stats.already_captioned:,}")
+        lines.append(f"Newly captioned this run: {stats.captioned:,}")
+        lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
+        self._set_caption_results_text("\n".join(lines))
+
+    def _on_caption_error(self, err: str) -> None:
+        self.caption_btn.configure(state="normal")
+        self.caption_cancel_btn.configure(state="disabled")
+        self.caption_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"Captioning failed: {err}")
+
+    def _set_caption_results_text(self, text: str) -> None:
+        self.caption_results_text.configure(state="normal")
+        self.caption_results_text.delete("1.0", "end")
+        self.caption_results_text.insert("1.0", text)
+        self.caption_results_text.configure(state="disabled")
+
+    def _start_caption_log_tail(self, log_path: Path) -> None:
+        self._caption_log_path = log_path
+        self._caption_log_read_pos = 0
+        self.caption_log_text.configure(state="normal")
+        self.caption_log_text.delete("1.0", "end")
+        self.caption_log_text.configure(state="disabled")
+        self._append_new_caption_log_lines()
+
+    def _append_new_caption_log_lines(self) -> None:
+        # Independent of the shared Log viewer panel's tailing state below —
+        # this always shows the current/most recent captioning run's own
+        # log, regardless of what that panel's dropdown is pointed at.
+        if self._caption_log_path is None or not self._caption_log_path.exists():
+            return
+        try:
+            with open(self._caption_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._caption_log_read_pos)
+                new_text = f.read()
+                self._caption_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.caption_log_text.configure(state="normal")
+        self.caption_log_text.insert("end", new_text)
+        self.caption_log_text.see("end")
+        self.caption_log_text.configure(state="disabled")
+
     # -------------------------------------------------------------- logs
     def _log_dir(self) -> Path:
         return self.cfg.log_dir_abs if self.cfg else Path("logs")
@@ -370,8 +567,18 @@ class DashboardApp:
         self._append_new_log_lines()
 
     def _tail_tick(self) -> None:
-        if self._tailing and self.autotail_var.get():
-            self._append_new_log_lines()
+        # Same reasoning as _poll_queue above: a failure in either tail
+        # must never skip the reschedule below, or live updates freeze
+        # silently for the rest of the session.
+        try:
+            if self._tailing and self.autotail_var.get():
+                self._append_new_log_lines()
+        except Exception:
+            pass
+        try:
+            self._append_new_caption_log_lines()  # Phase 2's own view, always live, no checkbox needed
+        except Exception:
+            pass
         self.root.after(500, self._tail_tick)
 
     def _append_new_log_lines(self) -> None:

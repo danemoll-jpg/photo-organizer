@@ -136,7 +136,7 @@ ollama pull qwen3-vl:2b
 Ollama installs as a background service (starts automatically, listens on
 `http://localhost:11434`) — no need to run `ollama serve` manually.
 
-**Usage:**
+**Usage — CLI:**
 ```bash
 # Caption everything under dest_root not already in captions.jsonl
 venv\Scripts\python main.py caption
@@ -144,6 +144,13 @@ venv\Scripts\python main.py caption
 # Try one folder first before the full library
 venv\Scripts\python main.py caption --limit "E:\Pics\2024"
 ```
+
+**Usage — dashboard:** open the **"Phase 2 — Captioning"** panel and click
+**Start Captioning**. Same underlying function as the CLI (`run_phase2()`),
+just without the `--limit` option — the dashboard always captions the
+whole `dest_root` tree. Has its own progress bar and Cancel button,
+independent of the Phase 1 panel above (safe to run both at once — see
+below).
 
 Output is appended to `data/captions.jsonl` (one JSON object per line:
 `file_hash`, `path`, `caption`, `tags`, `date_taken`, `model_used`,
