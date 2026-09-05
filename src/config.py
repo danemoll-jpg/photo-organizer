@@ -39,6 +39,17 @@ class Config:
     # Phase 1b: video formats, scanned and sorted alongside photos but with
     # their own date-resolution chain and destination subfolder (see organize.py).
     video_extensions: list[str] = field(default_factory=lambda: [".mp4", ".mov", ".avi"])
+    # Phase 2b: standalone review/spot-check tool (review_tool.py). Not part
+    # of the dashboard — see CLAUDE.md. All three are startup/UI defaults,
+    # not correctness-affecting, so they get their own defaults here rather
+    # than requiring the user's real config.yaml to be edited for this new
+    # tool to work out of the box (this session was told not to touch
+    # config.yaml — see TODO.md). review_slideshow_seconds is also always
+    # user-changeable live in the tool's UI, per spec ("must be fully
+    # configurable, not hardcoded") — this is just the initial value.
+    review_tool_port: int = 5151
+    review_page_size: int = 40
+    review_slideshow_seconds: float = 5.0
 
     # --- derived, absolute paths ---
     @property
@@ -115,6 +126,9 @@ def load_config(path: Path | None = None) -> Config:
         gpu_enabled=raw.get("gpu_enabled", True),
         batch_size=raw.get("batch_size", 500),
         video_extensions=raw.get("video_extensions", [".mp4", ".mov", ".avi"]),
+        review_tool_port=raw.get("review_tool_port", 5151),
+        review_page_size=raw.get("review_page_size", 40),
+        review_slideshow_seconds=raw.get("review_slideshow_seconds", 5.0),
         ollama_model=raw.get("ollama_model", "qwen3-vl:2b"),
         ollama_host=raw.get("ollama_host", "http://localhost:11434"),
         captions_path=raw.get("captions_path", "data/captions.jsonl"),

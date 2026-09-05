@@ -3,7 +3,7 @@
 Local tool to sort ~25 years of family photos (and, since Phase 1b, videos)
 into `E:\Pics\YYYY\YYYY-MM\`.
 See [`photo-organizer-spec.md`](photo-organizer-spec.md) for the full design and
-[`TODO.md`](TODO.md) for current phase status. This README covers Phase 0/1/1b setup and usage.
+[`TODO.md`](TODO.md) for current phase status. This README covers Phase 0/1/1b/2/2b setup and usage.
 
 ## Setup (one-time)
 
@@ -183,6 +183,88 @@ table`) — not vivid, nuanced descriptions. On very low-detail or ambiguous
 images it can occasionally hallucinate specifics that aren't there; worth
 a skim of early output before trusting it at scale.
 
+## Phase 2b — GPS locations + review tool
+
+Two independent pieces, both new: extracting a human-readable place name
+from a photo's EXIF GPS data, and a standalone browser tool for spot-checking
+the in-progress Phase 2 captioning run against real, live data.
+
+### GPS extraction (`main.py extract-gps`)
+
+Reads EXIF GPS coordinates (where present — sparse on pre-GPS-era photos)
+and reverse-geocodes them to a city-level place name (e.g. "Marietta, GA")
+via [`reverse_geocoder`](https://pypi.org/project/reverse-geocoder/) — a
+fully **offline** worldwide city gazetteer, no API key, no network call, no
+per-lookup cost, consistent with this project's local-only approach
+elsewhere. Video (MP4/MOV) doesn't currently expose GPS through the
+container-metadata reader already used for its date resolution — checked
+against real files from this library, not just assumed — so video rows
+simply get no location, which is an accepted limitation, not a bug.
+
+Writes directly to the SQLite DB (`photos.gps_lat`, `gps_lon`,
+`location_name`) rather than through a JSONL intermediate — unlike Phase
+2/3, this only ever needs to run once per file, so there's no benefit to a
+separate resumable file format. Resumable by its own `gps_checked` column
+instead: a row already checked (whether or not GPS data was actually found)
+is never re-examined.
+
+```bash
+# Extract for the whole library not yet checked
+venv\Scripts\python main.py extract-gps
+
+# Try one folder first (matches current_path by prefix)
+venv\Scripts\python main.py extract-gps --limit "E:\Pics\2025\2025-01"
+```
+
+Fast — real-world measurement on this library was roughly 100 files/second
+(EXIF read + an in-memory nearest-city lookup), so a full 100k+-file library
+run is a matter of minutes, not the multi-day job Phase 2 is. Safe to run
+any time; doesn't touch `organize.py` or `caption.py`.
+
+### Review tool (`review_tool.py`)
+
+A standalone local web app — **not** a dashboard panel — for browsing the
+library and spot-checking Phase 2's progress while it's still running.
+
+```bash
+venv\Scripts\python review_tool.py
+```
+
+Or just double-click **`Launch Review Tool.bat`** in this folder. Unlike
+`Launch Dashboard.bat`, this one deliberately keeps its console window open
+(runs via `python.exe`, not `pythonw.exe`) — it's a local web server, so the
+window shows the Flask/Werkzeug request log and is how you stop it
+(close the window, or `Ctrl+C` inside it).
+
+Opens `http://127.0.0.1:5151` (configurable — `review_tool_port` in
+`config.yaml`) in your browser automatically. Read-only by construction: the
+SQLite DB is opened via SQLite's own `mode=ro` URI (an accidental write
+would raise, not silently succeed), and `captions.jsonl` is only ever
+tailed for reading. Nothing here edits captions/tags, and it never runs
+organize/caption/extract-gps itself.
+
+- **Grid/browse view**: paginated (cursor-based, not `OFFSET` — stays fast
+  no matter how deep you page into 100k+ rows), with date-range and folder
+  filters. A photo not yet captioned shows clearly as "Not yet captioned",
+  never as an error.
+- **Viewer/slideshow mode**: click any photo to open it full-size with its
+  path, date, caption, tags, and location alongside. Forward/Back step one
+  at a time; Play starts an auto-advance slideshow at a fully configurable
+  interval (editable live, remembered per-browser). Manual navigation
+  pauses the slideshow rather than fighting with it. Stepping past the
+  last photo on a page — or just letting the slideshow run — transparently
+  keeps going into the next page's photos; there's no page-boundary
+  dead-end.
+- **People/faces**: a reserved section is always present, showing a
+  "Phase 3 not built yet" placeholder — so this tool won't need a UI
+  rebuild once face detection lands, only that field needing real data.
+- **Live captions**: `captions.jsonl` is tailed incrementally on every
+  request, so newly-captioned photos from the in-progress background run
+  show up without restarting this tool.
+- Video files are excluded from every view here — Phase 2 never captions
+  video by design, so showing them would mean a permanent, misleading
+  "not yet captioned" that will never resolve.
+
 ## Viewing the database
 
 `data/photo_organizer.db` is a plain SQLite file — no server, no login.
@@ -291,3 +373,18 @@ triggers exactly one new record, and a corrupted trailing JSONL line
 doesn't break resume. Requires Ollama running locally with the model
 already pulled — this hits the real model, not a mock, since captioning
 quality/behavior is the whole point of the phase.
+
+```bash
+venv\Scripts\python tests\test_phase2b.py
+```
+
+Covers Phase 2b end to end against synthetic fixtures: GPS extraction +
+offline reverse geocoding (including resumability via `gps_checked`), and
+`review_tool.py`'s JSON API via Flask's test client — pagination across a
+page boundary in both directions, date/folder filters, video exclusion,
+`/api/stats` respecting the same filters as `/api/photos`, `/api/nav`
+stepping next/prev and returning `null` gracefully past the last photo (not
+an error), and the live `captions.jsonl` tail correctly picking up a
+newly-appended line — as well as tolerating a corrupt/incomplete trailing
+one — without restarting the tool. No Ollama/GPU dependency, unlike the
+Phase 2 pipeline test above.

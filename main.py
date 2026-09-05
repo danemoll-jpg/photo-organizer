@@ -9,6 +9,8 @@
     venv\\Scripts\\python main.py run --dry-run          # forces a preview even if config says execute
     venv\\Scripts\\python main.py caption                # Phase 2: caption already-organized photos via Ollama
     venv\\Scripts\\python main.py caption --limit <folder>  # caption just one folder first
+    venv\\Scripts\\python main.py extract-gps                # Phase 2b: EXIF GPS -> offline reverse-geocoded place name
+    venv\\Scripts\\python main.py extract-gps --limit <folder prefix>  # just one folder first
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from tqdm import tqdm
 from src.caption import run_phase2
 from src.config import load_config
 from src.db import connect, init_db
+from src.gps_backfill import run_gps_extraction
 from src.load_captions import load_captions
 from src.logging_setup import setup_logging
 from src.organize import run_phase1
@@ -143,6 +146,33 @@ def cmd_caption(args) -> None:
     print(f"\nOutput: {cfg.captions_path_abs}")
 
 
+def cmd_extract_gps(args) -> None:
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
+    logger.info("Starting Phase 2b GPS extraction run")
+    init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent — applies the gps_* column migration if needed
+
+    pbar: tqdm | None = None
+
+    def _progress_cb(done: int, total: int) -> None:
+        nonlocal pbar
+        if pbar is None:
+            pbar = tqdm(total=total, desc="GPS extract", unit="file")
+        pbar.n = done
+        pbar.refresh()
+
+    conn = connect(cfg.db_path_abs)
+    try:
+        stats = run_gps_extraction(cfg, conn, logger, progress_cb=_progress_cb, folder_prefix=args.limit)
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(stats.summary())
+
+
 def cmd_load_captions(args) -> None:
     cfg = load_config()
     logger, _log_path = setup_logging(cfg.log_dir_abs)
@@ -157,7 +187,7 @@ def cmd_load_captions(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2")
+    parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2/2b")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-db", help="Create the SQLite database and schema").set_defaults(func=cmd_init_db)
@@ -176,6 +206,11 @@ def main() -> None:
     caption_parser.set_defaults(func=cmd_caption)
 
     sub.add_parser("load-captions", help="Load data/captions.jsonl into the SQLite DB (photos.caption + tags)").set_defaults(func=cmd_load_captions)
+
+    gps_parser = sub.add_parser("extract-gps", help="Phase 2b: extract EXIF GPS + offline reverse-geocode into the DB")
+    gps_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
+                             help="Only process photos whose current_path starts with this prefix (try a small folder first)")
+    gps_parser.set_defaults(func=cmd_extract_gps)
 
     args = parser.parse_args()
     args.func(args)

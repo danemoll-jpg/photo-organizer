@@ -78,3 +78,18 @@ captions_path: "data/captions.jsonl"
 # sent to the model — full-size phone photos are far bigger than any
 # vision encoder actually looks at; keeps inference time/memory bounded.
 caption_max_dimension: 1024
+
+# --- Phase 2b: Review/Spot-Check Tool (review_tool.py) ---
+# Standalone, browser-based — separate from dashboard.py. All optional;
+# each has a built-in default so this section can be omitted entirely.
+
+# Port the local Flask server listens on (http://localhost:<port>).
+review_tool_port: 5151
+
+# How many photos per page in the grid/browse view.
+review_page_size: 40
+
+# Slideshow auto-advance interval, in seconds. Just the tool's initial
+# value on launch — it's also a live, user-changeable field in the UI
+# itself, not fixed to whatever's here.
+review_slideshow_seconds: 5.0

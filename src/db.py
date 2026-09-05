@@ -30,10 +30,21 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path, logger: logging.Logger | None = None) -> None:
     conn = connect(db_path)
     try:
-        with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-            conn.executescript(f.read())
+        schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
+        conn.executescript(schema_sql)
         conn.commit()
         _migrate(conn, logger or _module_logger)
+        # Views can't use "CREATE VIEW IF NOT EXISTS" to pick up new/changed
+        # columns on an existing DB — SQLite has no ALTER VIEW. Always drop
+        # + recreate them from the current schema.sql after any migration,
+        # so photos_access/captions_access never drift from the live table
+        # shape (e.g. Phase 2b's gps_lat/gps_lon/location_name columns,
+        # added after these views already existed on real installs). Cheap:
+        # views have no storage, and every CREATE TABLE statement re-run
+        # here is already a no-op via IF NOT EXISTS.
+        conn.executescript("DROP VIEW IF EXISTS photos_access; DROP VIEW IF EXISTS captions_access;")
+        conn.executescript(schema_sql)
+        conn.commit()
     finally:
         conn.close()
 
@@ -47,6 +58,22 @@ def _migrate(conn: sqlite3.Connection, logger: logging.Logger) -> None:
         conn.execute("ALTER TABLE photos ADD COLUMN file_mtime REAL")
         conn.commit()
         _backfill_file_mtime(conn, logger)
+        cols.add("file_mtime")
+    # Phase 2b: GPS extraction columns (see src/gps_backfill.py). New rows
+    # get these via schema.sql's CREATE TABLE on a fresh DB; existing real
+    # installs need them ALTERed in. No backfill needed — gps_checked
+    # defaults to 0, so src/gps_backfill.py's own resumability check (never
+    # re-examine a row already checked) naturally treats every pre-existing
+    # row as "not yet checked" without any extra migration logic here.
+    for col, ddl in (
+        ("gps_lat", "REAL"),
+        ("gps_lon", "REAL"),
+        ("location_name", "TEXT"),
+        ("gps_checked", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE photos ADD COLUMN {col} {ddl}")
+    conn.commit()
 
 
 def _backfill_file_mtime(conn: sqlite3.Connection, logger: logging.Logger) -> None:

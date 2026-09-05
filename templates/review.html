@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Organizer — Review</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <h1>Photo Organizer <span class="subtitle">— Review / Spot-Check</span></h1>
+  <div id="stats" class="stats">Loading…</div>
+</header>
+
+<section class="filters" id="filters">
+  <label>From <input type="date" id="f-date-from"></label>
+  <label>To <input type="date" id="f-date-to"></label>
+  <label>Folder contains <input type="text" id="f-folder" placeholder="e.g. 2025-01 or katyas phone2"></label>
+  <button id="f-apply">Apply</button>
+  <button id="f-reset" class="secondary">Reset</button>
+  <span class="filters-hint">Path is relative to <code>{{ dest_root }}</code></span>
+</section>
+
+<section class="grid-toolbar">
+  <div class="grid-nav">
+    <button id="grid-prev" disabled>&larr; Prev page</button>
+    <span id="grid-page-info">—</span>
+    <button id="grid-next" disabled>Next page &rarr;</button>
+  </div>
+  <div class="grid-pagesize">
+    <label>Per page
+      <select id="f-pagesize">
+        <option value="20">20</option>
+        <option value="40" selected>40</option>
+        <option value="80">80</option>
+        <option value="120">120</option>
+      </select>
+    </label>
+  </div>
+</section>
+
+<main id="grid" class="grid"></main>
+<div id="grid-empty" class="empty-state" hidden>No photos match these filters.</div>
+
+<!-- Viewer / slideshow mode -->
+<div id="viewer" class="viewer" hidden>
+  <div class="viewer-backdrop"></div>
+  <div class="viewer-panel">
+    <button id="viewer-close" class="viewer-close" title="Back to grid (Esc)">&times;</button>
+
+    <div class="viewer-image-wrap">
+      <img id="viewer-img" alt="">
+      <div id="viewer-nomore" class="viewer-nomore" hidden></div>
+    </div>
+
+    <div class="viewer-details">
+      <div class="viewer-path" id="viewer-path" title=""></div>
+      <div class="viewer-row"><span class="label">Date taken</span><span id="viewer-date"></span></div>
+      <div class="viewer-row"><span class="label">Caption</span><span id="viewer-caption"></span></div>
+      <div class="viewer-row"><span class="label">Tags</span><span id="viewer-tags"></span></div>
+      <div class="viewer-row"><span class="label">Location</span><span id="viewer-location"></span></div>
+      <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people" class="placeholder">Face detection isn't built yet (Phase 3) — this will show who's in the photo once it is.</span></div>
+    </div>
+
+    <div class="viewer-controls">
+      <button id="viewer-prev" title="Previous (&larr;)">&larr; Prev</button>
+      <button id="viewer-playpause" class="play">&#9654; Play</button>
+      <button id="viewer-next" title="Next (&rarr;)">Next &rarr;</button>
+      <label class="interval-label">Every
+        <input type="number" id="viewer-interval" min="1" max="600" step="0.5" value="{{ slideshow_seconds }}">
+        sec
+      </label>
+    </div>
+  </div>
+</div>
+
+<script>
+  window.REVIEW_CONFIG = {
+    pageSize: {{ page_size }},
+    slideshowSeconds: {{ slideshow_seconds }},
+    destRoot: {{ dest_root|tojson }}
+  };
+</script>
+<script src="{{ url_for('static', filename='review.js') }}"></script>
+</body>
+</html>

@@ -27,7 +27,16 @@ CREATE TABLE IF NOT EXISTS photos (
     status                  TEXT NOT NULL DEFAULT 'sorted',  -- 'sorted' | 'unsorted' | 'error'
     caption                  TEXT,                              -- Phase 2 output, NULL until then
     processed_at              TEXT NOT NULL,                     -- ISO timestamp, when Phase 1 recorded this row
-    phase1_verified            INTEGER NOT NULL DEFAULT 0          -- 1 once copy-verify-delete succeeded (or file confirmed already in place)
+    phase1_verified            INTEGER NOT NULL DEFAULT 0,         -- 1 once copy-verify-delete succeeded (or file confirmed already in place)
+    -- Phase 2b: GPS extraction + offline reverse geocoding (src/gps_resolver.py,
+    -- src/gps_backfill.py). Populated by its own standalone step (`main.py
+    -- extract-gps`), not by Phase 1/1b/2 — organize.py/caption.py are untouched.
+    gps_lat                   REAL,                                -- decimal degrees, NULL if no GPS EXIF found (or not yet checked)
+    gps_lon                   REAL,                                -- decimal degrees
+    location_name             TEXT,                                -- offline reverse-geocoded place name, e.g. "Marietta, GA"
+    gps_checked               INTEGER NOT NULL DEFAULT 0           -- 1 once GPS extraction has been attempted for this row, whether or
+                                                                     -- not GPS data was actually found — lets extraction resume without
+                                                                     -- ever re-reading the same file's EXIF twice (CLAUDE.md rule 1)
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_date ON photos(date_taken_year, date_taken_month);
@@ -51,12 +60,16 @@ CREATE INDEX IF NOT EXISTS idx_photos_original_path ON photos(original_path);
 -- TEXT here sidesteps the float comparison entirely. Purely additive (a
 -- view, not a copy) and always live — link this instead of `photos`
 -- directly for Access browsing.
+-- (gps_lat/gps_lon are also REAL and would hit the exact same #Deleted issue
+-- once populated by Phase 2b's extraction step — cast the same way.)
 CREATE VIEW IF NOT EXISTS photos_access AS
 SELECT
     file_hash, current_path, original_path, filename, file_size,
     date_taken, date_taken_year, date_taken_month, date_source,
     status, caption, processed_at, phase1_verified,
-    CAST(file_mtime AS TEXT) AS file_mtime
+    CAST(file_mtime AS TEXT) AS file_mtime,
+    CAST(gps_lat AS TEXT) AS gps_lat, CAST(gps_lon AS TEXT) AS gps_lon,
+    location_name, gps_checked
 FROM photos;
 
 -- Read-only view for browsing captions/tags together in Access, one row
@@ -77,7 +90,8 @@ SELECT
     p.caption,
     (SELECT GROUP_CONCAT(t.tag_name, ', ')
      FROM photo_tags pt JOIN tags t ON t.tag_id = pt.tag_id
-     WHERE pt.file_hash = p.file_hash) AS tags
+     WHERE pt.file_hash = p.file_hash) AS tags,
+    p.location_name  -- Phase 2b, NULL until extract-gps has run for this row
 FROM photos p
 WHERE p.caption IS NOT NULL;
 

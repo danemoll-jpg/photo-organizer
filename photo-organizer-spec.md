@@ -127,3 +127,46 @@
 **Explicitly out of scope for this addition:**
 - Editing captions/tags from within this tool — read-only review, not an editing interface (not requested, don't build it unasked).
 - Any daughter-facing considerations — this is the user's own personal review tool, unrelated to Phase 4's Plex-integrated daughter search feature, even though both will eventually browse similar data.
+
+## Phase 2c — Viewer v2: Random Navigation + Filters (added after using Phase 2b)
+
+**Context:** The user has been using the Phase 2b review tool and likes the viewer/slideshow. This adds real navigation and filtering depth now that tags/captions/GPS data actually exist to filter on.
+
+**Requirements:**
+- **Random button** in the photo viewer — jumps to a random photo within the currently active filtered set (not the whole library if a filter is applied).
+- **Slideshow order toggle**: chronological (existing behavior, by `date_taken`) vs. random. Random mode should not simply repeat the same shuffled order every time it's started — a fresh randomization each time slideshow mode starts is the expected behavior unless the user says otherwise.
+- **New filters**, in addition to the existing date-range/folder filters:
+  - Tag filter (filter to photos having a specific tag or tags)
+  - Caption keyword search (substring/keyword match against caption text)
+  - GPS/location filter (e.g. by place name, or "has location" vs "no location")
+  - Faces/people filter — Phase 3 doesn't exist yet, so this should be a visible-but-inert filter control (present in the UI, but yields no results / is clearly marked "not available yet") rather than omitted entirely, matching the existing "reserved placeholder" pattern already used for the per-photo people/faces display field.
+- **Filters must apply consistently to BOTH the grid view AND slideshow/viewer navigation** — this is the important architectural point. `/api/nav`'s "next/prev matching row" logic must respect whatever filters (including the new ones) are currently active, the same way the grid's query already does. A user filtering to a specific tag and starting the slideshow should only see photos matching that tag, in either random or chronological order.
+- Random navigation (both the button and random slideshow order) needs to work efficiently at 100k+ scale — avoid an approach that requires loading/shuffling the entire filtered result set into memory if it can be avoided (e.g. via an efficient random-row-matching-current-filter query), though a working-but-simple approach is acceptable to start if a more efficient one isn't obvious.
+
+## Phase 2d — Remote/Shared Access (new — supersedes the original Plex-integration plan below)
+
+**Context:** The user has been using `review_tool.py` and prefers it over Plex's own interface. Rather than building Phase 4 as originally scoped (a companion app deep-linking into Plex), the user wants `review_tool.py` itself to be the shared surface — password-gated, accessible from outside the home network, hosted from the user's own PC (with explicit awareness that if that PC is down, remote access is down too). **This section supersedes Phase 4's Plex-deep-link approach — Phase 4 below should be treated as superseded, not built as originally written, unless the user says otherwise.**
+
+**Goal:** Let the user grant specific other people password-protected remote access to `review_tool.py` over the internet, safely, while keeping photos hosted locally on the user's own PC for now — but built in a way that doesn't lock out moving photo storage to the cloud later.
+
+**Requirements:**
+
+**Authentication:**
+- A small local list of username+password pairs (stored in config — not a full signup/account-management system, not a database of users). Each person gets their own credential, not one shared password.
+- Real session-based auth (login page, session cookie) — not HTTP Basic Auth stuffed in front of everything.
+- Rate-limit login attempts (protect against brute-forcing a weak password).
+- All of this must ride over HTTPS — see Cloudflare Tunnel below, which provides this.
+- Every account currently gets full access to the whole library — no per-person restriction of *which* photos someone can see is being asked for right now; don't build that unasked, but keep the door open (e.g. don't hardcode an assumption that all users see everything, if it's cheap not to).
+
+**Network exposure — Cloudflare Tunnel, NOT port-forwarding:**
+- Set up a separate, independent Cloudflare Tunnel for this tool. Explicitly NOT reusing or depending on Plex's own remote-access mechanism (Plex Relay is proprietary/Plex-only; raw port-forwarding is the insecure pattern being deliberately avoided here). Fully independent of Plex either way — Plex's own setup is untouched, and neither tool's uptime affects the other.
+- This gives a real HTTPS URL without opening any inbound port on the user's router.
+
+**Storage abstraction (groundwork for future cloud migration, not a cloud migration itself):**
+- Introduce a small storage-backend abstraction between the app and "where photo bytes actually live" — local disk today, but designed so a future swap to cloud object storage (S3, Backblaze B2, etc.) doesn't require a rewrite of the app logic. This is groundwork only — do NOT actually implement or integrate any cloud storage backend now, just don't hardcode local file-path assumptions throughout the app in a way that would make a future swap painful.
+- This applies to `review_tool.py` primarily; if it naturally extends to how other phases reference photo paths without extra cost, fine, but don't go out of your way to refactor Phase 1/1b/2 for this — scope it to what Phase 2c/2d actually touch.
+
+**Explicitly out of scope for this phase:**
+- Actually migrating to cloud storage — that's a future, separate decision, not part of this build.
+- Per-person visibility restrictions (see above) — full access for every account for now.
+- Any onboarding/installer/packaging work related to the "give this to friends/family" longer-term direction — that's a separate future concern, not part of making remote access work for the user's own invited people today.
