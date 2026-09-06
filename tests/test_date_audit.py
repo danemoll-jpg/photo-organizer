@@ -22,6 +22,13 @@ Covers:
     (re-checked at apply time, not just relying on the preview snapshot),
     and stop_check()/progress_cb behave like every other batch op in this
     project.
+  - find_sequence_interpolation_candidates(): the human-directed
+    "I recognize this batch as this other, already-correctly-dated
+    folder" pattern -- exact camera-roll-number matches, interpolation
+    between two bracketing reference numbers, and refusing to extrapolate
+    past the reference set's own number range (reported, not guessed at).
+    Modeled on a real production case (a Feb 2020 vacation misdated as
+    2023-10-29 -- see CLAUDE.md).
 
 Usage:
     venv\\Scripts\\python tests\\test_date_audit.py
@@ -38,8 +45,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.date_audit import (
+    SEQUENCE_FIX_EDITOR,
     apply_fixes,
     find_fix_candidates,
+    find_sequence_interpolation_candidates,
     find_suspicious_clusters,
     find_year_month_in_parts,
 )
@@ -249,6 +258,108 @@ def test_apply_fixes(tmp: Path) -> None:
     conn.close()
 
 
+def test_sequence_interpolation(tmp: Path) -> None:
+    print("test_sequence_interpolation...")
+    conn = _connect(tmp)
+
+    # Reference folder: real (exif-sourced) dates for a device's camera
+    # roll, e.g. E:\Pics\2020\2020-02 in the real incident this models.
+    _insert_photo(conn, "ref100", r"E:\Pics\2020\2020-02\IMG_0100.JPG",
+                  r"E:\Pics\2020\2020-02\IMG_0100.JPG", "2020-02-01T10:00:00", "exif")
+    _insert_photo(conn, "ref200", r"E:\Pics\2020\2020-02\IMG_0200.JPG",
+                  r"E:\Pics\2020\2020-02\IMG_0200.JPG", "2020-02-10T10:00:00", "exif")
+    _insert_photo(conn, "ref300", r"E:\Pics\2020\2020-02\IMG_0300.JPG",
+                  r"E:\Pics\2020\2020-02\IMG_0300.JPG", "2020-02-20T10:00:00", "exif")
+    # An edited-variant duplicate of IMG_0200 with a slightly different
+    # timestamp -- exercises the median-of-variants path in _ref_date().
+    _insert_photo(conn, "ref200b", r"E:\Pics\2020\2020-02\IMG_0200 2.JPG",
+                  r"E:\Pics\2020\2020-02\IMG_0200 2.JPG", "2020-02-10T12:00:00", "exif")
+
+    # Target folder: misdated files sharing the SAME camera-roll numbers.
+    # IMG_0100/0200/0300 should get EXACT matches; IMG_0150 (bracketed
+    # between 0100 and 0200, no exact reference) should be interpolated;
+    # IMG_0400 (past the reference set's own max, 0300) must be refused
+    # (extrapolation), not guessed at.
+    _insert_photo(conn, "exact100", r"E:\Pics\2023\2023-10\IMG_0100.JPG",
+                  r"E:\dump\IMG_0100.JPG", "2023-10-29T13:00:00", "filesystem")
+    _insert_photo(conn, "exact200", r"E:\Pics\2023\2023-10\IMG_0200.JPG",
+                  r"E:\dump\IMG_0200.JPG", "2023-10-29T13:00:00", "filesystem")
+    _insert_photo(conn, "interp150", r"E:\Pics\2023\2023-10\IMG_0150.JPG",
+                  r"E:\dump\IMG_0150.JPG", "2023-10-29T13:00:00", "filesystem")
+    _insert_photo(conn, "extrap400", r"E:\Pics\2023\2023-10\IMG_0400.JPG",
+                  r"E:\dump\IMG_0400.JPG", "2023-10-29T13:00:00", "filesystem")
+    # Not filesystem-sourced -- must not be considered at all.
+    _insert_photo(conn, "notfs250", r"E:\Pics\2023\2023-10\IMG_0250.JPG",
+                  r"E:\dump\IMG_0250.JPG", "2023-10-29T13:00:00", "exif")
+    # No parseable sequence number in the filename.
+    _insert_photo(conn, "noseq", r"E:\Pics\2023\2023-10\Photo.JPG",
+                  r"E:\dump\Photo.JPG", "2023-10-29T13:00:00", "filesystem")
+    # Already manually edited -- must be excluded even though it would
+    # otherwise match exactly. (Inserts the photo_edits row directly,
+    # keeping date_source='filesystem', the same way test_find_fix_candidates
+    # exercises this belt-and-suspenders check -- via the real apply_edit()
+    # flow, editing date_taken always flips date_source to 'manual' too,
+    # which would exclude the row via this query's own WHERE clause before
+    # ever reaching the has_manual_edit() check.)
+    _insert_photo(conn, "manual300", r"E:\Pics\2023\2023-10\IMG_0300.JPG",
+                  r"E:\dump\IMG_0300.JPG", "2023-10-29T13:00:00", "filesystem")
+    conn.execute(
+        "INSERT INTO photo_edits (file_hash, field_name, old_value, new_value, edited_by, edited_at) "
+        "VALUES ('manual300', 'date_taken', '2023-10-29T13:00:00', '2023-11-01T00:00:00', "
+        "'a_real_user', '2026-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    candidates, stats = find_sequence_interpolation_candidates(
+        conn, target_prefix=r"E:\dump" + "\\", reference_prefix=r"E:\Pics\2020\2020-02" + "\\"
+    )
+    by_hash = {c.file_hash: c for c in candidates}
+
+    assert by_hash["exact100"].new_date_taken == "2020-02-01T10:00:00"
+    assert by_hash["exact100"].basis == "sequence-exact"
+    # _ref_date() picks dts[len(dts)//2] of the sorted variants for a given
+    # number -- for the two IMG_0200 variants (10:00, 12:00) that's index 1.
+    assert by_hash["exact200"].new_date_taken == "2020-02-10T12:00:00"
+    assert by_hash["interp150"].basis == "sequence-interpolated"
+    # IMG_0150 is exactly halfway between IMG_0100 (Feb 1) and IMG_0200 (Feb 10) by number.
+    assert by_hash["interp150"].new_date_taken.startswith("2020-02-05T"), by_hash["interp150"].new_date_taken
+
+    assert "extrap400" not in by_hash, "must not extrapolate past the reference set's own max number"
+    assert "notfs250" not in by_hash, "non-filesystem-sourced rows must not be considered"
+    assert "noseq" not in by_hash, "a filename with no parseable sequence number must not be considered"
+    assert "manual300" not in by_hash, "a manually-edited row must never be silently overwritten"
+
+    # exact_matches counts every number that matched exactly, including
+    # manual300 (filtered out afterward by the has_manual_edit() check).
+    assert stats.exact_matches == 3
+    assert stats.interpolated == 1
+    assert stats.extrapolated_skipped == 1
+    assert stats.no_sequence_number == 1
+    assert stats.already_manually_edited == 1
+    print(f"  {stats.summary()}  OK")
+
+    # Applying: writes go through the same apply_edit() audit path, tagged
+    # with SEQUENCE_FIX_EDITOR (distinct from the folder-rule's BATCH_FIX_EDITOR).
+    apply_stats = apply_fixes(conn, candidates, LOGGER, edited_by=SEQUENCE_FIX_EDITOR)
+    assert apply_stats.applied == len(candidates) and apply_stats.errors == 0
+    row = conn.execute("SELECT date_source FROM photos WHERE file_hash='exact100'").fetchone()
+    assert row["date_source"] == "manual"
+    edit_row = conn.execute(
+        "SELECT edited_by FROM photo_edits WHERE file_hash='exact100' AND field_name='date_taken'"
+    ).fetchone()
+    assert edit_row["edited_by"] == SEQUENCE_FIX_EDITOR
+    print("  applied via apply_edit(), tagged with SEQUENCE_FIX_EDITOR in photo_edits  OK")
+
+    # No reference points at all -- must not crash, must propose nothing.
+    empty_candidates, empty_stats = find_sequence_interpolation_candidates(
+        conn, target_prefix=r"E:\dump" + "\\", reference_prefix=r"E:\NoSuchFolder" + "\\"
+    )
+    assert empty_candidates == [] and empty_stats.total_targets == 0
+    print("  no reference points -> no candidates, no crash  OK")
+
+    conn.close()
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="photo_organizer_date_audit_"))
     print(f"Working in {tmp}")
@@ -257,6 +368,7 @@ def main() -> None:
         test_find_suspicious_clusters(tmp / "clusters")
         test_find_fix_candidates(tmp / "candidates")
         test_apply_fixes(tmp / "apply")
+        test_sequence_interpolation(tmp / "sequence")
         print("\nALL DATE AUDIT TESTS PASSED")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -21,6 +21,8 @@
     venv\\Scripts\\python main.py audit-dates inspect 2023-10-29       # Step 1: deep-dive one suspicious date
     venv\\Scripts\\python main.py audit-dates preview-fix                # Step 2: dry-run proposed corrections
     venv\\Scripts\\python main.py audit-dates apply-fix                    # Step 2: apply via photo_edits audit trail
+    venv\\Scripts\\python main.py audit-dates interpolate-preview --target-prefix "E:\\katya 2024" --reference-prefix "E:\\Pics\\2020\\2020-02" --img-max 7093
+    venv\\Scripts\\python main.py audit-dates interpolate-apply --target-prefix "E:\\katya 2024" --reference-prefix "E:\\Pics\\2020\\2020-02" --img-max 7093
 """
 from __future__ import annotations
 
@@ -34,11 +36,14 @@ from src.config import load_config
 from src.date_audit import (
     DEFAULT_MIN_COUNT,
     DEFAULT_TOP_N,
+    SEQUENCE_FIX_EDITOR,
     apply_fixes,
     find_fix_candidates,
+    find_sequence_interpolation_candidates,
     find_suspicious_clusters,
     format_fix_preview,
     format_inspection_report,
+    format_interpolation_preview,
     inspect_cluster,
 )
 from src.db import connect, init_db
@@ -414,6 +419,79 @@ def cmd_audit_dates_apply_fix(args) -> None:
     print(stats.summary())
 
 
+def _interpolation_candidates_from_args(conn, args):
+    return find_sequence_interpolation_candidates(
+        conn,
+        target_prefix=args.target_prefix,
+        reference_prefix=args.reference_prefix,
+        img_min=args.img_min,
+        img_max=args.img_max,
+    )
+
+
+def cmd_audit_dates_interpolate_preview(args) -> None:
+    """Step 2, sequence-interpolation variant (dry run): for a human-
+    recognized batch (e.g. "these misdated photos look like the vacation
+    in E:\\Pics\\2020\\2020-02"), shows the day/time each photo would be
+    corrected to, using camera-roll sequence numbers shared with that
+    already-correctly-dated reference folder. Makes no changes."""
+    cfg = load_config()
+    init_db(cfg.db_path_abs, logger=None)
+    conn = connect(cfg.db_path_abs)
+    try:
+        candidates, stats = _interpolation_candidates_from_args(conn, args)
+    finally:
+        conn.close()
+    print(format_interpolation_preview(candidates, stats))
+    if candidates:
+        print("\nThis was a DRY RUN — nothing was changed. Review the list above, then run:")
+        print("  main.py audit-dates interpolate-apply (with the same --target-prefix/--reference-prefix/--img-min/--img-max)")
+
+
+def cmd_audit_dates_interpolate_apply(args) -> None:
+    """Step 2, sequence-interpolation variant (apply): writes the corrected
+    date via the same audited src.edits.apply_edit path as apply-fix,
+    tagged with SEQUENCE_FIX_EDITOR (distinct from the folder-rule's
+    BATCH_FIX_EDITOR) so the audit trail shows which basis produced which
+    correction."""
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs, logger_name="photo_organizer.date_audit")
+    init_db(cfg.db_path_abs, logger=logger)
+    conn = connect(cfg.db_path_abs)
+    pbar: tqdm | None = None
+    try:
+        candidates, stats = _interpolation_candidates_from_args(conn, args)
+        if not candidates:
+            print("Nothing to fix — no candidates found. Run 'audit-dates interpolate-preview' for details.")
+            return
+
+        print(format_interpolation_preview(candidates, stats))
+        if not args.yes:
+            answer = input(
+                f"\nType 'yes' to apply {len(candidates)} correction(s) "
+                "(recorded in photo_edits, reversible via review_tool.py like any other edit): "
+            ).strip().lower()
+            if answer != "yes":
+                print("Aborted. No changes were made.")
+                return
+
+        def _progress_cb(done: int, total: int) -> None:
+            nonlocal pbar
+            if pbar is None:
+                pbar = tqdm(total=total, desc="Date-audit interpolate", unit="file")
+            pbar.n = done
+            pbar.refresh()
+
+        apply_stats = apply_fixes(conn, candidates, logger, progress_cb=_progress_cb, edited_by=SEQUENCE_FIX_EDITOR)
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(apply_stats.summary())
+
+
 def cmd_load_captions(args) -> None:
     cfg = load_config()
     logger, _log_path = setup_logging(cfg.log_dir_abs)
@@ -485,6 +563,32 @@ def main() -> None:
     )
     audit_apply.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     audit_apply.set_defaults(func=cmd_audit_dates_apply_fix)
+
+    def _add_interpolation_args(p):
+        p.add_argument("--target-prefix", required=True, metavar="PATH",
+                        help=r'original_path prefix of the misdated batch, e.g. "E:\katya 2024"')
+        p.add_argument("--reference-prefix", required=True, metavar="PATH",
+                        help=r'current_path prefix of an already-correctly-dated folder for the same '
+                             r'event/device, e.g. "E:\Pics\2020\2020-02"')
+        p.add_argument("--img-min", type=int, default=None, metavar="N",
+                        help="Only consider camera-roll numbers >= N (e.g. where the recognized batch starts)")
+        p.add_argument("--img-max", type=int, default=None, metavar="N",
+                        help="Only consider camera-roll numbers <= N (e.g. where the recognized batch ends)")
+
+    interp_preview = audit_sub.add_parser(
+        "interpolate-preview",
+        help="Step 2, human-directed variant: dry-run day/time corrections from a recognized reference folder",
+    )
+    _add_interpolation_args(interp_preview)
+    interp_preview.set_defaults(func=cmd_audit_dates_interpolate_preview)
+
+    interp_apply = audit_sub.add_parser(
+        "interpolate-apply",
+        help="Step 2, human-directed variant: apply the previewed sequence-interpolated corrections",
+    )
+    _add_interpolation_args(interp_apply)
+    interp_apply.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    interp_apply.set_defaults(func=cmd_audit_dates_interpolate_apply)
 
     ru_parser = sub.add_parser("review-user", help="Phase 2d: manage review_tool.py login credentials (config.yaml's review_users)")
     ru_sub = ru_parser.add_subparsers(dest="review_user_command", required=True)

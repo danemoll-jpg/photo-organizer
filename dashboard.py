@@ -228,15 +228,19 @@ from src.config import (
     save_source_folders,
 )
 from src.date_audit import (
+    BATCH_FIX_EDITOR,
     DEFAULT_MIN_COUNT,
     DEFAULT_TOP_N,
+    SEQUENCE_FIX_EDITOR,
     ApplyFixStats,
     FixPreview,
     apply_fixes,
     find_fix_candidates,
+    find_sequence_interpolation_candidates,
     find_suspicious_clusters,
     format_fix_preview,
     format_inspection_report,
+    format_interpolation_preview,
     inspect_cluster,
 )
 from src.db import connect, init_db
@@ -309,6 +313,11 @@ class DashboardApp:
         self._date_audit_log_path: Path | None = None
         self._date_audit_log_read_pos = 0
         self._date_audit_preview: FixPreview | None = None
+        # Sequence Interpolation sub-section's own cached preview, same
+        # "must preview in this session before Apply is enabled" contract
+        # as _date_audit_preview above, just a plain candidate list (no
+        # dedicated summary dataclass the way FixPreview is).
+        self._date_audit_interp_candidates: list | None = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -586,6 +595,56 @@ class DashboardApp:
             da_fix_row, text="Cancel", command=self._on_date_audit_cancel, state="disabled"
         )
         self.date_audit_cancel_btn.pack(side="left", padx=(6, 0))
+
+        ttk.Separator(da_frame, orient="horizontal").pack(fill="x", padx=6, pady=(4, 6))
+        ttk.Label(
+            da_frame, wraplength=740, justify="left",
+            text=(
+                "Sequence Interpolation — for when you recognize a misdated batch as a real event "
+                "yourself, even though there's no folder-name signal to infer it automatically. Point "
+                "this at an already-correctly-dated reference folder for the same device/event; it "
+                "matches camera-roll numbers (IMG_####) between the two to recover day/time precision, "
+                "not just a month guess."
+            ),
+        ).pack(anchor="w", padx=6, pady=(0, 6))
+
+        da_interp_row1 = ttk.Frame(da_frame)
+        da_interp_row1.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(da_interp_row1, text="Misdated batch (original_path prefix):", width=32, anchor="w").pack(side="left")
+        self.date_audit_interp_target_var = tk.StringVar(value="")
+        ttk.Entry(da_interp_row1, textvariable=self.date_audit_interp_target_var, width=40).pack(
+            side="left", fill="x", expand=True
+        )
+
+        da_interp_row2 = ttk.Frame(da_frame)
+        da_interp_row2.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(da_interp_row2, text="Reference folder (current_path prefix):", width=32, anchor="w").pack(side="left")
+        self.date_audit_interp_reference_var = tk.StringVar(value="")
+        ttk.Entry(da_interp_row2, textvariable=self.date_audit_interp_reference_var, width=40).pack(
+            side="left", fill="x", expand=True
+        )
+
+        da_interp_row3 = ttk.Frame(da_frame)
+        da_interp_row3.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(da_interp_row3, text="IMG # min:").pack(side="left")
+        self.date_audit_interp_min_var = tk.StringVar(value="")
+        ttk.Entry(da_interp_row3, textvariable=self.date_audit_interp_min_var, width=10).pack(side="left", padx=(4, 12))
+        ttk.Label(da_interp_row3, text="IMG # max:").pack(side="left")
+        self.date_audit_interp_max_var = tk.StringVar(value="")
+        ttk.Entry(da_interp_row3, textvariable=self.date_audit_interp_max_var, width=10).pack(side="left", padx=(4, 0))
+        ttk.Label(da_interp_row3, text="  (both optional — leave blank for no bound)").pack(side="left", padx=(6, 0))
+
+        da_interp_btn_row = ttk.Frame(da_frame)
+        da_interp_btn_row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(
+            da_interp_btn_row, text="Preview Sequence Fix (Dry Run)", command=self._on_date_audit_interp_preview
+        ).pack(side="left")
+        self.date_audit_interp_apply_btn = ttk.Button(
+            da_interp_btn_row, text="Apply Sequence Fix", command=self._on_date_audit_interp_apply, state="disabled"
+        )
+        self.date_audit_interp_apply_btn.pack(side="left", padx=(6, 0))
+
+        ttk.Separator(da_frame, orient="horizontal").pack(fill="x", padx=6, pady=(0, 6))
 
         da_prog_row = ttk.Frame(da_frame)
         da_prog_row.pack(fill="x", padx=6, pady=(0, 6))
@@ -1463,6 +1522,52 @@ class DashboardApp:
         self._set_date_audit_results_text(format_fix_preview(preview))
         self.date_audit_apply_btn.configure(state="normal" if preview.candidates else "disabled")
 
+    @staticmethod
+    def _parse_optional_int(text: str, field_label: str) -> int | None:
+        text = text.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            raise ValueError(f"{field_label} must be a whole number (or left blank).")
+
+    def _on_date_audit_interp_preview(self) -> None:
+        target_prefix = self.date_audit_interp_target_var.get().strip()
+        reference_prefix = self.date_audit_interp_reference_var.get().strip()
+        if not target_prefix or not reference_prefix:
+            messagebox.showinfo(
+                "Photo Organizer",
+                "Enter both the misdated batch's original_path prefix and the reference folder's "
+                "current_path prefix (e.g. E:\\katya 2024 and E:\\Pics\\2020\\2020-02).",
+            )
+            return
+        try:
+            img_min = self._parse_optional_int(self.date_audit_interp_min_var.get(), "IMG # min")
+            img_max = self._parse_optional_int(self.date_audit_interp_max_var.get(), "IMG # max")
+        except ValueError as e:
+            messagebox.showerror("Photo Organizer", str(e))
+            return
+
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)
+            conn = connect(cfg.db_path_abs)
+            try:
+                candidates, stats = find_sequence_interpolation_candidates(
+                    conn, target_prefix=target_prefix, reference_prefix=reference_prefix,
+                    img_min=img_min, img_max=img_max,
+                )
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Preview failed: {e}")
+            return
+
+        self._date_audit_interp_candidates = candidates
+        self._set_date_audit_results_text(format_interpolation_preview(candidates, stats))
+        self.date_audit_interp_apply_btn.configure(state="normal" if candidates else "disabled")
+
     def _date_audit_busy(self) -> bool:
         return self.date_audit_worker is not None and self.date_audit_worker.is_alive()
 
@@ -1472,44 +1577,74 @@ class DashboardApp:
         # forces the user to have actually looked at the list of changes
         # before anything is written, and guarantees Apply only ever acts
         # on exactly what was shown, not a possibly-different fresh query.
-        if self._date_audit_busy():
-            return
         preview = self._date_audit_preview
         if preview is None or not preview.candidates:
             messagebox.showinfo("Photo Organizer", "Run Preview Fix first, and confirm it found something to fix.")
             return
+        self._start_date_audit_apply(
+            preview.candidates, BATCH_FIX_EDITOR,
+            confirm_message=(
+                f"About to correct the date on {len(preview.candidates)} photo(s)/video(s), using each "
+                "file's own pre-existing folder (from before this project ever sorted it) as the source "
+                "of truth for the year/month — see the preview text above for the exact list.\n\n"
+                "This only changes the database record (date_taken) via the same audited edit mechanism "
+                "review_tool.py's manual edits use — it never moves, renames, or re-sorts any file, and "
+                "every change is reversible (edit the date again in review_tool.py, or check photo_edits).\n\n"
+                "Proceed?"
+            ),
+            disable_btns=[self.date_audit_apply_btn],
+        )
 
-        if not messagebox.askyesno(
-            "Photo Organizer",
-            f"About to correct the date on {len(preview.candidates)} photo(s)/video(s), using each "
-            "file's own pre-existing folder (from before this project ever sorted it) as the source "
-            "of truth for the year/month — see the preview text above for the exact list.\n\n"
-            "This only changes the database record (date_taken) via the same audited edit mechanism "
-            "review_tool.py's manual edits use — it never moves, renames, or re-sorts any file, and "
-            "every change is reversible (edit the date again in review_tool.py, or check photo_edits).\n\n"
-            "Proceed?",
-        ):
+    def _on_date_audit_interp_apply(self) -> None:
+        candidates = self._date_audit_interp_candidates
+        if not candidates:
+            messagebox.showinfo("Photo Organizer", "Run Preview Sequence Fix first, and confirm it found something to fix.")
+            return
+        self._start_date_audit_apply(
+            candidates, SEQUENCE_FIX_EDITOR,
+            confirm_message=(
+                f"About to correct the date on {len(candidates)} photo(s)/video(s), using camera-roll "
+                "sequence numbers shared with the reference folder you named — see the preview text "
+                "above for the exact list and which are exact matches vs. interpolated.\n\n"
+                "This only changes the database record (date_taken) via the same audited edit mechanism "
+                "review_tool.py's manual edits use — it never moves, renames, or re-sorts any file, and "
+                "every change is reversible (edit the date again in review_tool.py, or check photo_edits).\n\n"
+                "Proceed?"
+            ),
+            disable_btns=[self.date_audit_interp_apply_btn],
+        )
+
+    def _start_date_audit_apply(self, candidates: list, edited_by: str, confirm_message: str, disable_btns: list) -> None:
+        if self._date_audit_busy():
+            return
+        if not messagebox.askyesno("Photo Organizer", confirm_message):
             return
 
         self.date_audit_stop_requested = False
-        self.date_audit_progress.configure(value=0, maximum=max(len(preview.candidates), 1))
+        self.date_audit_progress.configure(value=0, maximum=max(len(candidates), 1))
         self.date_audit_status_label.configure(text="Starting...")
         self._set_date_audit_results_text("Applying fixes...")
-        self.date_audit_apply_btn.configure(state="disabled")
+        for btn in disable_btns:
+            btn.configure(state="disabled")
         self.date_audit_scan_btn.configure(state="disabled")
         self.date_audit_cancel_btn.configure(state="normal")
 
-        self.date_audit_worker = threading.Thread(target=self._date_audit_worker, args=(preview,), daemon=True)
+        self.date_audit_worker = threading.Thread(
+            target=self._date_audit_worker, args=(candidates, edited_by), daemon=True
+        )
         self.date_audit_worker.start()
 
     def _on_date_audit_cancel(self) -> None:
         self.date_audit_stop_requested = True
         self.date_audit_status_label.configure(text="Stopping...")
 
-    def _date_audit_worker(self, preview: FixPreview) -> None:
+    def _date_audit_worker(self, candidates: list, edited_by: str) -> None:
         # Runs on a background thread — never touch Tk widgets here, only
         # push messages through self.msg_queue, same shape as every other
-        # worker in this file.
+        # worker in this file. Shared by both the folder-rule Apply Fix
+        # button (edited_by=BATCH_FIX_EDITOR) and the Sequence Interpolation
+        # Apply button (edited_by=SEQUENCE_FIX_EDITOR) — same underlying
+        # apply_fixes() call either way, just a different candidate list/tag.
         try:
             cfg = load_config()
             logger, log_path = setup_logging(
@@ -1519,9 +1654,10 @@ class DashboardApp:
             conn = connect(cfg.db_path_abs)
             try:
                 stats = apply_fixes(
-                    conn, preview.candidates, logger,
+                    conn, candidates, logger,
                     progress_cb=lambda done, total: self.msg_queue.put(("date_audit_progress", done, total)),
                     stop_check=lambda: self.date_audit_stop_requested,
+                    edited_by=edited_by,
                 )
             finally:
                 conn.close()
@@ -1531,10 +1667,12 @@ class DashboardApp:
 
     def _on_date_audit_done(self, stats: ApplyFixStats, was_stopped: bool) -> None:
         self.date_audit_apply_btn.configure(state="disabled")  # this preview is now stale/consumed
+        self.date_audit_interp_apply_btn.configure(state="disabled")  # ditto for the sequence-interp preview
         self.date_audit_scan_btn.configure(state="normal")
         self.date_audit_cancel_btn.configure(state="disabled")
         self.date_audit_status_label.configure(text="Stopped early" if was_stopped else "Done")
         self._date_audit_preview = None  # force a fresh Preview before another Apply
+        self._date_audit_interp_candidates = None  # ditto for Sequence Interpolation
         lines = [f"Applied: {stats.applied:,} / {stats.candidates:,}" + ("  (stopped early by user)" if was_stopped else "")]
         lines.append(f"Skipped (manually edited since preview): {stats.skipped_manual_edit:,}")
         lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
@@ -1542,7 +1680,14 @@ class DashboardApp:
         self._set_date_audit_results_text("\n".join(lines))
 
     def _on_date_audit_error(self, err: str) -> None:
-        self.date_audit_apply_btn.configure(state="normal")
+        # Re-enable whichever Apply button still has a live preview behind
+        # it (the failed run's own preview is still valid to retry with —
+        # only a completed/partial apply invalidates it, handled in
+        # _on_date_audit_done above).
+        if self._date_audit_preview:
+            self.date_audit_apply_btn.configure(state="normal")
+        if self._date_audit_interp_candidates:
+            self.date_audit_interp_apply_btn.configure(state="normal")
         self.date_audit_scan_btn.configure(state="normal")
         self.date_audit_cancel_btn.configure(state="disabled")
         self.date_audit_status_label.configure(text="Error")

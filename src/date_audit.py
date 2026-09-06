@@ -69,9 +69,12 @@ touching) everything else so the user knows what's still unresolved.
 """
 from __future__ import annotations
 
+import bisect
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -81,6 +84,21 @@ from .edits import has_manual_edit, apply_edit
 # edited_by value, distinguishing them at a glance from a real interactive
 # review_tool.py edit (which records the actual review_users username).
 BATCH_FIX_EDITOR = "date-audit-batch"
+# A separate tag for find_sequence_interpolation_candidates()'s corrections
+# (see its docstring) -- distinguishable in the photo_edits audit trail from
+# the folder-name-based BATCH_FIX_EDITOR corrections above, since they're a
+# different (day/time-precision, human-directed) basis, not the same rule.
+SEQUENCE_FIX_EDITOR = "date-audit-sequence"
+
+# Camera-roll filenames this module knows how to parse a sequence number
+# out of -- IMG_####, VID_####, etc., with or without a trailing " N"/"(N)"
+# duplicate-copy suffix some export tools add (e.g. "IMG_4799 3.JPG").
+_IMG_NUM_RE = re.compile(r"^(?:IMG|VID|PXL|PANO)_(\d+)", re.I)
+
+
+def _sequence_number(filename: str) -> int | None:
+    m = _IMG_NUM_RE.match(filename)
+    return int(m.group(1)) if m else None
 
 # A cluster below this size is very unlikely to be worth a human's time to
 # review as a candidate batch-date artifact — real single-day events (a
@@ -337,8 +355,11 @@ class FixCandidate:
     current_path: str
     old_date_taken: str
     old_date_source: str
-    new_date_taken: str          # YYYY-MM-01T00:00:00 -- month precision only, see module docstring
+    new_date_taken: str          # ISO date/datetime -- precision depends on `basis` (see below)
     corrected_year_month: str    # e.g. "2012-12", for display
+    basis: str = "folder"        # "folder" (month precision, find_fix_candidates) |
+                                  # "sequence-exact" | "sequence-interpolated" (day/time precision,
+                                  # find_sequence_interpolation_candidates)
 
 
 @dataclass
@@ -464,6 +485,7 @@ def apply_fixes(
     logger: logging.Logger,
     progress_cb: Callable[[int, int], None] | None = None,
     stop_check: Callable[[], bool] | None = None,
+    edited_by: str = BATCH_FIX_EDITOR,
 ) -> ApplyFixStats:
     """Step 2 (apply half): writes each candidate's corrected date_taken via
     src.edits.apply_edit (field_name='date_taken'), the exact same generic,
@@ -493,7 +515,7 @@ def apply_fixes(
                 stats.skipped_manual_edit += 1
                 logger.info(f"SKIP date-audit fix (manually edited since preview) hash={c.file_hash[:12]} {c.current_path}")
             else:
-                apply_edit(conn, c.file_hash, "date_taken", c.new_date_taken, BATCH_FIX_EDITOR, logger=logger)
+                apply_edit(conn, c.file_hash, "date_taken", c.new_date_taken, edited_by, logger=logger)
                 stats.applied += 1
                 logger.info(
                     f"OK date-audit fix hash={c.file_hash[:12]} {c.current_path}: "
@@ -507,3 +529,166 @@ def apply_fixes(
 
     logger.info(f"Date-audit batch fix complete: {stats.summary()}")
     return stats
+
+
+@dataclass
+class InterpolationStats:
+    total_targets: int = 0        # rows in the target set within [img_min, img_max] with no filename number
+    no_sequence_number: int = 0   # target filename didn't parse as IMG_####-style at all
+    exact_matches: int = 0        # target's own sequence number also appears in the reference set
+    interpolated: int = 0         # bracketed between two reference points, no exact match
+    extrapolated_skipped: int = 0  # outside the reference set's own number range -- not proposed
+    already_manually_edited: int = 0
+
+    def summary(self) -> str:
+        return (
+            f"total_targets={self.total_targets} exact={self.exact_matches} "
+            f"interpolated={self.interpolated} extrapolated_skipped={self.extrapolated_skipped} "
+            f"no_sequence_number={self.no_sequence_number} already_manually_edited={self.already_manually_edited}"
+        )
+
+
+def find_sequence_interpolation_candidates(
+    conn: sqlite3.Connection,
+    target_prefix: str,
+    reference_prefix: str,
+    img_min: int | None = None,
+    img_max: int | None = None,
+) -> tuple[list[FixCandidate], InterpolationStats]:
+    """A second, human-directed batch-fix pattern, distinct from
+    find_fix_candidates()'s folder-name rule — for when the user recognizes
+    a specific batch of `date_source='filesystem'` photos as belonging to a
+    real event they can point to an already-correctly-dated folder for
+    (e.g. "these look like the Feb 2020 trip in E:\\Pics\\2020\\2020-02"),
+    even though there's no automatic signal (no matching original folder,
+    no exact-hash duplicate) tying the two together.
+
+    The insight this exploits: camera-roll filenames (`IMG_####`, etc.) are
+    a monotonically-increasing sequence number for a given device — so if
+    a `reference_prefix` folder full of real (exif/container-sourced)
+    dates spans a range of these numbers, a `target_prefix` folder's
+    misdated files sharing that SAME number range were very likely taken
+    around the same time, even if the files themselves aren't byte-
+    identical (e.g. a lost-EXIF re-export of the same shot — confirmed on
+    a real 1,705-file case this session: 0 exact-hash duplicates existed
+    between the two folders, yet 99% of the target files' sequence numbers
+    matched a reference number EXACTLY, i.e. the reference set almost
+    certainly has a different export of the very same photo).
+
+    For each target row (date_source='filesystem', original_path under
+    target_prefix, sequence number within [img_min, img_max] if given):
+      - EXACT match: the same sequence number exists in the reference set
+        (current_path under reference_prefix, date_source in
+        ('exif','container')) — use that reference date directly (the
+        median, if more than one reference file shares the number, e.g.
+        edited variants of one shot). Day/time precision.
+      - INTERPOLATED: no exact match, but the number falls between two
+        reference numbers — linearly interpolate the timestamp between
+        them by number distance. Still day-level precision in practice
+        (photo-taking rate rarely varies enough within one trip to shift
+        the interpolated day), just not as certain as an exact match.
+      - EXTRAPOLATED (skipped, not proposed): the number falls outside the
+        reference set's own range entirely — this function refuses to
+        guess beyond the bracketed evidence; report it, don't fix it.
+
+    This is deliberately NOT run automatically the way find_fix_candidates()
+    is — it needs a human to have already recognized the target batch and
+    named a specific reference folder; see main.py audit-dates
+    interpolate-preview / CLAUDE.md's Date Cluster Audit entry for the real
+    case this was built for.
+    """
+    stats = InterpolationStats()
+
+    ref_rows = conn.execute(
+        "SELECT filename, date_taken FROM photos WHERE current_path LIKE ? AND date_source IN ('exif','container')",
+        (f"{reference_prefix}%",),
+    ).fetchall()
+    ref_dates_by_num: dict[int, list[datetime]] = {}
+    for filename, date_taken in ref_rows:
+        n = _sequence_number(filename)
+        if n is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(date_taken)
+        except ValueError:
+            continue
+        ref_dates_by_num.setdefault(n, []).append(dt)
+    ref_nums = sorted(ref_dates_by_num.keys())
+
+    def _ref_date(n: int) -> datetime:
+        dts = sorted(ref_dates_by_num[n])
+        return dts[len(dts) // 2]  # median, in case of multiple edited variants sharing one number
+
+    candidates: list[FixCandidate] = []
+    if ref_nums:  # nothing to bracket against otherwise -- every target would be "extrapolated"
+        target_rows = conn.execute(
+            "SELECT file_hash, filename, current_path, date_taken FROM photos "
+            "WHERE original_path LIKE ? AND date_source = 'filesystem'",
+            (f"{target_prefix}%",),
+        ).fetchall()
+
+        for file_hash, filename, current_path, old_date_taken in target_rows:
+            n = _sequence_number(filename)
+            if n is None:
+                stats.no_sequence_number += 1
+                continue
+            if (img_min is not None and n < img_min) or (img_max is not None and n > img_max):
+                continue
+            stats.total_targets += 1
+
+            if n in ref_dates_by_num:
+                new_dt, basis = _ref_date(n), "sequence-exact"
+                stats.exact_matches += 1
+            else:
+                idx = bisect.bisect_left(ref_nums, n)
+                if idx == 0 or idx == len(ref_nums):
+                    stats.extrapolated_skipped += 1
+                    continue
+                lo, hi = ref_nums[idx - 1], ref_nums[idx]
+                lo_dt, hi_dt = _ref_date(lo), _ref_date(hi)
+                frac = (n - lo) / (hi - lo)
+                interp_ts = lo_dt.timestamp() + frac * (hi_dt.timestamp() - lo_dt.timestamp())
+                new_dt, basis = datetime.fromtimestamp(interp_ts), "sequence-interpolated"
+                stats.interpolated += 1
+
+            if has_manual_edit(conn, file_hash, "date_taken"):
+                stats.already_manually_edited += 1
+                continue
+            candidates.append(FixCandidate(
+                file_hash=file_hash,
+                current_path=current_path,
+                old_date_taken=old_date_taken,
+                old_date_source="filesystem",
+                new_date_taken=new_dt.isoformat(),
+                corrected_year_month=new_dt.strftime("%Y-%m"),
+                basis=basis,
+            ))
+
+    return candidates, stats
+
+
+def format_interpolation_preview(
+    candidates: list[FixCandidate], stats: InterpolationStats, max_lines: int = 200
+) -> str:
+    lines = [
+        f"{len(candidates)} photo(s)/video(s) would be corrected using neighboring sequence numbers "
+        f"from the reference folder ({stats.exact_matches} exact matches, {stats.interpolated} interpolated):",
+        "",
+    ]
+    for c in candidates[:max_lines]:
+        basis_label = "exact match" if c.basis == "sequence-exact" else "interpolated"
+        lines.append(
+            f"  {c.current_path}\n"
+            f"    {c.old_date_taken} (date_source=filesystem)  ->  {c.new_date_taken}  ({basis_label})"
+        )
+    if len(candidates) > max_lines:
+        lines.append(f"  ... and {len(candidates) - max_lines} more (truncated for display)")
+    lines.append("")
+    lines.append(
+        f"Of {stats.total_targets} target row(s) in range: {stats.exact_matches} exact + "
+        f"{stats.interpolated} interpolated = {len(candidates) + stats.already_manually_edited} correctable, "
+        f"{stats.extrapolated_skipped} outside the reference folder's own number range (not guessed at), "
+        f"{stats.already_manually_edited} already manually edited (left alone), "
+        f"{stats.no_sequence_number} had no parseable sequence number in their filename."
+    )
+    return "\n".join(lines)
