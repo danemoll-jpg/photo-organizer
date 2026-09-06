@@ -79,6 +79,32 @@
   <span class="filters-hint">Path is relative to <code>{{ dest_root }}</code></span>
 </section>
 
+<!-- Phase 2h Part A: bulk selection/editing. Hidden until 1+ grid items are
+     checked (see review.js's updateBulkBar) -- selection itself is a plain
+     client-side Set of file_hash values (renderGrid draws a checkbox per
+     card), so it persists across pagination without any server-side
+     "selection session" state. -->
+<section class="bulk-bar" id="bulk-bar" hidden>
+  <div class="bulk-bar-count"><strong id="bulk-count">0</strong> selected</div>
+  <div class="bulk-actions">
+    <label>Set location
+      <select id="bulk-location"><option value="">Choose…</option></select>
+    </label>
+    <button type="button" id="bulk-location-apply" class="secondary">Apply</button>
+    <label>Add tag
+      <input type="text" id="bulk-tag-input" placeholder="e.g. birthday" autocomplete="off">
+    </label>
+    <button type="button" id="bulk-tag-apply" class="secondary">Apply</button>
+    <label>Set date
+      <input type="date" id="bulk-date-input">
+    </label>
+    <button type="button" id="bulk-date-apply" class="secondary">Apply</button>
+    <button type="button" id="bulk-hide-apply" class="secondary bulk-danger">🚫 Hide selected</button>
+  </div>
+  <span id="bulk-result" class="bulk-result" hidden></span>
+  <button type="button" id="bulk-clear" class="secondary">Clear selection</button>
+</section>
+
 <!-- Grid pager, duplicated top+bottom (see review.js) so browsing down a
      long page of thumbnails doesn't require scrolling back up just to
      turn the page. Both copies share classes (not ids -- ids must be
@@ -123,6 +149,13 @@
       <img id="viewer-img" alt="">
       <video id="viewer-video" controls hidden></video>
       <div id="viewer-nomore" class="viewer-nomore" hidden></div>
+      <!-- Phase 2h Part B: phone-width-only toggle for the info panel below
+           (caption/tags/location/date/edit controls) -- CSS-only hidden on
+           desktop/tablet (see review.css's <=480px block), so this button
+           does nothing and is invisible above that width; no JS/layout
+           change happens there. Collapsed (panel hidden) by default on a
+           phone -- see review.js's openViewer/setInfoExpanded. -->
+      <button type="button" id="viewer-info-toggle" class="viewer-info-toggle" title="Show/hide photo info">&#8505; Info</button>
     </div>
 
     <div class="viewer-details">

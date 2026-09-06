@@ -132,6 +132,16 @@ value the moment it's edited, not just after some future reload.
 mechanism — it's just another field name, not a separate code path — and
 every browsing route (_build_filters) now excludes excluded=1 rows by
 default, revealed again only via a "Show hidden" toggle (show_hidden=1).
+
+Phase 2h added a second write route, /api/bulk-edit, for the grid's
+checkbox multi-select + bulk-action bar (static/review.js): the same
+auth/CSRF/allow-list posture as /api/edit/<hash>, applied to a client-
+supplied list of file_hash values in one request. Set location/date/Hide
+reuse apply_edit()'s existing full-"set" semantics per item; "Add tag" goes
+through src.edits.add_tag_bulk() instead — a union/append into each item's
+own existing tags, deliberately NOT apply_edit()'s full-replace, since
+different selected files likely have different tags a full replace would
+destroy. See BULK_SET_FIELDS below and api_bulk_edit()'s own docstring.
 """
 from __future__ import annotations
 
@@ -153,7 +163,7 @@ from PIL import Image, ImageOps
 from src.auth import register_auth
 from src.config import Config, load_config
 from src.db import init_db
-from src.edits import EDITABLE_FIELDS, apply_edit, current_tags, manual_edit_fields
+from src.edits import EDITABLE_FIELDS, MAX_BULK_ITEMS, add_tag_bulk, apply_edit, current_tags, manual_edit_fields
 from src.logging_setup import setup_logging
 from src.port_check import listening_pids
 from src.storage import PhotoStorage, get_storage
@@ -967,6 +977,82 @@ def api_edit(file_hash: str):
     finally:
         read_conn.close()
     return jsonify({"item": item})
+
+
+# Phase 2h: fields the bulk-edit route may apply the SAME value to every
+# selected item via apply_edit()'s existing full-"set" semantics. Caption
+# is deliberately excluded (setting one identical caption across a batch of
+# different photos was never asked for); "tags" is also excluded from this
+# set on purpose -- bulk tagging goes through add_tag_bulk()'s union/append
+# path instead (mode="add_tag" below), never apply_edit()'s full-replace,
+# per photo-organizer-spec.md's explicit warning not to reuse that code
+# path blindly for a batch of files with different existing tags.
+BULK_SET_FIELDS = {"location", "date_taken", "excluded"}
+
+
+@app.route("/api/bulk-edit", methods=["POST"])
+def api_bulk_edit():
+    """Phase 2h: apply one edit to many selected items at once (the grid's
+    checkbox multi-select + bulk-action bar — see static/review.js). Same
+    auth gate (before_request already covers /api/*), same CSRF check, and
+    the same server-side field allow-list posture as the single-item
+    /api/edit/<hash> route above — a client never gets to name an arbitrary
+    field, and "tags" specifically is only ever reachable here in
+    mode="add_tag" (union), never a full replace (see BULK_SET_FIELDS).
+
+    Body: {"file_hashes": [...], "field": ..., "value": ..., "mode":
+    "set"|"add_tag", "csrf_token": "..."}. `mode` defaults to "set".
+
+    Every selected file_hash is applied independently (one apply_edit() or
+    add_tag_bulk() call, one photo_edits audit row each, `edited_by` the
+    real logged-in user per spec — not a synthetic batch-tool tag like the
+    fully-automated date-audit tool uses) — a bad hash or an invalid value
+    for one item is recorded in `failed` and does NOT abort the rest of the
+    batch, so one typo/stale selection can't silently zero out an otherwise
+    successful bulk action. Returns a summary ({updated, failed, total}) so
+    the front end can show a clear "N updated, M failed" result rather than
+    silently succeeding or failing (per spec)."""
+    data = request.get_json(silent=True) or {}
+    if data.get("csrf_token") != session.get("_csrf"):
+        return jsonify({"error": "Your session looks stale — reload the page and try again."}), 403
+
+    file_hashes = data.get("file_hashes")
+    if not isinstance(file_hashes, list) or not file_hashes:
+        return jsonify({"error": "No items selected."}), 400
+    if len(file_hashes) > MAX_BULK_ITEMS:
+        return jsonify({"error": f"Too many items selected at once (max {MAX_BULK_ITEMS})."}), 400
+
+    field = data.get("field")
+    mode = data.get("mode") or "set"
+    value = data.get("value")
+    if mode == "add_tag":
+        if field != "tags":
+            return jsonify({"error": "mode='add_tag' only applies to the tags field."}), 400
+    elif mode == "set":
+        if field not in BULK_SET_FIELDS:
+            return jsonify({"error": f"{field!r} is not a bulk-editable field."}), 400
+    else:
+        return jsonify({"error": f"Unknown bulk-edit mode {mode!r}."}), 400
+
+    edited_by = session.get("user") or "unknown"
+    updated = 0
+    failed: list[dict] = []
+    write_conn = get_db_write()
+    try:
+        for file_hash in file_hashes:
+            try:
+                if mode == "add_tag":
+                    add_tag_bulk(write_conn, file_hash, value, edited_by=edited_by, logger=_logger)
+                else:
+                    apply_edit(write_conn, file_hash, field, value, edited_by=edited_by, logger=_logger)
+                updated += 1
+            except ValueError as e:
+                failed.append({"file_hash": file_hash, "error": str(e)})
+    finally:
+        write_conn.close()
+
+    _captions_cache.refresh()
+    return jsonify({"updated": updated, "failed": failed, "total": len(file_hashes)})
 
 
 # Small bounded in-memory cache of already-downscaled JPEG bytes, keyed by

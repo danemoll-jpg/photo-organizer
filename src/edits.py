@@ -50,6 +50,15 @@ MAX_TEXT_FIELD_LENGTH = 4000
 MAX_TAG_LENGTH = 100
 MAX_TAGS = 100
 
+# Phase 2h: a bulk-edit request names its own file_hash list (there's no
+# server-side "everything matching the current filter" expansion -- see
+# review_tool.py's /api/bulk-edit and photo-organizer-spec.md's explicit
+# "not requested" on that). This just bounds one request's blast radius
+# (and the size of the read-write transaction it opens) -- comfortably
+# above anything a human is actually going to hand-pick via checkboxes
+# across a few grid pages (the grid's own page-size cap is 200).
+MAX_BULK_ITEMS = 1000
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -241,3 +250,50 @@ def apply_edit(conn: sqlite3.Connection, file_hash: str, field_name: str, new_va
     if logger is not None:
         logger.info(f"EDIT field={field_name} hash={file_hash[:12]} by={edited_by!r}")
     return result_value
+
+
+def add_tag_bulk(conn: sqlite3.Connection, file_hash: str, tag: Any,
+                  edited_by: str, logger: logging.Logger | None = None) -> list[str]:
+    """Phase 2h bulk "Add tag": UNION one new tag into this file's existing
+    tag set -- deliberately NOT apply_edit("tags", ...)'s full-replace
+    semantics, since a bulk action almost certainly touches files with
+    different existing tags that a full-replace would silently destroy
+    (see photo-organizer-spec.md's Phase 2h section). review_tool.py's
+    /api/bulk-edit calls this once per selected file_hash instead of
+    apply_edit for the "tags" field.
+
+    Still goes through the exact same photo_edits audit mechanism as any
+    other edit (field_name="tags", same as a single-item tag edit) -- so a
+    bulk-added tag is just as permanently protected from a future
+    load-captions overwrite as one added via the single-item editor.
+
+    A no-op (no audit row written, tag list returned unchanged) if the tag
+    is already present (case-insensitively) -- bulk-adding a tag that's
+    already there isn't an edit, and shouldn't spam the audit log once per
+    selected file that already happens to have it."""
+    tag = str(tag).strip() if tag is not None else ""
+    if not tag:
+        raise ValueError("Tag cannot be empty.")
+    if len(tag) > MAX_TAG_LENGTH:
+        raise ValueError(f"Each tag must be {MAX_TAG_LENGTH} characters or fewer.")
+    row = conn.execute("SELECT 1 FROM photos WHERE file_hash = ?", (file_hash,)).fetchone()
+    if row is None:
+        raise ValueError(f"No photo with file_hash={file_hash!r}.")
+
+    old_tags = current_tags(conn, file_hash)
+    if any(t.lower() == tag.lower() for t in old_tags):
+        return old_tags  # already has this tag -- nothing to union in, nothing to audit
+
+    new_tags = old_tags + [tag]
+    if len(new_tags) > MAX_TAGS:
+        raise ValueError(f"Too many tags (max {MAX_TAGS}).")
+    _set_tags(conn, file_hash, new_tags)
+    conn.execute(
+        "INSERT INTO photo_edits (file_hash, field_name, old_value, new_value, edited_by, edited_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (file_hash, "tags", json.dumps(old_tags), json.dumps(new_tags), edited_by, _now_iso()),
+    )
+    conn.commit()
+    if logger is not None:
+        logger.info(f"BULK EDIT add-tag={tag!r} hash={file_hash[:12]} by={edited_by!r}")
+    return new_tags

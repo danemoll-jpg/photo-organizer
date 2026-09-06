@@ -82,6 +82,27 @@
  *   - A new "Show hidden" checkbox (state.filters.show_hidden) reveals
  *     already-hidden items again (mixed in with visible ones, badged and
  *     dimmed -- see renderGrid) so they can be found and un-hidden.
+ *
+ * Phase 2h (this follow-up session):
+ *   Part A -- bulk selection/editing. state.selection is a plain Set of
+ *     file_hash values, populated/depleted by a checkbox drawn on every
+ *     grid card (see renderGrid) -- being a Set independent of
+ *     state.grid.items, it survives paging to a different page untouched
+ *     (no "select all matching filter" beyond what's been visibly paged
+ *     through, per spec). The bulk-action bar (#bulk-bar) appears once
+ *     it's non-empty and posts to the new /api/bulk-edit endpoint (see
+ *     postBulkEdit) -- Set location/Set date/Hide reuse the single-edit
+ *     endpoint's full-"set" semantics per selected item, but "Add tag"
+ *     uses mode="add_tag" (a union/append into each item's OWN existing
+ *     tags server-side -- see src/edits.py::add_tag_bulk) specifically
+ *     because a full-replace across a batch of files with different
+ *     existing tags would destroy them.
+ *   Part B -- on a phone-width viewport only (see review.css's <=480px
+ *     block, layered on top of the existing <=800px tablet-stack rule,
+ *     which is unchanged), the viewer's info panel starts collapsed and is
+ *     toggled by #viewer-info-toggle (setInfoExpanded below) -- purely a
+ *     show/hide of .viewer-details via a class on .viewer-panel; nothing
+ *     about editing itself changes once it's expanded.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -94,6 +115,9 @@
   const state = {
     filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", show_hidden: false },
     pageSize: cfg.pageSize,
+    // Phase 2h Part A: file_hash values checked in the grid, independent of
+    // which page is currently loaded -- see renderGrid/toggleSelect.
+    selection: new Set(),
     grid: { items: [], firstCursor: null, lastCursor: null, hasNext: false, hasPrev: false, pageNum: 1 },
     viewer: {
       open: false,
@@ -124,7 +148,15 @@
   const gridPrevBtnEls = els("grid-prev-btn");
   const gridNextBtnEls = els("grid-next-btn");
 
+  // Phase 2h Part A: bulk selection/editing bar
+  const bulkBarEl = el("bulk-bar");
+  const bulkCountEl = el("bulk-count");
+  const bulkResultEl = el("bulk-result");
+  const bulkLocationSelect = el("bulk-location");
+
   const viewerEl = el("viewer");
+  const viewerPanelEl = document.querySelector(".viewer-panel");
+  const viewerInfoToggle = el("viewer-info-toggle");
   const viewerImg = el("viewer-img");
   const viewerVideo = el("viewer-video");
   const viewerNoMore = el("viewer-nomore");
@@ -241,11 +273,18 @@
     try {
       const data = await fetchJSON("/api/facets");
       const locSel = el("f-location");
+      // Phase 2h Part A: the bulk-action bar's "Set location" dropdown uses
+      // this exact same distinct-location list (per spec: "same dropdown
+      // (existing distinct-location list) as the single-item edit UI" --
+      // this facets-backed list is the one already-existing source of
+      // truth for "known locations" in this tool, the same one the grid's
+      // own Location filter dropdown above already draws from).
       for (const name of data.locations || []) {
         const opt = document.createElement("option");
         opt.value = name;
         opt.textContent = name;
         locSel.appendChild(opt);
+        bulkLocationSelect.appendChild(opt.cloneNode(true));
       }
       allTags = data.tags || [];
     } catch (e) {
@@ -341,11 +380,14 @@
     gridEmptyEl.hidden = state.grid.items.length > 0;
     for (const item of state.grid.items) {
       const card = document.createElement("div");
+      const isSelected = state.selection.has(item.file_hash);
       // Phase 2f: a hidden item is only ever IN this list at all when
       // "Show hidden" is checked (see _build_filters' show_hidden on the
       // server) -- dim + badge it so it's obviously the hidden one, not a
       // silently-missing distinction.
-      card.className = "card" + (item.excluded ? " card-hidden" : "");
+      card.className = "card"
+        + (item.excluded ? " card-hidden" : "")
+        + (isSelected ? " card-selected" : ""); // Phase 2h Part A
       const thumb = !item.is_video
         ? `<img loading="lazy" src="/image/${item.file_hash}?max=400" alt="">`
         // Phase 2g: a real cached first-frame thumbnail when one exists
@@ -360,7 +402,12 @@
            <div class="thumb-video-badge" title="Video">&#9654;</div>`
         : `<div class="thumb-video-placeholder" title="Video">&#9654;</div>`;
       card.innerHTML = `
-        <div class="thumb-wrap">${thumb}</div>
+        <div class="thumb-wrap">
+          ${thumb}
+          <label class="card-select" title="Select for bulk actions">
+            <input type="checkbox" class="card-select-checkbox" ${isSelected ? "checked" : ""}>
+          </label>
+        </div>
         <div class="card-body">
           <div class="card-path" title="${escapeHtml(item.current_path)}">${escapeHtml(item.relative_path)}</div>
           <div class="card-date">${fmtDate(item.date_taken)}${item.date_source ? " · " + item.date_source : ""}</div>
@@ -372,6 +419,13 @@
           </div>
         </div>`;
       card.addEventListener("click", () => openViewer(item));
+      // Phase 2h Part A: the checkbox (and its wrapping label, so tapping
+      // the label's larger hit-area also works) must never also trigger
+      // the card's own click-to-open-viewer handler above.
+      const selectLabel = card.querySelector(".card-select");
+      selectLabel.addEventListener("click", (e) => e.stopPropagation());
+      const checkbox = card.querySelector(".card-select-checkbox");
+      checkbox.addEventListener("change", () => toggleSelect(item.file_hash, checkbox.checked, card));
       gridEl.appendChild(card);
     }
     forEach(gridPrevBtnEls, (btn) => { btn.disabled = !state.grid.hasPrev; });
@@ -417,6 +471,117 @@
   el("f-pagesize").addEventListener("change", (e) => {
     state.pageSize = parseInt(e.target.value, 10);
     loadGridPage({ resetPageNum: true });
+  });
+
+  // ---------------------------------------------------------------------
+  // Phase 2h Part A: bulk selection/editing
+  // ---------------------------------------------------------------------
+  function updateBulkBar() {
+    const n = state.selection.size;
+    bulkBarEl.hidden = n === 0;
+    bulkCountEl.textContent = String(n);
+    if (n === 0) { bulkResultEl.hidden = true; bulkResultEl.textContent = ""; }
+  }
+
+  // `card` is passed so the just-toggled checkbox's own card gets its
+  // selected-outline updated immediately, without waiting for (or forcing)
+  // a full grid re-render.
+  function toggleSelect(fileHash, checked, card) {
+    if (checked) state.selection.add(fileHash);
+    else state.selection.delete(fileHash);
+    if (card) card.classList.toggle("card-selected", checked);
+    updateBulkBar();
+  }
+
+  el("bulk-clear").addEventListener("click", () => {
+    state.selection.clear();
+    updateBulkBar();
+    renderGrid(); // uncheck/un-outline whatever's currently visible
+  });
+
+  function showBulkResult(data, actionLabel) {
+    const failedCount = (data.failed || []).length;
+    bulkResultEl.hidden = false;
+    bulkResultEl.className = "bulk-result" + (failedCount ? " has-errors" : "");
+    bulkResultEl.textContent = failedCount
+      ? `${actionLabel}: ${data.updated} updated, ${failedCount} failed.`
+      : `${actionLabel}: ${data.updated} updated.`;
+  }
+
+  // Every bulk action goes through this one call — same CSRF token the
+  // single-item edit form already uses (window.REVIEW_CONFIG.csrfToken).
+  // `mode` defaults server-side to "set" (apply the same value to every
+  // selected item via apply_edit's existing semantics); "add_tag" is the
+  // one exception (union into each item's own existing tags — see
+  // src/edits.py::add_tag_bulk / review_tool.py's api_bulk_edit).
+  async function postBulkEdit(field, value, mode) {
+    const res = await fetch("/api/bulk-edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file_hashes: Array.from(state.selection), field, value, mode,
+        csrf_token: cfg.csrfToken,
+      }),
+    });
+    if (res.status === 401) {
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+      throw new Error("Unauthorized — redirecting to login");
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
+    return data;
+  }
+
+  // After any bulk action: re-fetch the grid page currently on screen
+  // (same keepPageNum mode Phase 2f's single-item edits already use, so a
+  // bulk action doesn't silently jump the user back to page 1) and the
+  // topbar stats, so caption/tag/location/hidden-count changes show up
+  // immediately, same posture as a single-item edit.
+  async function afterBulkAction() {
+    await loadGridPage({ keepPageNum: true });
+    refreshStats();
+  }
+
+  el("bulk-location-apply").addEventListener("click", async () => {
+    const value = bulkLocationSelect.value;
+    if (!value) { alert("Choose a location first."); return; }
+    try {
+      const data = await postBulkEdit("location", value, "set");
+      showBulkResult(data, "Set location");
+      await afterBulkAction();
+    } catch (e) { alert(e.message); }
+  });
+
+  el("bulk-tag-apply").addEventListener("click", async () => {
+    const input = el("bulk-tag-input");
+    const tag = input.value.trim();
+    if (!tag) { alert("Type a tag first."); return; }
+    try {
+      const data = await postBulkEdit("tags", tag, "add_tag");
+      showBulkResult(data, `Add tag "${tag}"`);
+      input.value = "";
+      await afterBulkAction();
+    } catch (e) { alert(e.message); }
+  });
+
+  el("bulk-date-apply").addEventListener("click", async () => {
+    const value = el("bulk-date-input").value; // "" if left blank
+    if (!value) { alert("Choose a date first."); return; }
+    try {
+      const data = await postBulkEdit("date_taken", value, "set");
+      showBulkResult(data, "Set date taken");
+      await afterBulkAction();
+    } catch (e) { alert(e.message); }
+  });
+
+  el("bulk-hide-apply").addEventListener("click", async () => {
+    const n = state.selection.size;
+    if (!confirm(`Hide ${n} selected item(s) from the library? This is reversible via "Show hidden".`)) return;
+    try {
+      const data = await postBulkEdit("excluded", true, "set");
+      showBulkResult(data, "Hide from library");
+      await afterBulkAction();
+    } catch (e) { alert(e.message); }
   });
 
   // ---------------------------------------------------------------------
@@ -531,8 +696,25 @@
     // photo with no connection to the one just clicked).
     state.viewer.randomSeed = null;
     state.viewer.randomIdx = 0;
+    // Phase 2h Part B: collapsed by default every time the viewer is
+    // (re)opened fresh from the grid -- on desktop/tablet this class does
+    // nothing at all (see review.css, scoped to <=480px), so this is a
+    // no-op there.
+    setInfoExpanded(false);
     renderViewerItem(item);
   }
+
+  // Phase 2h Part B: phone-width-only info-panel show/hide. A no-op in
+  // effect above 480px wide -- the CSS rule this class depends on only
+  // exists inside that media query (see review.css) -- so this never
+  // touches desktop/iPad layout.
+  function setInfoExpanded(expanded) {
+    viewerPanelEl.classList.toggle("info-expanded", expanded);
+    viewerInfoToggle.textContent = expanded ? "✕ Hide info" : "ℹ Info";
+  }
+  viewerInfoToggle.addEventListener("click", () => {
+    setInfoExpanded(!viewerPanelEl.classList.contains("info-expanded"));
+  });
 
   function closeViewer() {
     stopSlideshow();

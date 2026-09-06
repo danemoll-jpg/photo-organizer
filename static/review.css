@@ -183,6 +183,75 @@ body {
   background: var(--badge-bg);
 }
 
+/* Phase 2h Part A: bulk selection/editing bar -- sits between the filters
+   and the grid pager, visible only once 1+ items are checked (see
+   review.js's updateBulkBar). */
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 10px 20px;
+  background: var(--badge-bg);
+  border-bottom: 1px solid var(--border);
+}
+/* Without this, the [hidden] attribute review.js toggles (bulkBarEl.hidden
+   -- see updateBulkBar) would silently do nothing: an explicit `display`
+   on the element's own class beats the browser's default `[hidden] {
+   display: none }` UA rule, since author styles always win over UA styles
+   regardless of selector specificity. Every other hidden-toggled element
+   in this page (the viewer, #grid-empty, etc.) happens to never set its
+   own `display` at all, so this exact gap only shows up on an element,
+   like this one, that needs `display: flex` when visible. */
+.bulk-bar[hidden] { display: none; }
+.bulk-bar-count { font-size: 13px; white-space: nowrap; }
+.bulk-actions { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 6px 12px; }
+.bulk-actions label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+.bulk-actions input, .bulk-actions select {
+  font-size: 13px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+.bulk-bar button.secondary {
+  padding: 5px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+.bulk-bar button.secondary:hover { border-color: var(--accent); }
+.bulk-bar button.bulk-danger { border-color: var(--danger); color: var(--danger); }
+.bulk-result { font-size: 12px; color: var(--muted); }
+.bulk-result.has-errors { color: var(--danger); }
+
+/* Phase 2h Part A: per-card selection checkbox, top-left of the thumbnail --
+   stopPropagation'd in review.js so checking it never also opens the
+   viewer (the rest of the card is still click-to-open, unchanged). */
+.card-select {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.card-select input { margin: 0; cursor: pointer; }
+/* A selected card gets an accent outline in addition to its checkbox, so a
+   long row of thumbnails still reads as "selected" at a glance without
+   having to spot the small checkbox itself. */
+.card.card-selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 .grid-toolbar {
   display: flex;
   justify-content: space-between;
@@ -414,4 +483,38 @@ body {
   .viewer-details { grid-column: 1; grid-row: 2; border-left: none; border-top: 1px solid var(--border); padding-top: 16px; }
   .viewer-controls { grid-column: 1; grid-row: 3; flex-wrap: wrap; }
   .order-label { margin-left: 0; }
+}
+
+/* Phase 2h Part B: phone-width-only info-panel collapse. Deliberately a
+   NARROWER breakpoint than the >800px stacked layout above (which already
+   covers iPad/tablet widths and must not change per spec) -- this rule
+   only ever takes effect once that one is already active, and layers on
+   top of it (same .viewer-details/.viewer-panel selectors, later in the
+   cascade so it wins at this width). On a phone, the photo/video is the
+   whole point of the screen; the info panel below it starts collapsed
+   (display:none, so its "auto" grid row costs zero height and the photo
+   row gets the space) and only reappears when the toggle button is tapped
+   -- see review.js's setInfoExpanded/openViewer. Editing itself is
+   unchanged once expanded -- this is a show/hide layout rule only, no
+   selectors here touch .viewer-edit-form/.edit-btn/etc. */
+.viewer-info-toggle {
+  display: none; /* shown only inside the <=480px rule below -- invisible, and does nothing, on desktop/tablet */
+}
+@media (max-width: 480px) {
+  .viewer-details { display: none; }
+  .viewer-panel.info-expanded .viewer-details { display: block; }
+  .viewer-info-toggle {
+    display: block;
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 5;
+    padding: 7px 14px;
+    border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 12px;
+    cursor: pointer;
+  }
 }
