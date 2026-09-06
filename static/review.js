@@ -754,8 +754,30 @@
     viewerEl.hidden = true;
   }
   el("viewer-close").addEventListener("click", closeViewer);
+  // Bug fix (see TODO.md "Editing a field in the viewer somehow ACTIVATES
+  // the slideshow"): this listener is on `document`, so any keystroke typed
+  // into the viewer's own edit form (#viewer-edit-input) or interval field
+  // bubbles straight up to it -- the viewer stays "open" (state.viewer.open)
+  // the whole time an edit is in progress, since editing happens inside the
+  // viewer panel, not a separate dialog. A space typed while entering e.g.
+  // "New York" or "United States" into the Location field was matching the
+  // ' ' case below and calling toggleSlideshow() -- starting the slideshow
+  // from a dead stop mid-edit, not just failing to pause an already-running
+  // one. Fixed at the source: bail out of every shortcut here (not just
+  // Space) whenever the key actually landed on an editable element, so this
+  // can't happen for Escape/ArrowLeft/ArrowRight either (e.g. arrow keys
+  // moving the text cursor inside the edit textarea would otherwise also
+  // navigate the viewer away mid-edit). Checked via e.target, not the
+  // `editingField` flag alone, so it also covers the interval-seconds
+  // number input and any future editable control added inside the viewer.
+  function isEditableTarget(target) {
+    if (!target) return false;
+    const tag = target.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+  }
   document.addEventListener("keydown", (e) => {
     if (!state.viewer.open) return;
+    if (isEditableTarget(e.target)) return;
     if (e.key === "Escape") closeViewer();
     else if (e.key === "ArrowRight") {
       if (state.viewer.order === "random") stepRandomNav("next", { manual: true });
@@ -911,6 +933,11 @@
 
   function openEditForm(field) {
     if (!state.viewer.current) return;
+    pauseSlideshow(); // belt-and-suspenders: the real fix is the keydown
+    // guard above (a slideshow that's already paused should just stay
+    // paused, not get toggled back on by a stray space), but a slideshow
+    // that happens to already be RUNNING when the pencil icon is clicked
+    // shouldn't keep advancing frames out from under an open edit either.
     editingField = field;
     editLabelEl.textContent = EDIT_FIELD_LABELS[field] || field;
     editInputEl.value = valueForField(state.viewer.current, field);
