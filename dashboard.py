@@ -152,6 +152,42 @@ Panels:
   contention question to verify here the way GPS's panel needed to.
   Collapsed by default (start_expanded=False), placed right after GPS
   Extraction, same "occasional batch action" reasoning as that panel.
+- Date Cluster Audit — detects and, for one confirmed root-cause pattern,
+  fixes batch-date artifacts (a whole folder of photos/videos landing on
+  one wrong date because Phase 1's date-resolution chain fell back to an
+  unreliable signal for all of them at once — see src/date_audit.py's
+  module docstring for the full investigation this was built from,
+  triggered by a real ~3,273-photo cluster the user found dated
+  2023-10-29). Calls the exact same src.date_audit functions `main.py
+  audit-dates list/inspect/preview-fix/apply-fix` use — no duplicated
+  query/classification logic between the CLI and this panel (rule 7).
+    - "Scan for Suspicious Dates" (Step 0): fills a table of day-level
+      clusters sorted by count, with a filesystem-fallback percentage per
+      day — the strongest signal found for this kind of artifact, but
+      surfaced for human judgment only, never auto-flagged as wrong (a
+      real busy day can produce a high count too).
+    - "Inspect Selected Date" (Step 1): a deep-dive report for one day —
+      re-checks live EXIF/filesystem evidence for a sample of real files,
+      repeatable for any date this surfaces, not hardcoded to the original
+      incident.
+    - "Preview Fix (Dry Run)" / "Apply Fix" (Step 2): preview shows every
+      proposed old-date -> new-date correction across the whole library
+      before anything changes; Apply is only enabled after a preview has
+      been run in this same session (forces a look before committing) and
+      writes go through src.edits.apply_edit — the same generic, audited
+      path review_tool.py's own edit endpoint uses — so every correction
+      lands in the photo_edits audit table and is permanently protected
+      from a future automated overwrite, exactly like a real interactive
+      edit. DB-metadata-only: never moves, renames, or re-sorts a file.
+  Read-only until Apply is clicked, and Apply only ever touches rows this
+  module has high confidence about (see src/date_audit.py) — everything
+  else is left flagged, not guessed at. Own worker thread/progress bar/log
+  tail for Apply (Scan/Inspect/Preview are fast, synchronous queries — no
+  worker thread needed for those, same reasoning as this panel's own
+  underlying queries being sub-second even at this library's 167k-row real
+  scale). No schema changes — reuses Phase 2f's existing photo_edits table
+  and photos.date_taken/date_source columns, so no review_tool.py/rule 12
+  migration concern here. Collapsed by default, placed after Phase 2g.
 
 Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
 body (see _make_collapsible()), so a section you're not using right now
@@ -190,6 +226,18 @@ from src.config import (
     load_config,
     remove_review_user,
     save_source_folders,
+)
+from src.date_audit import (
+    DEFAULT_MIN_COUNT,
+    DEFAULT_TOP_N,
+    ApplyFixStats,
+    FixPreview,
+    apply_fixes,
+    find_fix_candidates,
+    find_suspicious_clusters,
+    format_fix_preview,
+    format_inspection_report,
+    inspect_cluster,
 )
 from src.db import connect, init_db
 from src.gps_backfill import GpsStats, run_gps_extraction
@@ -246,6 +294,21 @@ class DashboardApp:
         # no tunnel was started from here (including: never started, or
         # already stopped/exited) — see _tunnel_running().
         self.tunnel_proc: subprocess.Popen | None = None
+
+        # Date Cluster Audit panel: Scan/Inspect/Preview are fast synchronous
+        # queries (no worker thread needed — see docstring above), but Apply
+        # writes hundreds of rows through apply_edit() so it gets the same
+        # "own worker thread + progress bar + log tail" treatment as every
+        # other batch-writing panel. _date_audit_preview caches the last
+        # FixPreview computed in THIS session so Apply always acts on
+        # exactly what was shown, never a fresh (possibly different) query
+        # the user never actually looked at — Apply is disabled until a
+        # preview exists.
+        self.date_audit_worker: threading.Thread | None = None
+        self.date_audit_stop_requested = False
+        self._date_audit_log_path: Path | None = None
+        self._date_audit_log_read_pos = 0
+        self._date_audit_preview: FixPreview | None = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -452,6 +515,102 @@ class DashboardApp:
         thumbs_log_scroll = ttk.Scrollbar(thumbs_log_body, orient="vertical", command=self.thumbs_log_text.yview)
         thumbs_log_scroll.pack(side="right", fill="y")
         self.thumbs_log_text.configure(yscrollcommand=thumbs_log_scroll.set)
+
+        # --- Date Cluster Audit panel ---
+        da_frame = self._make_collapsible(
+            "Date Cluster Audit (detect + fix batch-date artifacts)", start_expanded=False
+        )
+
+        ttk.Label(
+            da_frame, wraplength=740, justify="left",
+            text=(
+                "Finds whole batches of photos/videos that landed on the same wrong date "
+                "(e.g. a folder import that stamped hundreds of files with today's transfer "
+                "date instead of their real capture date). Step 1: Scan lists candidate days "
+                "for you to judge — a high count alone doesn't mean it's wrong (a real busy "
+                "day counts too). Step 2: Inspect one date for the real evidence. Step 3: "
+                "Preview shows exactly what would change before anything does; Apply only "
+                "becomes available after you've looked at a preview."
+            ),
+        ).pack(anchor="w", padx=6, pady=(6, 6))
+
+        da_scan_row = ttk.Frame(da_frame)
+        da_scan_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.date_audit_scan_btn = ttk.Button(da_scan_row, text="Scan for Suspicious Dates", command=self._on_date_audit_scan)
+        self.date_audit_scan_btn.pack(side="left")
+        ttk.Label(da_scan_row, text="  Min. count:").pack(side="left", padx=(12, 0))
+        self.date_audit_min_count_var = tk.StringVar(value=str(DEFAULT_MIN_COUNT))
+        ttk.Entry(da_scan_row, textvariable=self.date_audit_min_count_var, width=6).pack(side="left")
+        ttk.Label(da_scan_row, text="Top N:").pack(side="left", padx=(12, 0))
+        self.date_audit_top_n_var = tk.StringVar(value=str(DEFAULT_TOP_N))
+        ttk.Entry(da_scan_row, textvariable=self.date_audit_top_n_var, width=6).pack(side="left")
+
+        da_tree_body = ttk.Frame(da_frame)
+        da_tree_body.pack(fill="both", expand=False, padx=6, pady=(0, 6))
+        self.date_audit_tree = ttk.Treeview(
+            da_tree_body, columns=("count", "fs_pct", "sources"), show="headings", height=8, selectmode="browse"
+        )
+        self.date_audit_tree.heading("count", text="Count")
+        self.date_audit_tree.heading("fs_pct", text="Filesystem %")
+        self.date_audit_tree.heading("sources", text="By date_source")
+        self.date_audit_tree.column("count", width=70, anchor="e")
+        self.date_audit_tree.column("fs_pct", width=100, anchor="e")
+        self.date_audit_tree.column("sources", width=420, anchor="w")
+        # Treeview's own item id doubles as the displayed date (col #0 is the
+        # tree's implicit "text" column, shown via show="headings" as the
+        # leftmost header-less cell) — simplest way to get the date back out
+        # on selection without a parallel id->date dict.
+        self.date_audit_tree.heading("#0", text="Date")
+        self.date_audit_tree.column("#0", width=100, anchor="w")
+        self.date_audit_tree.pack(side="left", fill="both", expand=True)
+        da_tree_scroll = ttk.Scrollbar(da_tree_body, orient="vertical", command=self.date_audit_tree.yview)
+        da_tree_scroll.pack(side="right", fill="y")
+        self.date_audit_tree.configure(yscrollcommand=da_tree_scroll.set)
+        self.date_audit_tree.bind("<<TreeviewSelect>>", self._on_date_audit_tree_select)
+
+        da_inspect_row = ttk.Frame(da_frame)
+        da_inspect_row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(da_inspect_row, text="Date to inspect:").pack(side="left")
+        self.date_audit_inspect_var = tk.StringVar(value="")
+        ttk.Entry(da_inspect_row, textvariable=self.date_audit_inspect_var, width=12).pack(side="left", padx=(6, 6))
+        ttk.Button(da_inspect_row, text="Inspect Date", command=self._on_date_audit_inspect).pack(side="left")
+
+        da_fix_row = ttk.Frame(da_frame)
+        da_fix_row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(da_fix_row, text="Preview Fix (Dry Run)", command=self._on_date_audit_preview_fix).pack(side="left")
+        self.date_audit_apply_btn = ttk.Button(
+            da_fix_row, text="Apply Fix", command=self._on_date_audit_apply_fix, state="disabled"
+        )
+        self.date_audit_apply_btn.pack(side="left", padx=(6, 0))
+        self.date_audit_cancel_btn = ttk.Button(
+            da_fix_row, text="Cancel", command=self._on_date_audit_cancel, state="disabled"
+        )
+        self.date_audit_cancel_btn.pack(side="left", padx=(6, 0))
+
+        da_prog_row = ttk.Frame(da_frame)
+        da_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.date_audit_progress = ttk.Progressbar(da_prog_row, mode="determinate")
+        self.date_audit_progress.pack(fill="x", side="left", expand=True)
+        self.date_audit_status_label = ttk.Label(da_prog_row, text="Idle", width=28, anchor="e")
+        self.date_audit_status_label.pack(side="right", padx=(6, 0))
+
+        ttk.Label(da_frame, text="Scan / Inspect / Preview output:").pack(anchor="w", padx=6)
+        da_results_body = ttk.Frame(da_frame)
+        da_results_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.date_audit_results_text = tk.Text(da_results_body, height=12, state="disabled", wrap="word")
+        self.date_audit_results_text.pack(side="left", fill="both", expand=True)
+        da_results_scroll = ttk.Scrollbar(da_results_body, orient="vertical", command=self.date_audit_results_text.yview)
+        da_results_scroll.pack(side="right", fill="y")
+        self.date_audit_results_text.configure(yscrollcommand=da_results_scroll.set)
+
+        ttk.Label(da_frame, text="Live Apply Fix log:").pack(anchor="w", padx=6)
+        da_log_body = ttk.Frame(da_frame)
+        da_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.date_audit_log_text = tk.Text(da_log_body, height=6, state="disabled", wrap="none")
+        self.date_audit_log_text.pack(side="left", fill="both", expand=True)
+        da_log_scroll = ttk.Scrollbar(da_log_body, orient="vertical", command=self.date_audit_log_text.yview)
+        da_log_scroll.pack(side="right", fill="y")
+        self.date_audit_log_text.configure(yscrollcommand=da_log_scroll.set)
 
         # --- Review Users panel (Phase 2d follow-up) ---
         ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
@@ -805,6 +964,19 @@ class DashboardApp:
                     elif kind == "force_restart_done":
                         _, result, err = msg
                         self._on_force_restart_done(result, err)
+                    elif kind == "date_audit_log_started":
+                        log_path = msg[1]
+                        self._start_date_audit_log_tail(log_path)
+                    elif kind == "date_audit_progress":
+                        _, done, total = msg
+                        self.date_audit_progress.configure(maximum=max(total, 1), value=done)
+                        self.date_audit_status_label.configure(text=f"{done:,} / {total:,} applied")
+                    elif kind == "date_audit_done":
+                        _, stats, was_stopped = msg
+                        self._on_date_audit_done(stats, was_stopped)
+                    elif kind == "date_audit_error":
+                        _, err = msg
+                        self._on_date_audit_error(err)
                 except Exception:
                     pass  # see docstring above -- never let one bad message stop future polling
         except queue.Empty:
@@ -1192,6 +1364,215 @@ class DashboardApp:
         self.thumbs_log_text.see("end")
         self.thumbs_log_text.configure(state="disabled")
 
+    # ------------------------------------------------- Date Cluster Audit
+    def _set_date_audit_results_text(self, text: str) -> None:
+        self.date_audit_results_text.configure(state="normal")
+        self.date_audit_results_text.delete("1.0", "end")
+        self.date_audit_results_text.insert("1.0", text)
+        self.date_audit_results_text.configure(state="disabled")
+
+    def _on_date_audit_scan(self) -> None:
+        # Step 0: a fast, synchronous, read-only query (sub-second even at
+        # this library's 167k-row real scale — confirmed while building
+        # this) — no worker thread needed, unlike Apply below.
+        try:
+            min_count = int(self.date_audit_min_count_var.get())
+            top_n = int(self.date_audit_top_n_var.get())
+        except ValueError:
+            messagebox.showerror("Photo Organizer", "Min. count and Top N must be whole numbers.")
+            return
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)  # safe/idempotent (rule 12)
+            conn = connect(cfg.db_path_abs)
+            try:
+                clusters = find_suspicious_clusters(conn, min_count=min_count, top_n=top_n)
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Scan failed: {e}")
+            return
+
+        for item in self.date_audit_tree.get_children():
+            self.date_audit_tree.delete(item)
+        for c in clusters:
+            sources = ", ".join(f"{k}={v}" for k, v in sorted(c.source_counts.items(), key=lambda kv: -kv[1]))
+            self.date_audit_tree.insert("", "end", iid=c.date, text=c.date,
+                                         values=(f"{c.count:,}", f"{c.filesystem_fraction*100:.0f}%", sources))
+
+        if not clusters:
+            self._set_date_audit_results_text(f"No day had {min_count}+ photos/videos. Try a lower min. count.")
+        else:
+            self._set_date_audit_results_text(
+                f"Found {len(clusters)} day(s) with {min_count}+ photos/videos. Select a row, then "
+                "click Inspect Date for a deep-dive, or run Preview Fix to see proposed corrections "
+                "across the whole library.\n\n"
+                "Filesystem % = fraction resolved via the least-reliable fallback (no EXIF/container "
+                "date, no filename date) — the strongest signal of a batch-date artifact found so far "
+                "in this library. A high count with a low filesystem % is more likely a real busy day."
+            )
+
+    def _on_date_audit_tree_select(self, _event=None) -> None:
+        selected = self.date_audit_tree.selection()
+        if selected:
+            self.date_audit_inspect_var.set(selected[0])  # the iid is the date string
+
+    def _on_date_audit_inspect(self) -> None:
+        # Step 1: also a fast, synchronous, read-only query (a bounded
+        # sample of files re-checked live, not the whole cluster).
+        date_str = self.date_audit_inspect_var.get().strip()
+        if not date_str:
+            messagebox.showinfo("Photo Organizer", "Enter a date (YYYY-MM-DD) or select one from the table above.")
+            return
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)
+            conn = connect(cfg.db_path_abs)
+            try:
+                report = inspect_cluster(conn, date_str, sample_size=10)
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Inspect failed: {e}")
+            return
+        if report.total == 0:
+            self._set_date_audit_results_text(f"No photos/videos found with date_taken starting {date_str}.")
+            return
+        self._set_date_audit_results_text(format_inspection_report(report))
+
+    def _on_date_audit_preview_fix(self) -> None:
+        # Step 2, dry run: scans the WHOLE library (not just what Scan
+        # listed above — Scan is a detection aid over day-level clusters,
+        # while this is the row-level, evidence-based rule from
+        # src/date_audit.py that decides what's actually fixable). Fast
+        # enough to run synchronously (a single-pass query over the
+        # filesystem-sourced rows, ~8.5k rows in the real library).
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)
+            conn = connect(cfg.db_path_abs)
+            try:
+                preview = find_fix_candidates(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Preview failed: {e}")
+            return
+
+        self._date_audit_preview = preview
+        self._set_date_audit_results_text(format_fix_preview(preview))
+        self.date_audit_apply_btn.configure(state="normal" if preview.candidates else "disabled")
+
+    def _date_audit_busy(self) -> bool:
+        return self.date_audit_worker is not None and self.date_audit_worker.is_alive()
+
+    def _on_date_audit_apply_fix(self) -> None:
+        # Deliberately requires a preview to have been run in THIS session
+        # (see _date_audit_preview) rather than silently re-querying —
+        # forces the user to have actually looked at the list of changes
+        # before anything is written, and guarantees Apply only ever acts
+        # on exactly what was shown, not a possibly-different fresh query.
+        if self._date_audit_busy():
+            return
+        preview = self._date_audit_preview
+        if preview is None or not preview.candidates:
+            messagebox.showinfo("Photo Organizer", "Run Preview Fix first, and confirm it found something to fix.")
+            return
+
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            f"About to correct the date on {len(preview.candidates)} photo(s)/video(s), using each "
+            "file's own pre-existing folder (from before this project ever sorted it) as the source "
+            "of truth for the year/month — see the preview text above for the exact list.\n\n"
+            "This only changes the database record (date_taken) via the same audited edit mechanism "
+            "review_tool.py's manual edits use — it never moves, renames, or re-sorts any file, and "
+            "every change is reversible (edit the date again in review_tool.py, or check photo_edits).\n\n"
+            "Proceed?",
+        ):
+            return
+
+        self.date_audit_stop_requested = False
+        self.date_audit_progress.configure(value=0, maximum=max(len(preview.candidates), 1))
+        self.date_audit_status_label.configure(text="Starting...")
+        self._set_date_audit_results_text("Applying fixes...")
+        self.date_audit_apply_btn.configure(state="disabled")
+        self.date_audit_scan_btn.configure(state="disabled")
+        self.date_audit_cancel_btn.configure(state="normal")
+
+        self.date_audit_worker = threading.Thread(target=self._date_audit_worker, args=(preview,), daemon=True)
+        self.date_audit_worker.start()
+
+    def _on_date_audit_cancel(self) -> None:
+        self.date_audit_stop_requested = True
+        self.date_audit_status_label.configure(text="Stopping...")
+
+    def _date_audit_worker(self, preview: FixPreview) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push messages through self.msg_queue, same shape as every other
+        # worker in this file.
+        try:
+            cfg = load_config()
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.date_audit"
+            )
+            self.msg_queue.put(("date_audit_log_started", log_path))
+            conn = connect(cfg.db_path_abs)
+            try:
+                stats = apply_fixes(
+                    conn, preview.candidates, logger,
+                    progress_cb=lambda done, total: self.msg_queue.put(("date_audit_progress", done, total)),
+                    stop_check=lambda: self.date_audit_stop_requested,
+                )
+            finally:
+                conn.close()
+            self.msg_queue.put(("date_audit_done", stats, self.date_audit_stop_requested))
+        except Exception as e:
+            self.msg_queue.put(("date_audit_error", str(e)))
+
+    def _on_date_audit_done(self, stats: ApplyFixStats, was_stopped: bool) -> None:
+        self.date_audit_apply_btn.configure(state="disabled")  # this preview is now stale/consumed
+        self.date_audit_scan_btn.configure(state="normal")
+        self.date_audit_cancel_btn.configure(state="disabled")
+        self.date_audit_status_label.configure(text="Stopped early" if was_stopped else "Done")
+        self._date_audit_preview = None  # force a fresh Preview before another Apply
+        lines = [f"Applied: {stats.applied:,} / {stats.candidates:,}" + ("  (stopped early by user)" if was_stopped else "")]
+        lines.append(f"Skipped (manually edited since preview): {stats.skipped_manual_edit:,}")
+        lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
+        lines.append("\nRun Scan again to see the day-level clusters reflect these corrections.")
+        self._set_date_audit_results_text("\n".join(lines))
+
+    def _on_date_audit_error(self, err: str) -> None:
+        self.date_audit_apply_btn.configure(state="normal")
+        self.date_audit_scan_btn.configure(state="normal")
+        self.date_audit_cancel_btn.configure(state="disabled")
+        self.date_audit_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"Date-audit fix failed: {err}")
+
+    def _start_date_audit_log_tail(self, log_path: Path) -> None:
+        self._date_audit_log_path = log_path
+        self._date_audit_log_read_pos = 0
+        self.date_audit_log_text.configure(state="normal")
+        self.date_audit_log_text.delete("1.0", "end")
+        self.date_audit_log_text.configure(state="disabled")
+        self._append_new_date_audit_log_lines()
+
+    def _append_new_date_audit_log_lines(self) -> None:
+        if self._date_audit_log_path is None or not self._date_audit_log_path.exists():
+            return
+        try:
+            with open(self._date_audit_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._date_audit_log_read_pos)
+                new_text = f.read()
+                self._date_audit_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.date_audit_log_text.configure(state="normal")
+        self.date_audit_log_text.insert("end", new_text)
+        self.date_audit_log_text.see("end")
+        self.date_audit_log_text.configure(state="disabled")
+
     # --------------------------------------------- Phase 2d: review users
     def _refresh_review_users(self) -> None:
         self.review_user_listbox.delete(0, "end")
@@ -1534,6 +1915,10 @@ class DashboardApp:
             pass
         try:
             self._append_new_thumbs_log_lines()  # Thumbnail extraction's own view, same reasoning
+        except Exception:
+            pass
+        try:
+            self._append_new_date_audit_log_lines()  # Date-audit Apply Fix's own view, same reasoning
         except Exception:
             pass
         self.root.after(500, self._tail_tick)

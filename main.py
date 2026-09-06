@@ -17,6 +17,10 @@
     venv\\Scripts\\python main.py review-user list              # list configured usernames
     venv\\Scripts\\python main.py review-user remove <username> # revoke a login
     venv\\Scripts\\python main.py restart-review-tool           # kill stale review_tool.py process(es), relaunch fresh
+    venv\\Scripts\\python main.py audit-dates list                  # Step 0: day-level clusters, sorted by count
+    venv\\Scripts\\python main.py audit-dates inspect 2023-10-29       # Step 1: deep-dive one suspicious date
+    venv\\Scripts\\python main.py audit-dates preview-fix                # Step 2: dry-run proposed corrections
+    venv\\Scripts\\python main.py audit-dates apply-fix                    # Step 2: apply via photo_edits audit trail
 """
 from __future__ import annotations
 
@@ -27,6 +31,16 @@ from tqdm import tqdm
 
 from src.caption import run_phase2
 from src.config import load_config
+from src.date_audit import (
+    DEFAULT_MIN_COUNT,
+    DEFAULT_TOP_N,
+    apply_fixes,
+    find_fix_candidates,
+    find_suspicious_clusters,
+    format_fix_preview,
+    format_inspection_report,
+    inspect_cluster,
+)
 from src.db import connect, init_db
 from src.gps_backfill import run_gps_extraction
 from src.load_captions import load_captions
@@ -289,6 +303,117 @@ def cmd_restart_review_tool(args) -> None:
     print(f"Launched a fresh review_tool.py (PID {result.new_pid}) on port {port}.")
 
 
+def cmd_audit_dates_list(args) -> None:
+    """Step 0: day-level clustering, sorted by count descending — surfaces
+    candidate suspicious dates for human review. Not an auto-decide
+    mechanism; a genuinely busy day (a wedding, a holiday) can also produce
+    a high count."""
+    cfg = load_config()
+    init_db(cfg.db_path_abs, logger=None)  # safe/idempotent (rule 12)
+    conn = connect(cfg.db_path_abs)
+    try:
+        clusters = find_suspicious_clusters(conn, min_count=args.min_count, top_n=args.top)
+    finally:
+        conn.close()
+
+    if not clusters:
+        print(f"No day had {args.min_count}+ photos/videos. Try a lower --min-count.")
+        return
+
+    print(f"Top {len(clusters)} day(s) by photo/video count (min_count={args.min_count}):\n")
+    print(f"{'Date':<12} {'Count':>7}  {'FS%':>5}  By date_source")
+    for c in clusters:
+        sources = ", ".join(f"{k}={v}" for k, v in sorted(c.source_counts.items(), key=lambda kv: -kv[1]))
+        print(f"{c.date:<12} {c.count:>7}  {c.filesystem_fraction*100:>4.0f}%  {sources}")
+    print(
+        "\nFS% = fraction of that day's rows resolved via the least-reliable "
+        "'filesystem' fallback (no EXIF/container date, no filename date) — "
+        "the strongest signal of a batch-date artifact seen so far in this "
+        "library (a 100%-filesystem day with a big count is worth a closer look; "
+        "a mostly-exif/container day is more likely a real busy day).\n"
+        "Investigate one with: main.py audit-dates inspect YYYY-MM-DD"
+    )
+
+
+def cmd_audit_dates_inspect(args) -> None:
+    """Step 1: deep-dive investigation for one suspicious date, repeatable
+    for any date this surfaces (not hardcoded to one incident)."""
+    cfg = load_config()
+    init_db(cfg.db_path_abs, logger=None)
+    conn = connect(cfg.db_path_abs)
+    try:
+        report = inspect_cluster(conn, args.date, sample_size=args.sample)
+    finally:
+        conn.close()
+    if report.total == 0:
+        print(f"No photos/videos found with date_taken starting {args.date}.")
+        return
+    print(format_inspection_report(report))
+
+
+def cmd_audit_dates_preview_fix(args) -> None:
+    """Step 2 (dry run): shows exactly what apply-fix would change, for
+    every photo/video across every confirmed-bad date_source='filesystem'
+    row this module knows how to fix confidently — see src/date_audit.py's
+    module docstring for the root-cause evidence behind this one rule.
+    Makes no changes."""
+    cfg = load_config()
+    init_db(cfg.db_path_abs, logger=None)
+    conn = connect(cfg.db_path_abs)
+    try:
+        preview = find_fix_candidates(conn)
+    finally:
+        conn.close()
+    print(format_fix_preview(preview))
+    if preview.candidates:
+        print("\nThis was a DRY RUN — nothing was changed. Review the list above, then run:")
+        print("  main.py audit-dates apply-fix")
+
+
+def cmd_audit_dates_apply_fix(args) -> None:
+    """Step 2 (apply): writes the corrected date_taken for every fixable
+    candidate via src.edits.apply_edit — the same generic, audited write
+    path review_tool.py's interactive edit endpoint uses (Phase 2f's
+    photo_edits table), so every correction is logged and permanently
+    protected from a future automated overwrite."""
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs, logger_name="photo_organizer.date_audit")
+    init_db(cfg.db_path_abs, logger=logger)
+    conn = connect(cfg.db_path_abs)
+    pbar: tqdm | None = None
+    try:
+        preview = find_fix_candidates(conn)
+        if not preview.candidates:
+            print("Nothing to fix — no candidates found. Run 'audit-dates preview-fix' for details.")
+            return
+
+        print(format_fix_preview(preview))
+        if not args.yes:
+            answer = input(
+                f"\nType 'yes' to apply {len(preview.candidates)} correction(s) "
+                "(recorded in photo_edits, reversible via review_tool.py like any other edit): "
+            ).strip().lower()
+            if answer != "yes":
+                print("Aborted. No changes were made.")
+                return
+
+        def _progress_cb(done: int, total: int) -> None:
+            nonlocal pbar
+            if pbar is None:
+                pbar = tqdm(total=total, desc="Date-audit fix", unit="file")
+            pbar.n = done
+            pbar.refresh()
+
+        stats = apply_fixes(conn, preview.candidates, logger, progress_cb=_progress_cb)
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(stats.summary())
+
+
 def cmd_load_captions(args) -> None:
     cfg = load_config()
     logger, _log_path = setup_logging(cfg.log_dir_abs)
@@ -334,6 +459,32 @@ def main() -> None:
     thumbs_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
                                 help="Only process videos whose current_path starts with this prefix (try a small folder first)")
     thumbs_parser.set_defaults(func=cmd_extract_thumbnails)
+
+    audit_parser = sub.add_parser(
+        "audit-dates", help="Detect + fix batch-date artifacts (a whole folder landing on one wrong date)"
+    )
+    audit_sub = audit_parser.add_subparsers(dest="audit_dates_command", required=True)
+
+    audit_list = audit_sub.add_parser("list", help="Step 0: day-level clustering, sorted by count — candidates for review")
+    audit_list.add_argument("--top", type=int, default=DEFAULT_TOP_N, help=f"Show top N days (default {DEFAULT_TOP_N})")
+    audit_list.add_argument("--min-count", type=int, default=DEFAULT_MIN_COUNT,
+                             help=f"Only show days with at least this many photos/videos (default {DEFAULT_MIN_COUNT})")
+    audit_list.set_defaults(func=cmd_audit_dates_list)
+
+    audit_inspect = audit_sub.add_parser("inspect", help="Step 1: deep-dive investigation for one suspicious date")
+    audit_inspect.add_argument("date", metavar="YYYY-MM-DD")
+    audit_inspect.add_argument("--sample", type=int, default=10, help="Number of files to re-check live (default 10)")
+    audit_inspect.set_defaults(func=cmd_audit_dates_inspect)
+
+    audit_sub.add_parser(
+        "preview-fix", help="Step 2 dry run: show proposed date corrections for every fixable photo/video"
+    ).set_defaults(func=cmd_audit_dates_preview_fix)
+
+    audit_apply = audit_sub.add_parser(
+        "apply-fix", help="Step 2: apply the previewed corrections via the photo_edits audit mechanism"
+    )
+    audit_apply.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    audit_apply.set_defaults(func=cmd_audit_dates_apply_fix)
 
     ru_parser = sub.add_parser("review-user", help="Phase 2d: manage review_tool.py login credentials (config.yaml's review_users)")
     ru_sub = ru_parser.add_subparsers(dest="review_user_command", required=True)
