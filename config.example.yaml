@@ -138,3 +138,12 @@ storage_backend: "local"
 # this is set up on. dashboard.py's "Remote Access" panel runs
 # `cloudflared tunnel run <this>` for its Start Tunnel button.
 cloudflare_tunnel_name: "photo-viewer"
+
+# --- Phase 2g: cached video first-frame thumbnails ---
+# One JPEG per video, written by `main.py extract-thumbnails` (or the
+# dashboard's own panel) to thumbnail_dir/<file_hash>.jpg and served by
+# review_tool.py's /thumbnail/<file_hash> route. thumbnail_max_dimension
+# is the longest edge in pixels (aspect preserved) — 480 is plenty for a
+# grid tile (photos' own grid thumbs are requested at ?max=400).
+thumbnail_dir: "data/thumbnails"
+thumbnail_max_dimension: 480

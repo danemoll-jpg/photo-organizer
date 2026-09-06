@@ -130,6 +130,28 @@ Panels:
   Users — but its background status-refresh timer keeps running either
   way, so reopening it always shows current state immediately, never a
   stale snapshot from before it was collapsed.
+- Phase 2g — Video Thumbnails: runs src.thumbnail_backfill.run_thumbnail_extraction
+  (same function `main.py extract-thumbnails` calls) — decodes and caches a
+  real first-frame JPEG per video to data/thumbnails/<file_hash>.jpg, which
+  review_tool.py's grid now serves in place of the old generic play-icon
+  placeholder (falling back to that placeholder for any video not yet
+  processed). Same "own worker thread, own progress bar/results box/
+  dedicated live log tail" pattern as the GPS Extraction panel above, own
+  distinct logger_name ("photo_organizer.thumbs") for the same reason (see
+  setup_logging()'s docstring). Real throughput benchmarked before this was
+  built, not assumed (per spec) — ~0.1s/video (a 40-file random real sample,
+  0 failures), roughly 10x slower per-file than GPS's EXIF read but nowhere
+  near Phase 2 captioning's per-image cost; a full run against this
+  library's real ~12,400 video rows is on the order of 20-25 minutes, so
+  the confirmation dialog is a short FYI like GPS's, not Phase 1/2's bigger
+  warnings. Resumability is disk-based, not a DB column (a cache file
+  already present at that hash's path means "done" — see
+  thumbnail_backfill.py's module docstring for why that's a deliberate
+  design choice, not an oversight) — so unlike GPS extraction, this never
+  writes to the `photos` table at all, meaning there's no DB-write
+  contention question to verify here the way GPS's panel needed to.
+  Collapsed by default (start_expanded=False), placed right after GPS
+  Extraction, same "occasional batch action" reasoning as that panel.
 
 Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
 body (see _make_collapsible()), so a section you're not using right now
@@ -175,6 +197,7 @@ from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
 from src.pick_sources import merge_and_save, pick_sources_interactive
 from src.port_check import RestartResult, listening_pids, restart_review_tool
+from src.thumbnail_backfill import ThumbStats, run_thumbnail_extraction
 
 
 class DashboardApp:
@@ -208,6 +231,15 @@ class DashboardApp:
         self.gps_stop_requested = False
         self._gps_log_path: Path | None = None
         self._gps_log_read_pos = 0
+
+        # Video Thumbnails panel (Phase 2g) — also its own independent
+        # worker/progress. Never writes to the DB (see
+        # src/thumbnail_backfill.py), so there's no write-contention
+        # question to track here the way GPS's panel needed to.
+        self.thumbs_worker: threading.Thread | None = None
+        self.thumbs_stop_requested = False
+        self._thumbs_log_path: Path | None = None
+        self._thumbs_log_read_pos = 0
 
         # Remote Access panel (Phase 2d follow-up): the cloudflared
         # subprocess this dashboard itself spawned, if any. None whenever
@@ -382,6 +414,45 @@ class DashboardApp:
         gps_log_scroll.pack(side="right", fill="y")
         self.gps_log_text.configure(yscrollcommand=gps_log_scroll.set)
 
+        # --- Phase 2g: Video Thumbnails panel ---
+        thumbs_frame = self._make_collapsible(
+            "Phase 2g — Video Thumbnails (grid preview frames)", start_expanded=False
+        )
+
+        thumbs_info_row = ttk.Frame(thumbs_frame)
+        thumbs_info_row.pack(fill="x", padx=6, pady=(6, 0))
+        self.thumbs_info_label = ttk.Label(thumbs_info_row, text="(loading config...)", wraplength=740, justify="left")
+        self.thumbs_info_label.pack(side="left", fill="x", expand=True)
+
+        thumbs_btn_row = ttk.Frame(thumbs_frame)
+        thumbs_btn_row.pack(fill="x", padx=6, pady=6)
+        self.thumbs_btn = ttk.Button(thumbs_btn_row, text="Start Thumbnail Extraction", command=self._on_thumbs_start)
+        self.thumbs_btn.pack(side="left")
+        self.thumbs_cancel_btn = ttk.Button(thumbs_btn_row, text="Cancel", command=self._on_thumbs_cancel, state="disabled")
+        self.thumbs_cancel_btn.pack(side="left", padx=(6, 0))
+
+        thumbs_prog_row = ttk.Frame(thumbs_frame)
+        thumbs_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.thumbs_progress = ttk.Progressbar(thumbs_prog_row, mode="determinate")
+        self.thumbs_progress.pack(fill="x", side="left", expand=True)
+        self.thumbs_status_label = ttk.Label(thumbs_prog_row, text="Idle", width=28, anchor="e")
+        self.thumbs_status_label.pack(side="right", padx=(6, 0))
+
+        self.thumbs_results_text = tk.Text(thumbs_frame, height=5, state="disabled", wrap="word")
+        self.thumbs_results_text.pack(fill="x", padx=6, pady=(0, 6))
+
+        # Dedicated live log tail, same reasoning as the GPS/Captioning
+        # panels above — its own view onto whatever logs/organize_*.log the
+        # current/most recent thumbnail extraction run wrote to.
+        ttk.Label(thumbs_frame, text="Live thumbnail extraction log:").pack(anchor="w", padx=6)
+        thumbs_log_body = ttk.Frame(thumbs_frame)
+        thumbs_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.thumbs_log_text = tk.Text(thumbs_log_body, height=8, state="disabled", wrap="none")
+        self.thumbs_log_text.pack(side="left", fill="both", expand=True)
+        thumbs_log_scroll = ttk.Scrollbar(thumbs_log_body, orient="vertical", command=self.thumbs_log_text.yview)
+        thumbs_log_scroll.pack(side="right", fill="y")
+        self.thumbs_log_text.configure(yscrollcommand=thumbs_log_scroll.set)
+
         # --- Review Users panel (Phase 2d follow-up) ---
         ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
 
@@ -512,6 +583,13 @@ class DashboardApp:
             text="Reads EXIF GPS + offline reverse-geocodes into a place name (e.g. \"Woodstock, GA\"), "
             "written directly onto the photos table. Only scans DB rows not yet checked "
             "(gps_checked=0) — resumable, ~100 files/sec."
+        )
+        self.thumbs_info_label.configure(
+            text=f"Decodes the first frame of each video and caches it as a JPEG to "
+            f"{self.cfg.thumbnail_dir}\\<file_hash>.jpg, used by review_tool.py's grid "
+            "instead of the generic play-icon placeholder. Never touches the database — "
+            "a cache file already on disk means \"done\", so it's naturally resumable. "
+            "~0.1s/video (benchmarked, not assumed) — minutes for the whole library, not days."
         )
         self._refresh_folder_list()
         self._refresh_review_users()
@@ -705,6 +783,19 @@ class DashboardApp:
                     elif kind == "gps_error":
                         _, err = msg
                         self._on_gps_error(err)
+                    elif kind == "thumbs_log_started":
+                        log_path = msg[1]
+                        self._start_thumbs_log_tail(log_path)
+                    elif kind == "thumbs_progress":
+                        _, done, total = msg
+                        self.thumbs_progress.configure(maximum=max(total, 1), value=done)
+                        self.thumbs_status_label.configure(text=f"{done:,} / {total:,} processed")
+                    elif kind == "thumbs_done":
+                        _, stats, was_stopped = msg
+                        self._on_thumbs_done(stats, was_stopped)
+                    elif kind == "thumbs_error":
+                        _, err = msg
+                        self._on_thumbs_error(err)
                     elif kind == "tunnel_output":
                         _, proc, line = msg
                         self._append_tunnel_log(proc, line)
@@ -985,6 +1076,121 @@ class DashboardApp:
         self.gps_log_text.insert("end", new_text)
         self.gps_log_text.see("end")
         self.gps_log_text.configure(state="disabled")
+
+    # ---------------------------------------- Phase 2g: video thumbnails
+    def _thumbs_busy(self) -> bool:
+        return self.thumbs_worker is not None and self.thumbs_worker.is_alive()
+
+    def _on_thumbs_start(self) -> None:
+        if self._thumbs_busy():
+            return
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            "About to decode the first frame of every video not yet cached and save it as "
+            f"a JPEG under {self.cfg.thumbnail_dir}\\, for review_tool.py's grid to use "
+            "instead of the generic play-icon placeholder.\n\n"
+            "This only reads video files and writes new thumbnail files — it never "
+            "modifies, moves, or deletes any original video, and never touches the "
+            "database.\n\n"
+            "~0.1s/video (benchmarked against this library's own videos) — minutes for "
+            "the whole library, not days. Safe to Cancel and resume any time; "
+            "already-cached (or permanently-unreadable) videos are skipped next run.\n\n"
+            "Start now?",
+        ):
+            return
+        self.thumbs_stop_requested = False
+        self.thumbs_progress.configure(value=0, maximum=1)
+        self.thumbs_status_label.configure(text="Starting...")
+        self._set_thumbs_results_text("Running...")
+        self.thumbs_btn.configure(state="disabled")
+        self.thumbs_cancel_btn.configure(state="normal")
+
+        self.thumbs_worker = threading.Thread(target=self._thumbs_worker, daemon=True)
+        self.thumbs_worker.start()
+
+    def _on_thumbs_cancel(self) -> None:
+        self.thumbs_stop_requested = True
+        self.thumbs_status_label.configure(text="Stopping...")
+
+    def _thumbs_worker(self) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push messages through self.msg_queue for the main thread to apply.
+        # Same shape as _gps_worker above, but this one never writes to the
+        # DB at all (see src/thumbnail_backfill.py) — no init_db() call
+        # needed, and no write-contention question to verify.
+        try:
+            cfg = load_config()
+            # Distinct logger_name, same reasoning as every other worker
+            # here — see setup_logging()'s docstring / the GPS-logging bug
+            # this pattern exists to prevent.
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.thumbs"
+            )
+            self.msg_queue.put(("thumbs_log_started", log_path))
+            logger.info("Starting Phase 2g (video thumbnail extraction) run from dashboard")
+
+            conn = connect(cfg.db_path_abs)
+            try:
+                stats = run_thumbnail_extraction(
+                    cfg, conn, logger,
+                    progress_cb=lambda done, total: self.msg_queue.put(("thumbs_progress", done, total)),
+                    stop_check=lambda: self.thumbs_stop_requested,
+                )
+            finally:
+                conn.close()
+            self.msg_queue.put(("thumbs_done", stats, self.thumbs_stop_requested))
+        except Exception as e:
+            self.msg_queue.put(("thumbs_error", str(e)))
+
+    def _on_thumbs_done(self, stats: ThumbStats, was_stopped: bool) -> None:
+        self.thumbs_btn.configure(state="normal")
+        self.thumbs_cancel_btn.configure(state="disabled")
+        self.thumbs_status_label.configure(text="Stopped early" if was_stopped else "Done")
+        lines = [f"Scanned: {stats.scanned:,}" + ("  (stopped early by user)" if was_stopped else "")]
+        lines.append(f"Newly extracted this run: {stats.extracted:,}")
+        lines.append(f"Already cached (or previously failed): {stats.already_cached:,}")
+        lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
+        self._set_thumbs_results_text("\n".join(lines))
+
+    def _on_thumbs_error(self, err: str) -> None:
+        self.thumbs_btn.configure(state="normal")
+        self.thumbs_cancel_btn.configure(state="disabled")
+        self.thumbs_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"Thumbnail extraction failed: {err}")
+
+    def _set_thumbs_results_text(self, text: str) -> None:
+        self.thumbs_results_text.configure(state="normal")
+        self.thumbs_results_text.delete("1.0", "end")
+        self.thumbs_results_text.insert("1.0", text)
+        self.thumbs_results_text.configure(state="disabled")
+
+    def _start_thumbs_log_tail(self, log_path: Path) -> None:
+        self._thumbs_log_path = log_path
+        self._thumbs_log_read_pos = 0
+        self.thumbs_log_text.configure(state="normal")
+        self.thumbs_log_text.delete("1.0", "end")
+        self.thumbs_log_text.configure(state="disabled")
+        self._append_new_thumbs_log_lines()
+
+    def _append_new_thumbs_log_lines(self) -> None:
+        # Independent of every other panel's log view, same reasoning as
+        # GPS's own tail above — always shows the current/most recent
+        # thumbnail extraction run's own log.
+        if self._thumbs_log_path is None or not self._thumbs_log_path.exists():
+            return
+        try:
+            with open(self._thumbs_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._thumbs_log_read_pos)
+                new_text = f.read()
+                self._thumbs_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.thumbs_log_text.configure(state="normal")
+        self.thumbs_log_text.insert("end", new_text)
+        self.thumbs_log_text.see("end")
+        self.thumbs_log_text.configure(state="disabled")
 
     # --------------------------------------------- Phase 2d: review users
     def _refresh_review_users(self) -> None:
@@ -1324,6 +1530,10 @@ class DashboardApp:
             pass
         try:
             self._append_new_gps_log_lines()  # GPS extraction's own view, same reasoning
+        except Exception:
+            pass
+        try:
+            self._append_new_thumbs_log_lines()  # Thumbnail extraction's own view, same reasoning
         except Exception:
             pass
         self.root.after(500, self._tail_tick)

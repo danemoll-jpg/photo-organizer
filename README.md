@@ -247,6 +247,39 @@ Fast — real-world measurement on this library was roughly 100 files/second
 run is a matter of minutes, not the multi-day job Phase 2 is. Safe to run
 any time; doesn't touch `organize.py` or `caption.py`.
 
+### Video thumbnails (`main.py extract-thumbnails`) — Phase 2g
+
+Decodes the first frame of every video and caches it as a JPEG under
+`data/thumbnails/<file_hash>.jpg`, for `review_tool.py`'s grid to show
+instead of the generic play-icon placeholder. Uses
+[`opencv-python-headless`](https://pypi.org/project/opencv-python-headless/)
+(bundled codec backend — no separately-installed system ffmpeg needed).
+
+Resumable by disk, not a DB column: a cache file already present means
+done. A video that genuinely fails to decode gets a sibling `.failed`
+marker so it isn't retried forever; a file that's simply missing at check
+time gets neither, so it's retried next run. Never touches the database or
+any original file — purely reads videos, writes new thumbnail files.
+
+```bash
+# Cache a thumbnail for every video not yet cached
+venv\Scripts\python main.py extract-thumbnails
+
+# Try one folder first (matches current_path by prefix)
+venv\Scripts\python main.py extract-thumbnails --limit "E:\Pics\2011\2011-08"
+```
+
+**Usage — dashboard:** open the **"Phase 2g — Video Thumbnails"** panel
+(collapsed by default) and click **Start Thumbnail Extraction**. Same
+underlying function as the CLI (`run_thumbnail_extraction()`), just without
+the `--limit` option. Own progress bar, Cancel button, and live log tail,
+independent of every other panel.
+
+Real-world measurement on this library: roughly 0.1 seconds/video — about
+10x slower per-file than GPS extraction, but still only on the order of
+20-25 minutes for a 12,000+-video library, not a multi-day job. Safe to run
+any time, including alongside Phase 1/1b/2/GPS extraction all at once.
+
 ### Review tool (`review_tool.py`)
 
 A standalone local web app — **not** a dashboard panel — for browsing the
@@ -311,10 +344,13 @@ organize/caption/extract-gps itself.
   `caption`/`tags` columns (those only reflect the last `load-captions`
   run).
 - **Video (MP4/MOV/AVI)** appears in the grid, viewer, and stats right
-  alongside photos (Phase 2e) — grid thumbnails show a generic play-icon
-  placeholder (real frame-extraction thumbnails aren't built), and the
-  viewer plays the actual file via a `<video>` element in place of the
-  photo `<img>`. Since Phase 2 never captions video by design, an
+  alongside photos (Phase 2e) — grid thumbnails show a real cached
+  first-frame preview (Phase 2g, see `main.py extract-thumbnails` above)
+  with a small play-icon badge overlay, once one's been generated; a video
+  not yet processed falls back to a generic play-icon placeholder tile
+  instead, never a broken image. The viewer plays the actual file via a
+  `<video>` element in place of the photo `<img>`. Since Phase 2 never
+  captions video by design, an
   uncaptioned video shows plainly as **"No caption"** — not "Not yet
   captioned", which would wrongly imply a pending automated process.
   Location always shows "no location" for video, which is correct — its

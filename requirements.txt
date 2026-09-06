@@ -10,3 +10,4 @@ hachoir>=3.3            # Phase 1b: video container creation-date metadata (MP4/
 ollama>=0.6              # Phase 2: local vision-model captioning client (talks to the Ollama server over HTTP; server itself is a separate install, not this package)
 reverse_geocoder>=1.5     # Phase 2b: offline EXIF-GPS -> place-name reverse geocoding (bundled worldwide city gazetteer, no API key/network) — pulls in numpy+scipy
 flask>=3.1                 # Phase 2b: standalone browser-based review tool (review_tool.py) — separate local web app, not part of the Tkinter dashboard
+opencv-python-headless>=4.10   # Phase 2g: video first-frame thumbnail extraction — bundled codec backend, no separate system ffmpeg install needed; -headless since this never needs any GUI window functions

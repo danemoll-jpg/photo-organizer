@@ -32,10 +32,16 @@ wrongly implies a pending automated process — see _row_to_dict's
 for video (confirmed absent from container metadata — see
 gps_resolver.py) so it always renders as "no location", same as any
 photo that's been checked and had none found — not a special case.
-Grid thumbnails show a generic video/play-icon placeholder rather than a
-real decoded frame (nice-to-have, not built); the full viewer plays the
-actual file via a `<video>` element backed by the /video/<file_hash>
-route below, not the photo-only /image/<file_hash> route.
+Grid thumbnails (Phase 2g): a real cached first-frame JPEG, served by
+/thumbnail/<file_hash> below, when one has been extracted by
+`main.py extract-thumbnails` / the dashboard's Phase 2g panel
+(src/thumbnail_backfill.py) — `_row_to_dict`'s `has_thumbnail` field tells
+the front end whether to request it; a video not yet processed (or one
+that failed to decode) falls back to the same generic play-icon
+placeholder Phase 2e originally shipped, never a broken image. The full
+viewer plays the actual file via a `<video>` element backed by the
+/video/<file_hash> route below, not the photo-only /image/<file_hash>
+route — real thumbnails only ever affect the grid.
 
 People/faces: Phase 3 doesn't exist yet. Every photo response carries a
 `people` field that is always `None` right now — the template renders a
@@ -187,6 +193,16 @@ class CaptionsCache:
 
 
 _captions_cache: CaptionsCache
+
+
+def _thumbnail_path(file_hash: str) -> Path:
+    """Phase 2g: where a cached video thumbnail lives for this file_hash, if
+    src/thumbnail_backfill.py has already generated one. Deliberately NOT
+    routed through the PhotoStorage abstraction (unlike serve_image/
+    serve_video) — thumbnails are this tool's own local cache artifact, not
+    "where the original photo/video bytes live", so they stay a plain local
+    path regardless of storage_backend."""
+    return _cfg.thumbnail_dir_abs / f"{file_hash}.jpg"
 
 
 def get_db() -> sqlite3.Connection:
@@ -522,6 +538,9 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     if current_path.lower().startswith(dest_root.lower()):
         relative_path = current_path[len(dest_root):].lstrip("\\/")
     is_video = Path(d["filename"] or "").suffix.lower() in _video_exts
+    # Phase 2g: only a video can have a cached thumbnail, so the stat() call
+    # is skipped entirely for the (large majority) of rows that are photos.
+    has_thumbnail = is_video and _thumbnail_path(file_hash).exists()
     return {
         "file_hash": file_hash,
         "current_path": current_path,
@@ -531,6 +550,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "date_source": d["date_source"],
         "status": d["status"],
         "is_video": is_video,
+        "has_thumbnail": has_thumbnail,
         "captioned": cap is not None,
         "caption": cap.get("caption") if cap else None,
         "tags": cap.get("tags") if cap else [],
@@ -877,6 +897,33 @@ def serve_video(file_hash: str):
     with _storage.open(path) as f:
         data = f.read()
     return Response(data, mimetype=mimetype)
+
+
+@app.route("/thumbnail/<file_hash>")
+def serve_thumbnail(file_hash: str):
+    """Phase 2g: serves a cached video first-frame thumbnail, if one exists
+    at cfg.thumbnail_dir_abs (see src/thumbnail_backfill.py). The grid only
+    ever issues this request when `_row_to_dict`'s `has_thumbnail` field is
+    true (static/review.js), so a 404 here should be rare in practice — but
+    it's a real, deliberate fallback (not just an assumption the front end
+    always gets it right first): review.js's `<img>` tag renders normally on
+    a 404 (no onerror handler swaps in a placeholder mid-grid, per spec's
+    "never show a broken image" — the front end simply never emits an <img>
+    for a video without has_thumbnail in the first place, so a broken image
+    never appears in the grid at all). Looked up by file_hash, same as
+    serve_image/serve_video, so a stale/bookmarked URL can't read an
+    arbitrary filesystem path — and unlike those two, no DB lookup is even
+    needed: the cache file's existence at this deterministic path *is* the
+    whole answer."""
+    path = _thumbnail_path(file_hash)
+    if not path.exists():
+        abort(404)
+    resp = send_file(path, mimetype="image/jpeg", conditional=True)
+    # Safe to cache aggressively, same reasoning as /image/<hash>: file_hash
+    # is content-addressed and this tool never re-generates a thumbnail for
+    # an already-cached hash (see thumbnail_backfill.py's resumability).
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
 
 
 def _open_browser_later(url: str) -> None:

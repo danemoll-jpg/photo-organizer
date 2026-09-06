@@ -11,6 +11,8 @@
     venv\\Scripts\\python main.py caption --limit <folder>  # caption just one folder first
     venv\\Scripts\\python main.py extract-gps                # Phase 2b: EXIF GPS -> offline reverse-geocoded place name
     venv\\Scripts\\python main.py extract-gps --limit <folder prefix>  # just one folder first
+    venv\\Scripts\\python main.py extract-thumbnails                # Phase 2g: cache a real first-frame thumbnail per video
+    venv\\Scripts\\python main.py extract-thumbnails --limit <folder prefix>  # just one folder first
     venv\\Scripts\\python main.py review-user add <username>    # Phase 2d: add/update a review_tool.py login
     venv\\Scripts\\python main.py review-user list              # list configured usernames
     venv\\Scripts\\python main.py review-user remove <username> # revoke a login
@@ -31,6 +33,7 @@ from src.load_captions import load_captions
 from src.logging_setup import setup_logging
 from src.organize import run_phase1
 from src.port_check import restart_review_tool
+from src.thumbnail_backfill import run_thumbnail_extraction
 
 
 def cmd_init_db(args) -> None:
@@ -178,6 +181,36 @@ def cmd_extract_gps(args) -> None:
     print(stats.summary())
 
 
+def cmd_extract_thumbnails(args) -> None:
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
+    logger.info("Starting Phase 2g video thumbnail extraction run")
+    # No init_db() call needed here (unlike extract-gps) -- this module never
+    # writes to the DB at all, only SELECTs existing video rows; see
+    # src/thumbnail_backfill.py's module docstring.
+
+    pbar: tqdm | None = None
+
+    def _progress_cb(done: int, total: int) -> None:
+        nonlocal pbar
+        if pbar is None:
+            pbar = tqdm(total=total, desc="Thumbnails", unit="file")
+        pbar.n = done
+        pbar.refresh()
+
+    conn = connect(cfg.db_path_abs)
+    try:
+        stats = run_thumbnail_extraction(cfg, conn, logger, progress_cb=_progress_cb, folder_prefix=args.limit)
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(stats.summary())
+    print(f"\nCached to: {cfg.thumbnail_dir_abs}")
+
+
 def cmd_review_user_add(args) -> None:
     """Phase 2d: add or update a review_tool.py login credential. Prompts
     for the password interactively (hidden input via getpass) rather than
@@ -294,6 +327,13 @@ def main() -> None:
     gps_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
                              help="Only process photos whose current_path starts with this prefix (try a small folder first)")
     gps_parser.set_defaults(func=cmd_extract_gps)
+
+    thumbs_parser = sub.add_parser(
+        "extract-thumbnails", help="Phase 2g: cache a real first-frame thumbnail per video for review_tool.py's grid"
+    )
+    thumbs_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
+                                help="Only process videos whose current_path starts with this prefix (try a small folder first)")
+    thumbs_parser.set_defaults(func=cmd_extract_thumbnails)
 
     ru_parser = sub.add_parser("review-user", help="Phase 2d: manage review_tool.py login credentials (config.yaml's review_users)")
     ru_sub = ru_parser.add_subparsers(dest="review_user_command", required=True)

@@ -311,12 +311,19 @@
     for (const item of state.grid.items) {
       const card = document.createElement("div");
       card.className = "card";
-      const thumb = item.is_video
-        // Phase 2e: no real frame-extraction thumbnail yet -- a generic
-        // play-icon placeholder tile stands in for the grid (the full
-        // viewer plays the actual file, see openViewer/renderViewerItem).
-        ? `<div class="thumb-video-placeholder" title="Video">&#9654;</div>`
-        : `<img loading="lazy" src="/image/${item.file_hash}?max=400" alt="">`;
+      const thumb = !item.is_video
+        ? `<img loading="lazy" src="/image/${item.file_hash}?max=400" alt="">`
+        // Phase 2g: a real cached first-frame thumbnail when one exists
+        // (has_thumbnail, from _row_to_dict) -- a small play-icon badge
+        // overlaid so it's still obviously a video, not a photo. Falls back
+        // to Phase 2e's generic placeholder tile for a video not yet
+        // processed (or one that failed to decode) -- never a broken image,
+        // since we only ever request /thumbnail/<hash> when has_thumbnail
+        // is true in the first place.
+        : item.has_thumbnail
+        ? `<img loading="lazy" src="/thumbnail/${item.file_hash}" alt="">
+           <div class="thumb-video-badge" title="Video">&#9654;</div>`
+        : `<div class="thumb-video-placeholder" title="Video">&#9654;</div>`;
       card.innerHTML = `
         <div class="thumb-wrap">${thumb}</div>
         <div class="card-body">

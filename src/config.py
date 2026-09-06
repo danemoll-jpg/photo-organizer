@@ -97,6 +97,18 @@ class Config:
     # user's own already-confirmed-working tunnel (see CLAUDE.md).
     cloudflare_tunnel_name: str = "photo-viewer"
 
+    # Phase 2g: cached video first-frame thumbnails (src/thumbnail_backfill.py,
+    # served by review_tool.py's /thumbnail/<file_hash> route). One JPEG per
+    # video, named <file_hash>.jpg -- disk existence IS the resumability
+    # checkpoint (no DB column), per the module's own docstring. Dimension is
+    # config-driven (rule 4) rather than hardcoded, same reasoning as
+    # caption_max_dimension -- 480px longest edge is plenty for a grid tile
+    # (photos' own grid thumbs are requested at ?max=400) with a little
+    # headroom, at a fraction of the file size a full-res frame would cost
+    # times 12k+ videos.
+    thumbnail_dir: str = "data/thumbnails"
+    thumbnail_max_dimension: int = 480
+
     # --- derived, absolute paths ---
     @property
     def dest_root_path(self) -> Path:
@@ -119,6 +131,11 @@ class Config:
     @property
     def log_dir_abs(self) -> Path:
         p = Path(self.log_dir)
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def thumbnail_dir_abs(self) -> Path:
+        p = Path(self.thumbnail_dir)
         return p if p.is_absolute() else REPO_ROOT / p
 
     @property
@@ -186,6 +203,8 @@ def load_config(path: Path | None = None) -> Config:
         login_rate_limit_window_seconds=raw.get("login_rate_limit_window_seconds", 900),
         storage_backend=raw.get("storage_backend", "local"),
         cloudflare_tunnel_name=raw.get("cloudflare_tunnel_name", "photo-viewer"),
+        thumbnail_dir=raw.get("thumbnail_dir", "data/thumbnails"),
+        thumbnail_max_dimension=raw.get("thumbnail_max_dimension", 480),
     )
 
 
