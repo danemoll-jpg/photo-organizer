@@ -188,6 +188,27 @@ Panels:
   scale). No schema changes — reuses Phase 2f's existing photo_edits table
   and photos.date_taken/date_source columns, so no review_tool.py/rule 12
   migration concern here. Collapsed by default, placed after Phase 2g.
+  **Follow-up session (real usability feedback):** added two one-click
+  shortcuts above the general Scan/Inspect/Preview/Apply workflow --
+  "Apply Folder-Rule Fix (822 files)" and "Apply Sequence Fix — Feb 2020
+  Vacation (1,705 files)" (see _on_date_audit_apply_known_folder_fix /
+  _on_date_audit_apply_known_sequence_fix). Both corrections were already
+  fully investigated and verified against a copy of the real production DB
+  in a prior session (see TODO.md) -- the user shouldn't have to re-run
+  Scan/Inspect/fill in prefix fields to apply a fix that isn't a mystery
+  anymore. Each still runs a real preview against the live DB and requires
+  a confirm click before writing (same dry-run-before-apply guarantee,
+  just no manual setup); the general workflow below is unchanged and stays
+  available for finding *future* new suspicious dates. Also investigated
+  (headless repro, see session summary) why "Preview Fix (Dry Run)"
+  appeared to do nothing when clicked without Scan/Inspect first: it has
+  no such dependency and was never silently failing -- it populated
+  date_audit_results_text correctly every time. The real cause was the
+  scrolling gap fixed below: this panel's body alone requires ~900px,
+  easily pushing its own results box (near the bottom of an already very
+  tall panel) below the visible window with nothing to scroll it back into
+  view. _set_date_audit_results_text() now auto-scrolls its result into
+  view as an extra safety net on top of the general scrolling fix.
 
 Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
 body (see _make_collapsible()), so a section you're not using right now
@@ -195,6 +216,19 @@ body (see _make_collapsible()), so a section you're not using right now
 while doing Phase 2 work) can be tucked away to make room for whatever
 you actually want to look at, especially the Log viewer at the bottom
 (which expands to fill whatever vertical space is free).
+
+**Follow-up session: the whole panel stack now lives inside a scrollable
+Canvas** (self._main_canvas / self.scroll_frame, set up in _build_ui;
+_make_collapsible packs into self.scroll_frame instead of self.root
+directly), not because any one panel was individually broken, but because
+this was a general gap -- with 9 stacked panels (up from 3 pre-Phase-2),
+several expanded at once (or even just one very tall one, like Date
+Cluster Audit) can exceed the window's height with no way to reach what's
+below. Mouse wheel scrolls the page from anywhere except over a widget
+that already scrolls itself (Text/Listbox/Treeview/Combobox -- see
+_MOUSEWHEEL_PASSTHROUGH/_bind_mousewheel_recursive), so scrolling over the
+Log viewer's text box or the Date Cluster Audit tree still scrolls that
+widget's own content, not the whole page.
 
 Note on _poll_queue / _tail_tick: both are perpetually-self-rescheduling
 Tk `after()` callbacks, so a single unhandled exception inside either one
@@ -327,16 +361,37 @@ class DashboardApp:
         self.root.after(300, self._port_status_tick)
 
     # ------------------------------------------------------------------ UI
+    # Widget classes that already implement their own mouse-wheel scrolling
+    # (Text/Listbox/Treeview all have built-in Tk/ttk class bindings) --
+    # _bind_mousewheel_recursive skips these so scrolling over, say, the Log
+    # viewer's text box scrolls *that box*, not the whole dashboard.
+    _MOUSEWHEEL_PASSTHROUGH = (tk.Text, tk.Listbox, ttk.Treeview, ttk.Combobox, ttk.Scrollbar)
+
+    # Parameters for the already-investigated Sequence Interpolation fix
+    # (the Feb 2020 vacation batch, 1,705 files) — exactly the values used
+    # to verify this candidate list against a copy of the real production DB
+    # in the investigation session (see TODO.md's Date Cluster Audit entry
+    # and main.py's own audit-dates interpolate-preview/-apply docstring
+    # example, which use these same three values).
+    KNOWN_SEQUENCE_TARGET_PREFIX = r"E:\katya 2024"
+    KNOWN_SEQUENCE_REFERENCE_PREFIX = r"E:\Pics\2020\2020-02"
+    KNOWN_SEQUENCE_IMG_MAX = 7093
+
     def _make_collapsible(self, title: str, fill: str = "x", expand: bool = False,
                            start_expanded: bool = True) -> ttk.Frame:
         """Builds a section with a header (toggle triangle + title) and a
         body frame the caller packs its real widgets into; returns the
-        body. Collapsing just pack_forget()s the body -- there's no
-        scrollable container to fight with, so other sections (especially
-        the Log viewer, which expands to fill whatever's left) simply
-        reclaim the freed vertical space through normal pack layout, no
-        extra bookkeeping needed."""
-        outer = ttk.Frame(self.root, relief="groove", borderwidth=1)
+        body. Collapsing just pack_forget()s the body -- other sections
+        (especially the Log viewer, which expands to fill whatever's left)
+        simply reclaim the freed space through normal pack layout, no extra
+        bookkeeping needed. Panels are packed into self.scroll_frame (a
+        frame inside a Canvas), not directly into self.root -- with 9
+        stacked panels (up from 3 pre-Phase-2), the combined natural height
+        can easily exceed the window even with several collapsed, and a
+        single very tall panel (e.g. Date Cluster Audit, ~900px on its own
+        once expanded) can by itself push content below the visible window
+        with no way to reach it. See _build_ui's canvas/scrollbar setup."""
+        outer = ttk.Frame(self.scroll_frame, relief="groove", borderwidth=1)
         outer.pack(fill=fill, expand=expand, padx=8, pady=6)
 
         header = ttk.Frame(outer)
@@ -366,6 +421,39 @@ class DashboardApp:
 
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 6}
+
+        # --- Scrollable page container -----------------------------------
+        # The whole dashboard's content (every panel below) lives inside
+        # this Canvas+Scrollbar instead of packing straight into self.root.
+        # Before this, a tall expanded panel (or several expanded at once)
+        # could push content below the window's visible area with no way
+        # to reach it -- confirmed for real: Date Cluster Audit's body alone
+        # requires ~894px, essentially the whole default 900px window
+        # height, on top of whatever else is expanded above it. Scrolling
+        # by mouse wheel works everywhere except over widgets that already
+        # scroll themselves (Text/Listbox/Treeview/Combobox -- see
+        # _MOUSEWHEEL_PASSTHROUGH), which keep their own wheel behavior.
+        scroll_container = ttk.Frame(self.root)
+        scroll_container.pack(fill="both", expand=True)
+        self._main_canvas = tk.Canvas(scroll_container, highlightthickness=0)
+        main_scroll = ttk.Scrollbar(scroll_container, orient="vertical", command=self._main_canvas.yview)
+        self._main_canvas.configure(yscrollcommand=main_scroll.set)
+        self._main_canvas.pack(side="left", fill="both", expand=True)
+        main_scroll.pack(side="right", fill="y")
+
+        self.scroll_frame = ttk.Frame(self._main_canvas)
+        self._scroll_window_id = self._main_canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+
+        def _on_scroll_frame_configure(_event=None) -> None:
+            self._main_canvas.configure(scrollregion=self._main_canvas.bbox("all"))
+
+        def _on_canvas_configure(event) -> None:
+            # Keep the inner frame exactly as wide as the canvas viewport so
+            # content wraps/fills correctly and nothing scrolls sideways.
+            self._main_canvas.itemconfigure(self._scroll_window_id, width=event.width)
+
+        self.scroll_frame.bind("<Configure>", _on_scroll_frame_configure)
+        self._main_canvas.bind("<Configure>", _on_canvas_configure)
 
         # --- Source folders panel ---
         src_frame = self._make_collapsible("Source folders")
@@ -542,6 +630,47 @@ class DashboardApp:
                 "becomes available after you've looked at a preview."
             ),
         ).pack(anchor="w", padx=6, pady=(6, 6))
+
+        # --- Known-fix one-click shortcuts -------------------------------
+        # The 822-file folder-rule and 1,705-file sequence-interpolation
+        # corrections were already fully investigated and verified against
+        # a copy of the real production DB in a prior session (see TODO.md)
+        # -- they aren't a mystery needing rediscovery through Scan/Inspect/
+        # Preview every time. Each button still runs a real preview against
+        # the live DB right now and requires a confirm click before writing
+        # anything (never skips the dry-run-before-apply guarantee) -- it
+        # just needs no scan, no inspect, and no fields filled in first.
+        kf_frame = ttk.Frame(da_frame, relief="ridge", borderwidth=1)
+        kf_frame.pack(fill="x", padx=6, pady=(0, 10))
+        ttk.Label(
+            kf_frame, text="Already investigated — one-click", font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=6, pady=(6, 0))
+        ttk.Label(
+            kf_frame, wraplength=740, justify="left",
+            text=(
+                "These two corrections are already fully computed and verified (see TODO.md) — "
+                "no need to Scan/Inspect/fill in fields first. Each still previews the current, "
+                "live list of changes and asks you to confirm before writing anything."
+            ),
+        ).pack(anchor="w", padx=6, pady=(2, 6))
+        kf_btn_row = ttk.Frame(kf_frame)
+        kf_btn_row.pack(fill="x", padx=6, pady=(0, 8))
+        self.date_audit_known_folder_btn = ttk.Button(
+            kf_btn_row, text="Apply Folder-Rule Fix (822 files)",
+            command=self._on_date_audit_apply_known_folder_fix,
+        )
+        self.date_audit_known_folder_btn.pack(side="left")
+        self.date_audit_known_sequence_btn = ttk.Button(
+            kf_btn_row, text="Apply Sequence Fix — Feb 2020 Vacation (1,705 files)",
+            command=self._on_date_audit_apply_known_sequence_fix,
+        )
+        self.date_audit_known_sequence_btn.pack(side="left", padx=(8, 0))
+
+        ttk.Separator(da_frame, orient="horizontal").pack(fill="x", padx=6, pady=(0, 8))
+        ttk.Label(
+            da_frame, text="General workflow — for finding future new suspicious dates:",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=6, pady=(0, 6))
 
         da_scan_row = ttk.Frame(da_frame)
         da_scan_row.pack(fill="x", padx=6, pady=(0, 6))
@@ -772,6 +901,46 @@ class DashboardApp:
         log_scroll = ttk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
         log_scroll.pack(side="right", fill="y")
         self.log_text.configure(yscrollcommand=log_scroll.set)
+
+        self._bind_mousewheel_recursive(self.scroll_frame)
+
+    def _bind_mousewheel_recursive(self, widget: tk.Widget) -> None:
+        """Lets the mouse wheel scroll the main dashboard canvas from
+        anywhere over a panel's plain background/labels/buttons. Skips
+        widgets in _MOUSEWHEEL_PASSTHROUGH (Text/Listbox/Treeview/Combobox/
+        Scrollbar) so hovering over, e.g., the Log viewer's text box or the
+        Date Cluster Audit tree scrolls that widget's own content instead --
+        binding both would fight each other."""
+        if not isinstance(widget, self._MOUSEWHEEL_PASSTHROUGH):
+            widget.bind("<MouseWheel>", self._on_main_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child)
+
+    def _on_main_mousewheel(self, event) -> None:
+        if event.delta:
+            self._main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _scroll_widget_into_view(self, widget: tk.Widget) -> None:
+        """Scrolls the main dashboard canvas so `widget` is visible. Used
+        after an action that writes its result into a text box that can sit
+        far down a long panel (e.g. Date Cluster Audit's Preview Fix output)
+        -- this is what made "clicking Preview Fix appeared to do nothing"
+        look like a bug: the query ran and populated the result correctly
+        every time, it was just rendered below the visible window with no
+        scrollbar to reach it before this fix. Best-effort: never raises."""
+        try:
+            self.root.update_idletasks()
+            bbox = self._main_canvas.bbox("all")
+            if not bbox:
+                return
+            total_height = bbox[3] - bbox[1]
+            if total_height <= 0:
+                return
+            y = widget.winfo_rooty() - self.scroll_frame.winfo_rooty()
+            fraction = max(0.0, min(1.0, y / total_height))
+            self._main_canvas.yview_moveto(fraction)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------- config
     def _load_config_or_onboard(self) -> None:
@@ -1429,6 +1598,14 @@ class DashboardApp:
         self.date_audit_results_text.delete("1.0", "end")
         self.date_audit_results_text.insert("1.0", text)
         self.date_audit_results_text.configure(state="disabled")
+        # Every Scan/Inspect/Preview action writes its result through here --
+        # auto-scroll so it's actually visible, not just written into a text
+        # box that might sit off-screen below a long panel. This was the
+        # real cause behind "Preview Fix appeared to do nothing" (confirmed
+        # via a headless repro: the query ran and populated this box
+        # correctly every time -- it was a visibility problem, not a logic
+        # bug or a hidden dependency on Scan/Inspect having run first).
+        self._scroll_widget_into_view(self.date_audit_results_text)
 
     def _on_date_audit_scan(self) -> None:
         # Step 0: a fast, synchronous, read-only query (sub-second even at
@@ -1614,6 +1791,116 @@ class DashboardApp:
             disable_btns=[self.date_audit_interp_apply_btn],
         )
 
+    def _on_date_audit_apply_known_folder_fix(self) -> None:
+        """One-click path for the already-investigated 822-file folder-rule
+        correction (see TODO.md) — no Scan/Inspect needed, and no fields to
+        fill in. Still runs a real preview against the live DB right now
+        (never trusts the 822 figure blindly — the library may have
+        changed) and still requires the same confirm-before-write step as
+        the general Apply Fix button below; this only removes the busywork
+        of re-deriving a fix that isn't a mystery anymore."""
+        if self._date_audit_busy():
+            return
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)
+            conn = connect(cfg.db_path_abs)
+            try:
+                preview = find_fix_candidates(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Preview failed: {e}")
+            return
+
+        # Keep the general workflow's own Preview/Apply state in sync too,
+        # so the regular buttons below reflect exactly what this shortcut
+        # just found — not a separate, hidden preview.
+        self._date_audit_preview = preview
+        self._set_date_audit_results_text(format_fix_preview(preview))
+        self.date_audit_apply_btn.configure(state="normal" if preview.candidates else "disabled")
+
+        if not preview.candidates:
+            messagebox.showinfo(
+                "Photo Organizer",
+                "No folder-rule candidates found right now — this may already have been applied, "
+                "or the underlying data has changed since the 822-file count was last confirmed.",
+            )
+            return
+
+        self._start_date_audit_apply(
+            preview.candidates, BATCH_FIX_EDITOR,
+            confirm_message=(
+                f"About to correct the date on {len(preview.candidates)} photo(s)/video(s) — the "
+                "already-investigated folder-rule correction (each file's own pre-existing "
+                "YYYY\\MM-style folder, from before this project ever sorted it, used as the source "
+                "of truth for year/month). See the results box above for the full list this run found.\n\n"
+                "This only changes the database record (date_taken) via the same audited edit mechanism "
+                "review_tool.py's manual edits use — it never moves, renames, or re-sorts any file, and "
+                "every change is reversible (edit the date again in review_tool.py, or check photo_edits).\n\n"
+                "Proceed?"
+            ),
+            disable_btns=[self.date_audit_apply_btn, self.date_audit_known_folder_btn],
+        )
+
+    def _on_date_audit_apply_known_sequence_fix(self) -> None:
+        """One-click path for the already-investigated 1,705-file Feb 2020
+        vacation sequence-interpolation correction (see TODO.md) — no
+        Scan/Inspect/field-filling needed. Prefills the general Sequence
+        Interpolation fields with the exact parameters used (so what ran is
+        visible, not hidden magic), runs a real preview against the live DB
+        right now, and still requires the same confirm-before-write step as
+        the general Apply Sequence Fix button below."""
+        if self._date_audit_busy():
+            return
+        self.date_audit_interp_target_var.set(self.KNOWN_SEQUENCE_TARGET_PREFIX)
+        self.date_audit_interp_reference_var.set(self.KNOWN_SEQUENCE_REFERENCE_PREFIX)
+        self.date_audit_interp_min_var.set("")
+        self.date_audit_interp_max_var.set(str(self.KNOWN_SEQUENCE_IMG_MAX))
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)
+            conn = connect(cfg.db_path_abs)
+            try:
+                candidates, stats = find_sequence_interpolation_candidates(
+                    conn, target_prefix=self.KNOWN_SEQUENCE_TARGET_PREFIX,
+                    reference_prefix=self.KNOWN_SEQUENCE_REFERENCE_PREFIX,
+                    img_min=None, img_max=self.KNOWN_SEQUENCE_IMG_MAX,
+                )
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Preview failed: {e}")
+            return
+
+        self._date_audit_interp_candidates = candidates
+        self._set_date_audit_results_text(format_interpolation_preview(candidates, stats))
+        self.date_audit_interp_apply_btn.configure(state="normal" if candidates else "disabled")
+
+        if not candidates:
+            messagebox.showinfo(
+                "Photo Organizer",
+                "No sequence-interpolation candidates found right now for the Feb 2020 vacation batch "
+                "— this may already have been applied, or the underlying data has changed since the "
+                "1,705-file count was last confirmed.",
+            )
+            return
+
+        self._start_date_audit_apply(
+            candidates, SEQUENCE_FIX_EDITOR,
+            confirm_message=(
+                f"About to correct the date on {len(candidates)} photo(s)/video(s) — the already-"
+                "investigated Feb 2020 vacation correction (camera-roll sequence numbers matched "
+                f"against {self.KNOWN_SEQUENCE_REFERENCE_PREFIX}). See the results box above for the "
+                "full list this run found (exact matches vs. interpolated).\n\n"
+                "This only changes the database record (date_taken) via the same audited edit mechanism "
+                "review_tool.py's manual edits use — it never moves, renames, or re-sorts any file, and "
+                "every change is reversible (edit the date again in review_tool.py, or check photo_edits).\n\n"
+                "Proceed?"
+            ),
+            disable_btns=[self.date_audit_interp_apply_btn, self.date_audit_known_sequence_btn],
+        )
+
     def _start_date_audit_apply(self, candidates: list, edited_by: str, confirm_message: str, disable_btns: list) -> None:
         if self._date_audit_busy():
             return
@@ -1668,6 +1955,11 @@ class DashboardApp:
     def _on_date_audit_done(self, stats: ApplyFixStats, was_stopped: bool) -> None:
         self.date_audit_apply_btn.configure(state="disabled")  # this preview is now stale/consumed
         self.date_audit_interp_apply_btn.configure(state="disabled")  # ditto for the sequence-interp preview
+        # The known-fix shortcut buttons always recompute a fresh preview on
+        # their own next click, so they have no "stale preview" concept —
+        # just re-enable them unconditionally.
+        self.date_audit_known_folder_btn.configure(state="normal")
+        self.date_audit_known_sequence_btn.configure(state="normal")
         self.date_audit_scan_btn.configure(state="normal")
         self.date_audit_cancel_btn.configure(state="disabled")
         self.date_audit_status_label.configure(text="Stopped early" if was_stopped else "Done")
@@ -1688,6 +1980,8 @@ class DashboardApp:
             self.date_audit_apply_btn.configure(state="normal")
         if self._date_audit_interp_candidates:
             self.date_audit_interp_apply_btn.configure(state="normal")
+        self.date_audit_known_folder_btn.configure(state="normal")
+        self.date_audit_known_sequence_btn.configure(state="normal")
         self.date_audit_scan_btn.configure(state="normal")
         self.date_audit_cancel_btn.configure(state="disabled")
         self.date_audit_status_label.configure(text="Error")
