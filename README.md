@@ -222,6 +222,16 @@ venv\Scripts\python main.py extract-gps
 venv\Scripts\python main.py extract-gps --limit "E:\Pics\2025\2025-01"
 ```
 
+**Usage — dashboard:** open the **"Phase 2b — GPS Extraction"** panel
+(collapsed by default — expand it via its ▼/▶ toggle) and click **Start GPS
+Extraction**. Same underlying function as the CLI (`run_gps_extraction()`),
+just without the `--limit` option — the dashboard always checks the whole
+library. Has its own progress bar, Cancel button, and live log tail,
+independent of every other panel — safe to run alongside Phase 1/1b and
+Phase 2 at the same time (no GPU use here at all, and DB-write contention
+against Phase 1/1b's own writes was tested and found harmless — see
+`dashboard.py`'s module docstring).
+
 Fast — real-world measurement on this library was roughly 100 files/second
 (EXIF read + an in-memory nearest-city lookup), so a full 100k+-file library
 run is a matter of minutes, not the multi-day job Phase 2 is. Safe to run

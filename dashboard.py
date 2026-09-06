@@ -28,8 +28,35 @@ Panels:
   browsing. Both panels' logs are still the exact same
   logs/organize_<timestamp>.log files the CLI writes — no second logging
   path, just two independent *views* onto that shared log directory.
+- GPS Extraction — Phase 2b follow-up: runs src.gps_backfill.run_gps_extraction
+  (same function `main.py extract-gps` calls) against whatever's already in
+  the DB from Phase 1/1b — reads EXIF GPS + offline reverse-geocodes into
+  location_name, gps_lat/gps_lon directly on the `photos` table. Added
+  because the user was confused why location data wasn't showing up in
+  review_tool.py after captioning finished: extract-gps is a deliberately
+  separate step (not automatic), and until now there was no GUI way to run
+  it at all, CLI-only. Unlike Phase 2's multi-day captioning job, this runs
+  at ~100 files/sec (minutes, not days, even at 100k+ files), so its
+  confirmation dialog is a short FYI, not Phase 1's scary warning or Phase
+  2's "expect several days" framing. Independent worker thread/state from
+  every other panel, same "own progress bar + own dedicated live log tail"
+  pattern as Phase 2's Captioning panel. Resource contention checked, not
+  assumed: src/gps_resolver.py does no GPU/network work (Pillow EXIF read +
+  reverse_geocoder's offline in-memory k-d tree lookup, mode=1
+  single-threaded — see CLAUDE.md), so no GPU contention with a concurrent
+  Phase 2 captioning run. The one real difference from Phase 2 (which only
+  appends to captions.jsonl): GPS extraction writes to the SAME `photos`
+  table Phase 1/1b's organize.py writes to, via its own separate sqlite3
+  connection — verified via a synthetic concurrent-commit test (a
+  Phase-1-style rapid-commit writer hammering the same temp DB file while
+  GPS extraction ran against it) that this does not produce
+  `sqlite3.OperationalError: database is locked` errors and costs only
+  minor throughput overhead (~15% in that test) — Python's sqlite3 default
+  busy-timeout retry handles the brief lock contention transparently at
+  this write rate.
 - Log viewer — tails the active Phase 1 run's log, or browse any older
-  logs/*.log (including old Phase 2 runs, if you want to review one)
+  logs/*.log (including old Phase 2/GPS-extraction runs, if you want to
+  review one)
 - Review Users — Phase 2d follow-up: manages review_tool.py's login
   credentials (config.yaml's review_users). Deliberately lives HERE, not in
   review_tool.py itself — account management is an owner/admin action, and
@@ -118,6 +145,7 @@ from src.config import (
     save_source_folders,
 )
 from src.db import connect, init_db
+from src.gps_backfill import GpsStats, run_gps_extraction
 from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
 from src.pick_sources import merge_and_save, pick_sources_interactive
@@ -146,6 +174,15 @@ class DashboardApp:
         self.caption_stop_requested = False
         self._caption_log_path: Path | None = None
         self._caption_log_read_pos = 0
+
+        # GPS Extraction panel (Phase 2b follow-up) — also its own
+        # independent worker/progress, same reasoning as Phase 2 above (no
+        # GPU contention; DB-write contention against Phase 1/1b checked —
+        # see module docstring).
+        self.gps_worker: threading.Thread | None = None
+        self.gps_stop_requested = False
+        self._gps_log_path: Path | None = None
+        self._gps_log_read_pos = 0
 
         # Remote Access panel (Phase 2d follow-up): the cloudflared
         # subprocess this dashboard itself spawned, if any. None whenever
@@ -280,6 +317,46 @@ class DashboardApp:
         cap_log_scroll.pack(side="right", fill="y")
         self.caption_log_text.configure(yscrollcommand=cap_log_scroll.set)
 
+        # --- Phase 2b: GPS Extraction panel ---
+        gps_frame = self._make_collapsible(
+            "Phase 2b — GPS Extraction (EXIF location backfill)", start_expanded=False
+        )
+
+        gps_info_row = ttk.Frame(gps_frame)
+        gps_info_row.pack(fill="x", padx=6, pady=(6, 0))
+        self.gps_info_label = ttk.Label(gps_info_row, text="(loading config...)", wraplength=740, justify="left")
+        self.gps_info_label.pack(side="left", fill="x", expand=True)
+
+        gps_btn_row = ttk.Frame(gps_frame)
+        gps_btn_row.pack(fill="x", padx=6, pady=6)
+        self.gps_btn = ttk.Button(gps_btn_row, text="Start GPS Extraction", command=self._on_gps_start)
+        self.gps_btn.pack(side="left")
+        self.gps_cancel_btn = ttk.Button(gps_btn_row, text="Cancel", command=self._on_gps_cancel, state="disabled")
+        self.gps_cancel_btn.pack(side="left", padx=(6, 0))
+
+        gps_prog_row = ttk.Frame(gps_frame)
+        gps_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.gps_progress = ttk.Progressbar(gps_prog_row, mode="determinate")
+        self.gps_progress.pack(fill="x", side="left", expand=True)
+        self.gps_status_label = ttk.Label(gps_prog_row, text="Idle", width=28, anchor="e")
+        self.gps_status_label.pack(side="right", padx=(6, 0))
+
+        self.gps_results_text = tk.Text(gps_frame, height=5, state="disabled", wrap="word")
+        self.gps_results_text.pack(fill="x", padx=6, pady=(0, 6))
+
+        # Dedicated live log tail, same reasoning as Phase 2's above — its
+        # own view onto whatever logs/organize_*.log the current/most
+        # recent GPS extraction run wrote to, independent of the shared Log
+        # viewer panel's dropdown.
+        ttk.Label(gps_frame, text="Live GPS extraction log:").pack(anchor="w", padx=6)
+        gps_log_body = ttk.Frame(gps_frame)
+        gps_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.gps_log_text = tk.Text(gps_log_body, height=8, state="disabled", wrap="none")
+        self.gps_log_text.pack(side="left", fill="both", expand=True)
+        gps_log_scroll = ttk.Scrollbar(gps_log_body, orient="vertical", command=self.gps_log_text.yview)
+        gps_log_scroll.pack(side="right", fill="y")
+        self.gps_log_text.configure(yscrollcommand=gps_log_scroll.set)
+
         # --- Review Users panel (Phase 2d follow-up) ---
         ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
 
@@ -401,6 +478,11 @@ class DashboardApp:
         self.dest_label.configure(text=f"dest_root: {self.cfg.dest_root}  (always scanned too)")
         self.caption_model_label.configure(
             text=f"model: {self.cfg.ollama_model}  (via {self.cfg.ollama_host})  —  scans {self.cfg.dest_root} for JPG/PNG/HEIC"
+        )
+        self.gps_info_label.configure(
+            text="Reads EXIF GPS + offline reverse-geocodes into a place name (e.g. \"Woodstock, GA\"), "
+            "written directly onto the photos table. Only scans DB rows not yet checked "
+            "(gps_checked=0) — resumable, ~100 files/sec."
         )
         self._refresh_folder_list()
         self._refresh_review_users()
@@ -575,6 +657,19 @@ class DashboardApp:
                     elif kind == "caption_error":
                         _, err = msg
                         self._on_caption_error(err)
+                    elif kind == "gps_log_started":
+                        log_path = msg[1]
+                        self._start_gps_log_tail(log_path)
+                    elif kind == "gps_progress":
+                        _, done, total = msg
+                        self.gps_progress.configure(maximum=max(total, 1), value=done)
+                        self.gps_status_label.configure(text=f"{done:,} / {total:,} processed")
+                    elif kind == "gps_done":
+                        _, stats, was_stopped = msg
+                        self._on_gps_done(stats, was_stopped)
+                    elif kind == "gps_error":
+                        _, err = msg
+                        self._on_gps_error(err)
                     elif kind == "tunnel_output":
                         _, proc, line = msg
                         self._append_tunnel_log(proc, line)
@@ -724,6 +819,116 @@ class DashboardApp:
         self.caption_log_text.insert("end", new_text)
         self.caption_log_text.see("end")
         self.caption_log_text.configure(state="disabled")
+
+    # -------------------------------------------- Phase 2b: GPS extraction
+    def _gps_busy(self) -> bool:
+        return self.gps_worker is not None and self.gps_worker.is_alive()
+
+    def _on_gps_start(self) -> None:
+        if self._gps_busy():
+            return
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            "About to scan every photo/video already in the database for GPS EXIF data "
+            "not yet checked, and offline reverse-geocode any coordinates found into a "
+            "place name (e.g. \"Woodstock, GA\").\n\n"
+            "This only reads files and writes gps_lat/gps_lon/location_name into the "
+            "database — it never modifies, moves, or deletes any photo/video.\n\n"
+            "Fast (~100 files/sec) — minutes, not days, even at 100k+ files. Safe to "
+            "Cancel and resume any time; already-checked files are skipped next run.\n\n"
+            "Start now?",
+        ):
+            return
+        self.gps_stop_requested = False
+        self.gps_progress.configure(value=0, maximum=1)
+        self.gps_status_label.configure(text="Starting...")
+        self._set_gps_results_text("")
+        self.gps_btn.configure(state="disabled")
+        self.gps_cancel_btn.configure(state="normal")
+
+        self.gps_worker = threading.Thread(target=self._gps_worker, daemon=True)
+        self.gps_worker.start()
+
+    def _on_gps_cancel(self) -> None:
+        self.gps_stop_requested = True
+        self.gps_status_label.configure(text="Stopping...")
+
+    def _gps_worker(self) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push messages through self.msg_queue for the main thread to apply.
+        # Same shape as _run_worker/_caption_worker above; the only real
+        # difference is this one also opens its own sqlite3 connection to
+        # the SAME db file Phase 1/1b's worker may be writing to at the
+        # same time (verified safe — see module docstring).
+        try:
+            cfg = load_config()
+            logger, log_path = setup_logging(cfg.log_dir_abs, echo_to_console=False)
+            self.msg_queue.put(("gps_log_started", log_path))
+            init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent — applies the gps_* column migration if needed
+            logger.info("Starting Phase 2b (GPS extraction) run from dashboard")
+
+            conn = connect(cfg.db_path_abs)
+            try:
+                stats = run_gps_extraction(
+                    cfg, conn, logger,
+                    progress_cb=lambda done, total: self.msg_queue.put(("gps_progress", done, total)),
+                    stop_check=lambda: self.gps_stop_requested,
+                )
+            finally:
+                conn.close()
+            self.msg_queue.put(("gps_done", stats, self.gps_stop_requested))
+        except Exception as e:
+            self.msg_queue.put(("gps_error", str(e)))
+
+    def _on_gps_done(self, stats: GpsStats, was_stopped: bool) -> None:
+        self.gps_btn.configure(state="normal")
+        self.gps_cancel_btn.configure(state="disabled")
+        self.gps_status_label.configure(text="Stopped early" if was_stopped else "Done")
+        lines = [f"Scanned: {stats.scanned:,}" + ("  (stopped early by user)" if was_stopped else "")]
+        lines.append(f"GPS found + geocoded: {stats.found:,}")
+        lines.append(f"No GPS data present: {stats.not_found:,}")
+        lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
+        self._set_gps_results_text("\n".join(lines))
+
+    def _on_gps_error(self, err: str) -> None:
+        self.gps_btn.configure(state="normal")
+        self.gps_cancel_btn.configure(state="disabled")
+        self.gps_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"GPS extraction failed: {err}")
+
+    def _set_gps_results_text(self, text: str) -> None:
+        self.gps_results_text.configure(state="normal")
+        self.gps_results_text.delete("1.0", "end")
+        self.gps_results_text.insert("1.0", text)
+        self.gps_results_text.configure(state="disabled")
+
+    def _start_gps_log_tail(self, log_path: Path) -> None:
+        self._gps_log_path = log_path
+        self._gps_log_read_pos = 0
+        self.gps_log_text.configure(state="normal")
+        self.gps_log_text.delete("1.0", "end")
+        self.gps_log_text.configure(state="disabled")
+        self._append_new_gps_log_lines()
+
+    def _append_new_gps_log_lines(self) -> None:
+        # Independent of the shared Log viewer panel and of Phase 2's own
+        # tail above — always shows the current/most recent GPS extraction
+        # run's own log, regardless of what else is being viewed.
+        if self._gps_log_path is None or not self._gps_log_path.exists():
+            return
+        try:
+            with open(self._gps_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._gps_log_read_pos)
+                new_text = f.read()
+                self._gps_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.gps_log_text.configure(state="normal")
+        self.gps_log_text.insert("end", new_text)
+        self.gps_log_text.see("end")
+        self.gps_log_text.configure(state="disabled")
 
     # --------------------------------------------- Phase 2d: review users
     def _refresh_review_users(self) -> None:
@@ -992,6 +1197,10 @@ class DashboardApp:
             pass
         try:
             self._append_new_caption_log_lines()  # Phase 2's own view, always live, no checkbox needed
+        except Exception:
+            pass
+        try:
+            self._append_new_gps_log_lines()  # GPS extraction's own view, same reasoning
         except Exception:
             pass
         self.root.after(500, self._tail_tick)
