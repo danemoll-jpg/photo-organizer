@@ -37,6 +37,26 @@ def listening_pids(port: int) -> list[int]:
             capture_output=True,
             text=True,
             timeout=10,
+            # Without this, spawning a console app (netstat.exe) from a
+            # process with no console of its own -- exactly how dashboard.py
+            # runs, via pythonw.exe -- makes Windows create a brand new
+            # console window for the child. dashboard.py's Remote Access
+            # panel calls this every 5s for as long as the dashboard is
+            # open (self._port_status_tick), so without this flag that's a
+            # console window flashing open/closed every 5 seconds for the
+            # dashboard's entire lifetime, stealing focus each time -- this
+            # was mistaken for a GPS-extraction-specific bug (PRIORITY BUG
+            # #1 in TODO.md) since it's a recent addition the user started
+            # exercising around the same time as the new GPS panel, but the
+            # 5s status tick runs unconditionally regardless of what else
+            # is running. dashboard.py's own cloudflared Popen call already
+            # uses this same CREATE_NO_WINDOW flag for the identical
+            # reason -- this call was just missed. getattr guards this
+            # module importing cleanly on a non-Windows platform, where the
+            # attribute doesn't exist (though `netstat -p TCP`'s syntax is
+            # Windows-specific anyway, so this module has no real non-
+            # Windows use).
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError):
         return []

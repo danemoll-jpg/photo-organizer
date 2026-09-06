@@ -54,6 +54,17 @@ Panels:
   minor throughput overhead (~15% in that test) — Python's sqlite3 default
   busy-timeout retry handles the brief lock contention transparently at
   this write rate.
+  **Real bug found and fixed this follow-up session, worth knowing if a
+  future panel is added the same way:** Phase 1/Captioning/GPS-extraction
+  each called `setup_logging()` with the same default logger name, which
+  resolves to one shared `logging.Logger` object — so whichever worker
+  called it most recently silently repointed that ONE logger's handler at
+  its own file, redirecting every other already-running worker's log
+  lines into it too (this is how GPS's lines ended up in the Captioning
+  panel's box — see CLAUDE.md/TODO.md). Each worker below now passes its
+  own `logger_name` to `setup_logging()` so this can't happen again — a
+  future panel/worker must do the same (pick its own distinct name) rather
+  than call `setup_logging()` with the default.
 - Log viewer — tails the active Phase 1 run's log, or browse any older
   logs/*.log (including old Phase 2/GPS-extraction runs, if you want to
   review one)
@@ -598,7 +609,13 @@ class DashboardApp:
         try:
             cfg = load_config()
             cfg = replace(cfg, dry_run=dry_run)  # CLI flag equivalent of --dry-run/--execute
-            logger, log_path = setup_logging(cfg.log_dir_abs, echo_to_console=False)
+            # logger_name distinguishes this worker's logger from the
+            # Captioning/GPS workers' — see setup_logging()'s docstring for
+            # why sharing the default name broke log routing when two
+            # workers ran concurrently.
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.organize"
+            )
             self.msg_queue.put(("log_started", log_path))
             init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent — CREATE TABLE IF NOT EXISTS + any pending migration
             logger.info(f"Starting Phase 1 run from dashboard — dry_run={dry_run}")
@@ -742,7 +759,11 @@ class DashboardApp:
         self.caption_stop_requested = False
         self.caption_progress.configure(value=0, maximum=1)
         self.caption_status_label.configure(text="Starting...")
-        self._set_caption_results_text("")
+        # Placeholder, not blank -- the box used to sit empty for the run's
+        # entire (potentially multi-day) duration until a final summary
+        # landed on completion, which real usage showed reads as broken/
+        # confusing (TODO.md) rather than "results not ready yet".
+        self._set_caption_results_text("Running...")
         self.caption_btn.configure(state="disabled")
         self.caption_cancel_btn.configure(state="normal")
 
@@ -758,7 +779,12 @@ class DashboardApp:
         # push messages through self.msg_queue for the main thread to apply.
         try:
             cfg = load_config()
-            logger, log_path = setup_logging(cfg.log_dir_abs, echo_to_console=False)
+            # Distinct logger_name (own object, own handler) so this doesn't
+            # collide with the Phase 1/GPS workers' loggers if they're
+            # running at the same time — see setup_logging()'s docstring.
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.caption"
+            )
             self.msg_queue.put(("caption_log_started", log_path))
             logger.info(f"Starting Phase 2 (captioning) run from dashboard — model={cfg.ollama_model}")
             stats = run_phase2(
@@ -842,7 +868,9 @@ class DashboardApp:
         self.gps_stop_requested = False
         self.gps_progress.configure(value=0, maximum=1)
         self.gps_status_label.configure(text="Starting...")
-        self._set_gps_results_text("")
+        # Placeholder, not blank -- same UX fix as Captioning's panel above,
+        # for the same real-usage confusion (TODO.md).
+        self._set_gps_results_text("Running...")
         self.gps_btn.configure(state="disabled")
         self.gps_cancel_btn.configure(state="normal")
 
@@ -862,7 +890,14 @@ class DashboardApp:
         # same time (verified safe — see module docstring).
         try:
             cfg = load_config()
-            logger, log_path = setup_logging(cfg.log_dir_abs, echo_to_console=False)
+            # Distinct logger_name (own object, own handler) so this doesn't
+            # collide with the Phase 1/Captioning workers' loggers if
+            # they're running at the same time — this is the actual root
+            # cause of the "GPS logs appearing in the Captioning panel" bug
+            # (TODO.md) fixed this session; see setup_logging()'s docstring.
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.gps"
+            )
             self.msg_queue.put(("gps_log_started", log_path))
             init_db(cfg.db_path_abs, logger=logger)  # safe/idempotent — applies the gps_* column migration if needed
             logger.info("Starting Phase 2b (GPS extraction) run from dashboard")
