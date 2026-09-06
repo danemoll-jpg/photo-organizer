@@ -11,10 +11,23 @@ Opens http://127.0.0.1:<port> (localhost only by default; pass --host
 0.0.0.0 to reach it from another device on the LAN) and launches the
 browser automatically unless --no-browser is passed.
 
-Read-only, deliberately:
-- The SQLite DB is opened via SQLite's own `mode=ro` URI, so this process
-  cannot write to it even by accident — any attempted write raises rather
-  than silently succeeding.
+Read-only, deliberately (with one narrow startup-time exception — see the
+URGENT-fix note below and Phase 2f's edit route further down):
+- Every request-handling route's SQLite connection is opened via SQLite's
+  own `mode=ro` URI (get_db()), so nothing here can write to it even by
+  accident — any attempted write raises rather than silently succeeding.
+- **Exception, added fixing the URGENT empty-grid bug**: main() calls
+  src.db.init_db() once at startup, via a normal (non-ro) connection, the
+  same "safe/idempotent — CREATE TABLE IF NOT EXISTS + any pending
+  migration" call every other entry point (main.py's commands,
+  dashboard.py's panels) already made before touching the DB. This file
+  used to be the one entry point that never called it, on the theory that
+  a read-only tool shouldn't touch schema — but that meant a real
+  production DB last migrated by some other command before a schema-adding
+  session (e.g. Phase 2f's `excluded` column + `photo_edits` table) never
+  actually got that migration applied just by restarting review_tool.py,
+  which is exactly the rule-11 restart workflow this project uses. See
+  main()'s init_db() call site for the full incident writeup.
 - captions.jsonl is only ever opened for reading, tailed incrementally
   (see CaptionsCache below) as the in-progress Phase 2 run appends to it.
 - This tool never runs organize/caption/extract-gps itself, and never
@@ -139,6 +152,7 @@ from PIL import Image
 
 from src.auth import register_auth
 from src.config import Config, load_config
+from src.db import init_db
 from src.edits import EDITABLE_FIELDS, apply_edit, current_tags, manual_edit_fields
 from src.logging_setup import setup_logging
 from src.port_check import listening_pids
@@ -294,6 +308,17 @@ def _build_filters(args) -> tuple[str, list]:
     mechanism (see /api/edit/<file_hash>) -- it does NOT restrict to ONLY
     hidden items, it just stops filtering them out, so hidden and visible
     items are browsable together (the front end marks hidden ones).
+
+    The clause below matches `excluded IS NULL` as well as `excluded = 0`,
+    defensively -- NULL = 0 is never true in SQL, so a plain `excluded = 0`
+    would silently exclude every row where `excluded` came out NULL rather
+    than 0. Belt-and-suspenders: `_migrate()`'s actual ALTER TABLE (`... ADD
+    COLUMN excluded INTEGER NOT NULL DEFAULT 0`) already backfills every
+    pre-existing row to a real 0, not NULL -- confirmed by reproducing it
+    against a real copy of the production DB, not assumed (see TODO.md's
+    URGENT section) -- so no row should ever actually be NULL here. This
+    guards against a future migration path getting that wrong without
+    anyone noticing until the grid goes silently empty again.
     """
     clauses = ["1=1"]
     params: list = []
@@ -342,7 +367,7 @@ def _build_filters(args) -> tuple[str, list]:
         clauses.append(video_clause if media_type == "video" else f"NOT {video_clause}")
         params.extend(like_params)
     if not show_hidden:
-        clauses.append("excluded = 0")
+        clauses.append("(excluded IS NULL OR excluded = 0)")
     sql = " AND ".join(clauses)
     return sql, params
 
@@ -1111,6 +1136,32 @@ def main() -> None:
     # else, not a second parallel log.
     logger, log_path = setup_logging(_cfg.log_dir_abs)
     _logger = logger
+
+    # Real bug fixed here (URGENT session): this file used to never call
+    # init_db() at all, on the theory that a read-only tool has no business
+    # touching schema. But init_db()'s _migrate() is what actually applies a
+    # pending ALTER TABLE/CREATE TABLE to an already-existing DB (see
+    # src/db.py) -- main.py's commands and dashboard.py's panels all call it
+    # before touching the DB themselves, but this file never did, so a real
+    # 167k-row production DB last migrated before a schema-adding session
+    # (e.g. Phase 2f's `excluded` column + `photo_edits` table) stayed
+    # exactly as it was: restarting review_tool.py (rule 11) does NOT apply
+    # a pending migration, since this was the only entry point that skipped
+    # init_db() entirely. The result: _build_filters()'s unconditional
+    # `excluded = 0` clause (and _row_to_dict()'s unconditional
+    # manual_edit_fields() lookup against photo_edits) raised
+    # sqlite3.OperationalError on every single request -- reproduced
+    # directly against a real copy of the production DB predating this
+    # column, not guessed. This one call, safe/idempotent like every other
+    # entry point's, is the actual fix -- confirmed by reproducing the
+    # failure without it and confirming it goes away with it (see TODO.md's
+    # URGENT section). It uses its own normal read-write connection
+    # (src.db.connect(), not get_db()'s mode=ro URI) for this one
+    # startup-only step, before any request-handling route ever touches the
+    # DB -- every route below is still exclusively mode=ro (or, for the one
+    # Phase 2f edit route, get_db_write()), unchanged.
+    init_db(_cfg.db_path_abs, logger=logger)
+
     register_auth(app, _cfg, logger=logger)
     if not _cfg.review_users:
         print("WARNING: no review_users configured in config.yaml — nobody can log in yet.")
