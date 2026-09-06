@@ -38,9 +38,13 @@ investigation against the live DB + live files (this session) found:
   — see `find_fix_candidates()`'s docstring for why this class is correctly
   left unfixed, not force-corrected to a guess.
 - A SECOND, structurally different and independently confirmed pattern: a
-  smaller set of files (649, confirmed this session) were originally seen
-  by Phase 1 already sitting inside a pre-existing YYYY\\MM or YYYY\\YYYY-MM
-  folder the user had manually curated years before this project existed
+  smaller set of files (822, confirmed this session — including a batch
+  found by cross-referencing the user's pre-Phase-1 backup drive, which
+  turned up a real early-library folder-naming convention, "YYYY-MM
+  (MonthName)" e.g. "2001-02 (Feb)", that the first pass of this detector
+  missed) were originally seen by Phase 1 already sitting inside a
+  pre-existing YYYY\\MM or YYYY\\YYYY-MM[- annotation] folder the user had
+  manually curated years before this project existed
   (e.g. `E:\\Pics\\2012\\12\\Portrait Studio\\10C.jpg`) — CLAUDE.md already
   documents that Phase 1 does not treat that nested structure as
   "already correct" and re-sorts it like any other implicit-source file
@@ -190,13 +194,25 @@ class InspectionReport:
 
 def find_year_month_in_parts(parts: tuple[str, ...] | list[str]) -> tuple[int, int] | None:
     """Looks for a bare 4-digit year path component immediately followed by
-    either a 'YYYY-MM' component or a bare 1-2 digit month component,
+    either a 'YYYY-MM' component (optionally with trailing annotation, e.g.
+    'YYYY-MM (MonthName)' — see below) or a bare 1-2 digit month component,
     anywhere in a path's directory parts — the pre-existing
     `YYYY\\YYYY-MM\\` / `YYYY\\MM\\` folder convention this user has used for
     their library since before this project existed (see CLAUDE.md: "Some
     subfolders under E:\\Pics ... already had their own pre-existing nested
     YYYY\\YYYY-MM structure before the tool ever ran"). Returns (year, month)
-    for the first match found, or None."""
+    for the first match found, or None.
+
+    Real finding from cross-referencing against the user's pre-Phase-1
+    backup drive (this session): the exact-match 'YYYY-MM' check alone
+    missed a large, real convention from the library's early years (2001-
+    2008ish) — 'YYYY-MM (MonthName)', e.g. '2001-02 (Feb)' — costing 3,229
+    otherwise-recoverable rows (46% of what looked "unfixable" before this
+    fix). Matching now accepts any 'YYYY-MM' PREFIX of the next component
+    (the month digits immediately following 'YYYY-', with whatever comes
+    after them — a space, '(', end-of-string — not itself a digit, so a
+    genuinely different 3+ digit suffix like 'YYYY-023' doesn't false-match
+    as month '02')."""
     for i in range(len(parts) - 1):
         p = parts[i]
         nxt = parts[i + 1]
@@ -204,10 +220,12 @@ def find_year_month_in_parts(parts: tuple[str, ...] | list[str]) -> tuple[int, i
             year = int(p)
             if not (1990 <= year <= 2030):
                 continue
-            if "-" in nxt:
-                a, _, b = nxt.partition("-")
-                if a == p and b.isdigit() and len(b) == 2 and 1 <= int(b) <= 12:
-                    return year, int(b)
+            if nxt.startswith(p + "-"):
+                rest = nxt[len(p) + 1:]
+                if len(rest) >= 2 and rest[:2].isdigit() and (len(rest) == 2 or not rest[2].isdigit()):
+                    month = int(rest[:2])
+                    if 1 <= month <= 12:
+                        return year, month
             elif nxt.isdigit() and 1 <= len(nxt) <= 2 and 1 <= int(nxt) <= 12:
                 return year, int(nxt)
     return None

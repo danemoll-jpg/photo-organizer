@@ -75,6 +75,15 @@ def test_find_year_month_in_parts() -> None:
     print("test_find_year_month_in_parts...")
     assert find_year_month_in_parts(Path(r"E:\Pics\2012\12\Portrait Studio\10C.jpg").parts) == (2012, 12)
     assert find_year_month_in_parts(Path(r"E:\Pics\2012\2012-12\10C.jpg").parts) == (2012, 12)
+    # Real early-library convention found by cross-referencing the user's
+    # pre-Phase-1 backup drive this session: "YYYY-MM (MonthName)" --
+    # 3,229 real rows used exactly this pattern and were wrongly bucketed
+    # as "no recoverable signal" before this was added.
+    assert find_year_month_in_parts(Path(r"E:\Pics\2001\2001-02 (Feb)\Second Ukraine Trip 001.jpg").parts) == (2001, 2)
+    assert find_year_month_in_parts(Path(r"J:\2006\2006-07 (Jul)\photo.jpg").parts) == (2006, 7)
+    # A 3+ digit suffix right after the month digits must NOT false-match
+    # (e.g. a hypothetical "2001-023" folder that isn't really month "02").
+    assert find_year_month_in_parts(Path(r"E:\Pics\2001\2001-023\photo.jpg").parts) is None
     # "katya 2024" is a folder NAME, not a YYYY component on its own (it's
     # one path segment, "katya 2024", not "2024") -- must not false-match.
     assert find_year_month_in_parts(Path(r"E:\katya 2024\IMG_8418.JPG").parts) is None
