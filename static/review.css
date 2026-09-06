@@ -139,6 +139,46 @@ body {
 .filters-hint { color: var(--muted); font-size: 12px; margin-left: auto; }
 .filters-hint code { background: var(--badge-bg); padding: 1px 4px; border-radius: 3px; }
 
+/* Grid filter improvements batch: result count, shown only while a filter
+   is active (see review.js's refreshStats/hasActiveFilters). Sits between
+   the Apply/Reset buttons and the path hint, at the same baseline. */
+.match-count { color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap; }
+
+/* Grid filter improvements batch: the Tag filter's custom suggestion
+   dropdown, replacing <datalist> (which never renders its popup on
+   WebKit/iOS -- see review_tool.py's module docstring). Positioned
+   relative to the input itself (not the whole label) so it doesn't shove
+   the "Tag" label text or neighboring filters around when open. */
+.tag-input-wrap { position: relative; display: inline-block; }
+.tag-suggestions {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 100%;
+  z-index: 30;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+}
+.tag-suggestions li {
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tag-suggestions li:hover,
+.tag-suggestions li:active {
+  background: var(--badge-bg);
+}
+
 .grid-toolbar {
   display: flex;
   justify-content: space-between;

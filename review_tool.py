@@ -65,6 +65,19 @@ date-range pickers given the YYYY/YYYY-MM layout) — the `folder` query
 param itself stays supported server-side (harmless, still covered by
 existing tests) even though nothing in the UI sends it anymore.
 
+Grid filter improvements batch (this follow-up session): (1) the Tag
+filter's suggestion UI moved from a `<datalist>` to a hand-built dropdown
+in static/review.js (`<datalist>` never renders its suggestion popup on
+WebKit/iOS at all -- a longstanding platform limitation, not a bug here;
+the underlying exact-match filtering was always fine there, only the
+suggestions were invisible) -- purely a templates/review.html + static/
+review.js/review.css change, nothing here. (2) A visible match-count
+("N item(s) match your filters") when a filter is active, in
+static/review.js -- reuses /api/stats' existing filtered `total_photos`
+count (already correct, already tested since Phase 2b's regression fix),
+no new backend logic. (3) A `media_type` filter (All/Photos only/Videos
+only) -- see _build_filters above.
+
 Phase 2d added remote/shared access: real session-based login (see
 src/auth.py — a small local username+password list in config.yaml's
 review_users, rate-limited, NOT HTTP Basic Auth), meant to be reached
@@ -209,6 +222,15 @@ def _build_filters(args) -> tuple[str, list]:
     there's no spelling/formatting to fuzzy-match against anymore. `folder`
     stays substring/LIKE -- it has no dropdown, and no source of truth for
     "every folder" to pick from the way tags/locations do.
+
+    `media_type` (Grid filter improvements batch: All/Photos only/Videos
+    only) belongs here rather than in _build_extra_predicate, same
+    reasoning as `location` -- it's derived purely from a plain DB column
+    (`filename`'s extension against the module-global `_video_exts`, the
+    exact same check `_row_to_dict`'s `is_video` field already uses), no
+    live-cache lookup needed, so it stays on the cheap indexed/LIKE SQL
+    path rather than forcing every query through the batched-scan path
+    tag/caption-keyword filtering needs.
     """
     clauses = ["1=1"]
     params: list = []
@@ -217,6 +239,7 @@ def _build_filters(args) -> tuple[str, list]:
     folder = (args.get("folder") or "").strip()
     location = (args.get("location") or "").strip()
     has_location = (args.get("has_location") or "").strip().lower()
+    media_type = (args.get("media_type") or "").strip().lower()
     if date_from:
         clauses.append("date_taken >= ?")
         params.append(date_from)
@@ -242,6 +265,18 @@ def _build_filters(args) -> tuple[str, list]:
         # always records no coordinates, so they correctly show "no
         # location" through this same path, not a special case.
         clauses.append("location_name IS NULL")
+    if media_type in ("photo", "video"):
+        if _video_exts:
+            video_clause = "(" + " OR ".join(["filename LIKE ?"] * len(_video_exts)) + ")"
+            like_params = [f"%{ext}" for ext in sorted(_video_exts)]
+        else:
+            # No video extensions configured at all -- nothing can be a
+            # video, so "video only" correctly matches zero rows and
+            # "photo only" correctly imposes no restriction.
+            video_clause = "0"
+            like_params = []
+        clauses.append(video_clause if media_type == "video" else f"NOT {video_clause}")
+        params.extend(like_params)
     sql = " AND ".join(clauses)
     return sql, params
 

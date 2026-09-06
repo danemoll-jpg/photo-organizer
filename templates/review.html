@@ -24,8 +24,21 @@
 <section class="filters" id="filters">
   <label>From <input type="date" id="f-date-from"></label>
   <label>To <input type="date" id="f-date-to"></label>
-  <label>Tag <input type="text" id="f-tag" list="f-tag-list" placeholder="Start typing an existing tag…" autocomplete="off"></label>
-  <datalist id="f-tag-list"></datalist>
+  <label>Tag
+    <!-- Grid filter improvements batch: a hand-built suggestion dropdown
+         (populated from /api/facets, filtered client-side as you type)
+         replaces the previous <input list="..."> + <datalist> pairing --
+         <datalist>'s suggestion popup never renders at all on WebKit/iOS
+         (a real platform limitation, not a bug — the exact-match filtering
+         itself always worked fine there), so this custom dropdown is used
+         on every platform instead of relying on native rendering anywhere.
+         Still free-text underneath: suggestions are a convenience, not a
+         locked list — see static/review.js. -->
+    <span class="tag-input-wrap">
+      <input type="text" id="f-tag" placeholder="Start typing an existing tag…" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <ul id="f-tag-suggestions" class="tag-suggestions" hidden></ul>
+    </span>
+  </label>
   <label>Caption contains <input type="text" id="f-caption-kw" placeholder="e.g. birthday cake"></label>
   <label>Location
     <!-- Grid/Viewer nav cleanup: dropdown of real, already-existing
@@ -38,6 +51,16 @@
       <option value="__no_location__">No location</option>
     </select>
   </label>
+  <label>Media type
+    <!-- Grid filter improvements batch: same closed-<select> pattern as
+         Location above, filtering on the is_video field every row already
+         carries (see review_tool.py::_build_filters' media_type clause). -->
+    <select id="f-media-type">
+      <option value="">All</option>
+      <option value="photo">Photos only</option>
+      <option value="video">Videos only</option>
+    </select>
+  </label>
   <label>People/Faces
     <select id="f-people" disabled title="Face detection isn't built yet (Phase 3) — this filter will work once it is.">
       <option>Not available yet</option>
@@ -45,6 +68,10 @@
   </label>
   <button id="f-apply">Apply</button>
   <button id="f-reset" class="secondary">Reset</button>
+  <!-- Grid filter improvements batch: visible only while a filter is
+       active — see refreshStats() in static/review.js, which reuses
+       /api/stats' existing filtered count (already correct/tested). -->
+  <span id="filter-match-count" class="match-count" hidden></span>
   <span class="filters-hint">Path is relative to <code>{{ dest_root }}</code></span>
 </section>
 

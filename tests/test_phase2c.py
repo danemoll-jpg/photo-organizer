@@ -201,6 +201,43 @@ def test_facets_endpoint(tmp: Path) -> None:
     print("  a facet-supplied location value round-trips through /api/photos correctly  OK")
 
 
+def test_media_type_filter(tmp: Path) -> None:
+    print("\n=== Grid filter improvements batch: media_type filter (All/Photos only/Videos only) ===")
+    _rt, client = _setup(tmp)
+
+    resp = client.get("/api/photos?media_type=video&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h6_video"}, hashes
+    print("  media_type=video -> exactly the one video row  OK")
+
+    resp = client.get("/api/photos?media_type=photo&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h1", "h2", "h3", "h4", "h5"}, hashes
+    print("  media_type=photo -> all 5 photos, video excluded  OK")
+
+    # Unset/empty (the "All" option) must be a no-op, same as before this
+    # filter existed.
+    resp = client.get("/api/photos?limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h1", "h2", "h3", "h4", "h5", "h6_video"}, hashes
+    print("  media_type unset ('All') -> no restriction, all 6 rows  OK")
+
+    # Combines correctly with an existing filter -- the video row has no
+    # tags at all (never captioned), so tag=beach + media_type=video must
+    # be empty, not silently ignore one of the two filters.
+    resp = client.get("/api/photos?tag=beach&media_type=video&limit=50")
+    assert resp.get_json()["items"] == []
+    print("  media_type combines correctly with an existing filter (tag=beach + media_type=video -> empty)  OK")
+
+    # /api/stats must honor it too -- same regression class as every other
+    # filter's own stats check above.
+    resp = client.get("/api/stats?media_type=video")
+    assert resp.get_json()["total_photos"] == 1
+    resp = client.get("/api/stats?media_type=photo")
+    assert resp.get_json()["total_photos"] == 5
+    print("  /api/stats honors media_type too  OK")
+
+
 def test_people_filter_is_inert(tmp: Path) -> None:
     print("\n=== Phase 2c: people/faces filter is visible-but-inert ===")
     _rt, client = _setup(tmp)
@@ -344,6 +381,7 @@ def main() -> None:
     try:
         test_new_filters_alone(tmp)
         test_facets_endpoint(tmp)
+        test_media_type_filter(tmp)
         test_people_filter_is_inert(tmp)
         test_nav_respects_new_filters(tmp)
         test_random_button_respects_filters(tmp)

@@ -44,8 +44,25 @@
  *     suggestions (196 distinct tags at last count — too many for a
  *     comfortable plain <select>, but exact-match filtering still works
  *     for any value typed, listed or not — see _build_extra_predicate).
+ *     (Superseded below — the <datalist> was replaced with a custom
+ *     dropdown once it turned out never to render on WebKit/iOS at all.)
  *   - The old free-text "Folder contains" filter is removed (redundant
  *     with the date-range pickers given the YYYY/YYYY-MM layout).
+ *
+ * Grid filter improvements batch (this follow-up session):
+ *   - Tag suggestions moved from a native <datalist> to a hand-built
+ *     dropdown (see renderTagSuggestions/hideTagSuggestions below) --
+ *     <datalist>'s suggestion popup never renders at all on WebKit/iOS (a
+ *     real platform limitation: the exact-match filtering itself always
+ *     worked fine there, only the suggestion UI was invisible). Built from
+ *     plain DOM elements + our own JS filtering, so it works identically
+ *     on every browser/platform rather than depending on any browser's
+ *     native rendering of anything.
+ *   - A visible match-count ("N item(s) match your filters"), shown only
+ *     while a filter is active -- reuses the /api/stats call refreshStats()
+ *     already makes (no new network request).
+ *   - A media_type filter (All/Photos only/Videos only), same closed-
+ *     <select> pattern as Location.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -56,7 +73,7 @@
   const NO_LOCATION_VALUE = "__no_location__";
 
   const state = {
-    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "" },
+    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "" },
     pageSize: cfg.pageSize,
     grid: { items: [], firstCursor: null, lastCursor: null, hasNext: false, hasPrev: false, pageNum: 1 },
     viewer: {
@@ -74,6 +91,7 @@
   // ---- DOM refs ----
   const el = (id) => document.getElementById(id);
   const statsEl = el("stats");
+  const matchCountEl = el("filter-match-count");
   const gridEl = el("grid");
   const gridEmptyEl = el("grid-empty");
 
@@ -132,7 +150,13 @@
       caption_kw: state.filters.caption_kw,
       location: state.filters.location,
       has_location: state.filters.has_location,
+      media_type: state.filters.media_type,
     };
+  }
+
+  function hasActiveFilters() {
+    const f = state.filters;
+    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type);
   }
 
   // Random 31-bit int as a string — used to seed a fresh random-order
@@ -178,8 +202,10 @@
   }
 
   // ---------------------------------------------------------------------
-  // Facets (Location/Tag dropdown+autocomplete data)
+  // Facets (Location dropdown + Tag suggestion data)
   // ---------------------------------------------------------------------
+  let allTags = []; // populated below, filtered client-side by the Tag suggestion dropdown
+
   async function loadFacets() {
     try {
       const data = await fetchJSON("/api/facets");
@@ -190,24 +216,87 @@
         opt.textContent = name;
         locSel.appendChild(opt);
       }
-      const tagList = el("f-tag-list");
-      for (const name of data.tags || []) {
-        const opt = document.createElement("option");
-        opt.value = name;
-        tagList.appendChild(opt);
-      }
+      allTags = data.tags || [];
     } catch (e) {
       // Non-fatal: filters just show "Any"/no suggestions until reloaded.
     }
   }
 
   // ---------------------------------------------------------------------
+  // Tag filter suggestions (custom dropdown -- see module docstring for
+  // why this replaced <datalist>)
+  // ---------------------------------------------------------------------
+  const MAX_TAG_SUGGESTIONS = 50; // plenty for a "did you mean" list; keeps a huge tag table cheap to render
+  const tagInput = el("f-tag");
+  const tagSuggestionsEl = el("f-tag-suggestions");
+
+  function renderTagSuggestions() {
+    const q = tagInput.value.trim().toLowerCase();
+    const matches = (q ? allTags.filter((t) => t.toLowerCase().includes(q)) : allTags).slice(0, MAX_TAG_SUGGESTIONS);
+    if (!matches.length) {
+      hideTagSuggestions();
+      return;
+    }
+    tagSuggestionsEl.innerHTML = matches.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+    tagSuggestionsEl.hidden = false;
+  }
+
+  function hideTagSuggestions() {
+    tagSuggestionsEl.hidden = true;
+    tagSuggestionsEl.innerHTML = "";
+  }
+
+  tagInput.addEventListener("input", renderTagSuggestions);
+  tagInput.addEventListener("focus", renderTagSuggestions);
+  tagInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideTagSuggestions();
+  });
+  // mousedown (not click) so this fires BEFORE the input's blur handler
+  // below would otherwise hide the list first -- selecting a suggestion
+  // must land its value in the field, still free-text/editable afterward
+  // (same as picking a <datalist> option used to), not lock it in.
+  tagSuggestionsEl.addEventListener("mousedown", (e) => {
+    const li = e.target.closest("li");
+    if (!li) return;
+    e.preventDefault(); // don't let the input lose focus over this
+    tagInput.value = li.textContent;
+    hideTagSuggestions();
+  });
+  tagInput.addEventListener("blur", () => {
+    // Short delay so the mousedown handler above still gets to run first
+    // -- blur fires the instant focus leaves the input, which a mousedown
+    // on the suggestion list technically does before its own handler runs.
+    setTimeout(hideTagSuggestions, 150);
+  });
+  // Clicking anywhere else on the page should close an open dropdown too
+  // (e.g. clicking straight into another filter field without going
+  // through blur-then-something-else first).
+  document.addEventListener("click", (e) => {
+    if (e.target !== tagInput && !tagSuggestionsEl.contains(e.target)) hideTagSuggestions();
+  });
+
+  // ---------------------------------------------------------------------
   // Stats
   // ---------------------------------------------------------------------
   async function refreshStats() {
     try {
+      // total_photos already reflects every active filter, media_type
+      // included (see review_tool.py's _build_filters/_count_matches) --
+      // one call serves both the always-on topbar line and the
+      // Grid-filter-improvements-batch match-count below, no extra request.
       const data = await fetchJSON(`/api/stats?${qs(currentFilterParams())}`);
-      statsEl.textContent = `${data.captioned_so_far.toLocaleString()} captioned so far (library-wide) — ${data.total_photos.toLocaleString()} photo(s) match current filters`;
+      statsEl.textContent = `${data.captioned_so_far.toLocaleString()} captioned so far (library-wide) — ${data.total_photos.toLocaleString()} item(s) match current filters`;
+      if (hasActiveFilters()) {
+        const noun = state.filters.media_type === "photo" ? "photo"
+          : state.filters.media_type === "video" ? "video"
+          : "item";
+        const plural = noun + (data.total_photos === 1 ? "" : "s");
+        matchCountEl.textContent = `🔎 ${data.total_photos.toLocaleString()} ${plural} match your filters`;
+        matchCountEl.hidden = false;
+      } else {
+        matchCountEl.hidden = true;
+        matchCountEl.textContent = "";
+      }
     } catch (e) {
       statsEl.textContent = "Stats unavailable";
     }
@@ -295,6 +384,8 @@
       state.filters.location = locValue;
       state.filters.has_location = "";
     }
+    state.filters.media_type = el("f-media-type").value;
+    hideTagSuggestions();
     loadGridPage({ resetPageNum: true });
     refreshStats();
     // The filtered set just changed size/membership -- any in-progress
@@ -314,6 +405,7 @@
     el("f-tag").value = "";
     el("f-caption-kw").value = "";
     el("f-location").value = "";
+    el("f-media-type").value = "";
     applyFilters();
   });
 

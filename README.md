@@ -270,12 +270,17 @@ tailed for reading. Nothing here edits captions/tags, and it never runs
 organize/caption/extract-gps itself.
 
 - **Grid/browse view**: paginated (cursor-based, not `OFFSET` — stays fast
-  no matter how deep you page into 100k+ rows), with date-range, folder,
-  tag, caption-keyword, and GPS/location filters (place-name substring, or
-  a has/no-location toggle). Every filter applies to the viewer/slideshow
-  below too, not just the grid — a tag-filtered slideshow only shows
-  matching photos. A photo not yet captioned shows clearly as "Not yet
-  captioned", never as an error.
+  no matter how deep you page into 100k+ rows), with date-range, tag,
+  caption-keyword, GPS/location, and media-type (All/Photos only/Videos
+  only) filters. Every filter applies to the viewer/slideshow below too,
+  not just the grid — a tag-filtered slideshow only shows matching photos.
+  A photo not yet captioned shows clearly as "Not yet captioned", never as
+  an error. The Tag field suggests existing tags as you type via a custom
+  dropdown (not a native `<datalist>`, which never renders its suggestion
+  popup on WebKit/iOS at all — still free-text underneath, so an exact tag
+  not yet suggested is still filterable). A result count ("N item(s) match
+  your filters") appears whenever a filter is active, reusing the same
+  count `/api/stats` already computes.
 - **Viewer/slideshow mode**: click any photo to open it full-size with its
   path, date, caption, tags, and location alongside. Forward/Back step one
   at a time; Play starts an auto-advance slideshow at a fully configurable
