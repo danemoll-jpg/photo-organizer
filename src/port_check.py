@@ -19,10 +19,25 @@ review_tool_port is for all practical purposes review_tool.py, and
 `netstat`'s own PID column is enough to answer "how many, and which PIDs"
 without pulling in a new dependency (no psutil in requirements.txt) just
 for this.
+
+Also holds `restart_review_tool()` (CLAUDE.md rule 11 / TODO.md's
+"One-click restart" item) — the one kill-stale-processes-then-relaunch
+mechanism shared by "Restart Review Tool.bat" (via `main.py
+restart-review-tool`) and the dashboard's Remote Access panel's "Force
+Restart" button, so that logic exists in exactly one place (rule 7) rather
+than being reimplemented by each of those two consumers.
 """
 from __future__ import annotations
 
 import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.config import Config
 
 
 def listening_pids(port: int) -> list[int]:
@@ -77,3 +92,140 @@ def listening_pids(port: int) -> list[int]:
         except ValueError:
             continue
     return sorted(pids)
+
+
+def kill_pids(pids: list[int], timeout: float = 5.0) -> None:
+    """Force-kills every PID in `pids` via Windows' `taskkill /F /PID` —
+    the same action this project's own incident write-ups have always
+    pointed the user at doing manually (Task Manager, or PowerShell's
+    `Stop-Process -Id <pid> -Force`). Deliberately kills ALL given PIDs,
+    not just the first — the real incident this module exists for found
+    FOUR stale review_tool.py processes stacked on one port at once.
+
+    Best-effort per PID: a PID that's already gone (e.g. it exited on its
+    own between the caller's `listening_pids()` call and this one) or a
+    `taskkill` failure for any other reason is swallowed here rather than
+    raised — `wait_for_port_free()` below is what actually confirms
+    whether the kill(s) worked, not this function's return value.
+    """
+    for pid in pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                capture_output=True,
+                timeout=timeout,
+                # Same reasoning as listening_pids() above -- avoid a
+                # flashing console window if this ever runs under
+                # pythonw.exe (it does: the dashboard's Force Restart
+                # button calls this on a background thread).
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def wait_for_port_free(port: int, timeout: float = 10.0, poll_interval: float = 0.25) -> bool:
+    """Polls `listening_pids(port)` until it comes back empty or `timeout`
+    seconds have elapsed. Returns whether the port was actually free by
+    the time this returned.
+
+    This exists instead of a fixed `time.sleep()` because a fixed sleep is
+    exactly the kind of race this restart mechanism needs to avoid: launch
+    the new review_tool.py before Windows has actually released the old
+    one's socket, and the new process fails to bind instead of cleanly
+    taking over — silently, since the new process's own stdout/stderr are
+    redirected away (see restart_review_tool() below). Polling for the
+    real condition (nothing listening) is the only way to know for sure.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if not listening_pids(port):
+            return True
+        if time.monotonic() >= deadline:
+            return not listening_pids(port)  # one last check right at the deadline
+        time.sleep(poll_interval)
+
+
+@dataclass
+class RestartResult:
+    """What actually happened during one restart_review_tool() call —
+    both consumers (the .bat's CLI command and the dashboard's Force
+    Restart button) report this back to the user rather than assuming
+    success."""
+    killed_pids: list[int]      # PIDs that were found bound to the port and killed (possibly empty)
+    port_freed: bool            # did the port actually become free before we tried to relaunch?
+    launched: bool              # did we actually spawn a fresh review_tool.py?
+    new_pid: int | None         # its PID, if launched
+
+
+def restart_review_tool(
+    cfg: "Config",
+    *,
+    open_browser: bool = True,
+    kill_timeout: float = 10.0,
+    python_exe: Path | None = None,
+    script_path: Path | None = None,
+) -> RestartResult:
+    """Kills every process bound to `cfg.review_tool_port`, waits for the
+    port to actually free, then launches a fresh review_tool.py — the one
+    mechanism CLAUDE.md rule 11 depends on. Reads the port from config,
+    never hardcodes 5151.
+
+    `python_exe`/`script_path` default to this repo's own venv interpreter
+    and review_tool.py, but are overridable so tests can point this at a
+    harmless stand-in process instead of spinning up the real Flask app —
+    same "substitute a stand-in for the real subprocess" testing
+    convention dashboard.py's cloudflared Start/Stop already uses (see
+    tests/test_port_check.py).
+
+    If something was listening and the port never actually frees up
+    within `kill_timeout`, this deliberately does NOT launch a new
+    instance anyway — doing so would just spawn a second process doomed
+    to fail its own bind (silently, since its stdout/stderr are
+    redirected away below) rather than surfacing a clear "didn't work"
+    result the caller can show the user.
+    """
+    port = cfg.review_tool_port
+    killed = listening_pids(port)
+    if killed:
+        kill_pids(killed, timeout=kill_timeout)
+        port_freed = wait_for_port_free(port, timeout=kill_timeout)
+    else:
+        port_freed = True
+
+    if not port_freed:
+        return RestartResult(killed_pids=killed, port_freed=False, launched=False, new_pid=None)
+
+    from src.config import REPO_ROOT  # local import: keep listening_pids() usable with zero src.config dependency
+
+    if python_exe is None:
+        python_exe = REPO_ROOT / "venv" / "Scripts" / "python.exe"
+        if not python_exe.exists():
+            python_exe = Path(sys.executable)  # fallback, e.g. a differently-named/located venv
+    if script_path is None:
+        script_path = REPO_ROOT / "review_tool.py"
+
+    # --port is passed explicitly (even though a freshly-launched
+    # review_tool.py would read the same value from config.yaml on its
+    # own) so there's no ambiguity between "the port this caller checked"
+    # and "whatever the new process happens to load" -- they're
+    # guaranteed to be the same value.
+    args = [str(python_exe), str(script_path), "--port", str(port)]
+    if not open_browser:
+        args.append("--no-browser")
+
+    proc = subprocess.Popen(
+        args,
+        cwd=str(REPO_ROOT),
+        # Redirected (not inherited) so this works identically whether the
+        # caller is main.py (a console python.exe) or dashboard.py (a
+        # console-less pythonw.exe) -- see CLAUDE.md's recurring
+        # "something doing its own console I/O misbehaves under
+        # pythonw.exe" pattern. With these redirected, review_tool.py's
+        # sys.stdout/sys.stderr are real (if discarded) file objects in
+        # either case, never None.
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return RestartResult(killed_pids=killed, port_freed=True, launched=True, new_pid=proc.pid)

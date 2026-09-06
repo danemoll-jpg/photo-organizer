@@ -100,9 +100,17 @@ Panels:
        way to tell "the tunnel is fine, the local app just isn't running"),
        and Warning: multiple instances (more than 1 PID, "Warn.TLabel",
        red — the original incident). Refreshes on a background timer plus
-       a manual "Refresh" button; dashboard.py has no code path that
-       launches review_tool.py itself, so this is detection/warning only,
-       not prevention (see TODO.md's follow-up note on why).
+       a manual "Refresh" button. A "Force Restart" button sits right next
+       to Refresh (CLAUDE.md rule 11 / TODO.md's "One-click restart"
+       item): calls src.port_check.restart_review_tool() on a background
+       thread — the exact same function "Restart Review Tool.bat" shells
+       out to via `main.py restart-review-tool` (rule 7: one mechanism,
+       two front ends) — which kills every process currently bound to the
+       configured port (not just the first; the original incident found
+       four at once), waits for the port to actually free, then launches
+       a fresh review_tool.py. The status label above is refreshed
+       immediately once the restart worker reports back, rather than
+       waiting for the next 5s tick.
     2. Cloudflare Tunnel Start/Stop — spawns/terminates
        `cloudflared tunnel run <cfg.cloudflare_tunnel_name>` as a
        subprocess (same "background worker, only touch Tk widgets from the
@@ -166,7 +174,7 @@ from src.gps_backfill import GpsStats, run_gps_extraction
 from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
 from src.pick_sources import merge_and_save, pick_sources_interactive
-from src.port_check import listening_pids
+from src.port_check import RestartResult, listening_pids, restart_review_tool
 
 
 class DashboardApp:
@@ -431,6 +439,8 @@ class DashboardApp:
             wraplength=740, justify="left",
         )
         self.review_tool_status_label.pack(side="left", fill="x", expand=True)
+        self.force_restart_btn = ttk.Button(ra_status_row, text="Force Restart", command=self._on_force_restart)
+        self.force_restart_btn.pack(side="right", anchor="n", padx=(0, 6))
         ttk.Button(ra_status_row, text="Refresh", command=self._refresh_port_status).pack(side="right", anchor="n")
 
         ttk.Separator(ra_frame, orient="horizontal").pack(fill="x", padx=6, pady=6)
@@ -701,6 +711,9 @@ class DashboardApp:
                     elif kind == "tunnel_exited":
                         _, proc, returncode = msg
                         self._on_tunnel_exited(proc, returncode)
+                    elif kind == "force_restart_done":
+                        _, result, err = msg
+                        self._on_force_restart_done(result, err)
                 except Exception:
                     pass  # see docstring above -- never let one bad message stop future polling
         except queue.Empty:
@@ -1082,6 +1095,66 @@ class DashboardApp:
         except Exception:
             pass
         self.root.after(5000, self._port_status_tick)
+
+    def _on_force_restart(self) -> None:
+        """CLAUDE.md rule 11 / TODO.md's "One-click restart" item. Confirms
+        first (this kills OS processes, even if it never touches any
+        project data — review_tool.py is read-only), then runs the actual
+        kill-wait-relaunch on a background thread via the shared
+        src.port_check.restart_review_tool() (same function "Restart
+        Review Tool.bat" calls, per rule 7) so a slow port-free wait can't
+        freeze the dashboard UI."""
+        if self.cfg is None:
+            return
+        port = self.cfg.review_tool_port
+        try:
+            pids = listening_pids(port)
+        except Exception:
+            pids = []
+        if pids:
+            prompt = (
+                f"This will force-kill {len(pids)} process(es) currently bound to port {port} "
+                f"(PID(s): {', '.join(str(p) for p in pids)}) and launch a fresh review_tool.py.\n\n"
+                "Continue?"
+            )
+        else:
+            prompt = (
+                f"Nothing is currently bound to port {port} — this will just launch a fresh "
+                "review_tool.py.\n\nContinue?"
+            )
+        if not messagebox.askyesno("Photo Organizer", prompt):
+            return
+
+        self.force_restart_btn.configure(state="disabled")
+        self.review_tool_status_label.configure(text="review_tool.py: restarting...", style="TLabel")
+        threading.Thread(target=self._force_restart_worker, args=(self.cfg,), daemon=True).start()
+
+    def _force_restart_worker(self, cfg: Config) -> None:
+        # Runs on a background thread -- never touch Tk widgets here, only
+        # push through self.msg_queue (same convention as every other
+        # worker in this file).
+        try:
+            result = restart_review_tool(cfg, open_browser=False)
+            self.msg_queue.put(("force_restart_done", result, None))
+        except Exception as e:
+            self.msg_queue.put(("force_restart_done", None, str(e)))
+
+    def _on_force_restart_done(self, result: RestartResult | None, err: str | None) -> None:
+        self.force_restart_btn.configure(state="normal")
+        if err is not None:
+            messagebox.showerror("Photo Organizer", f"Restart failed: {err}")
+        elif not result.port_freed:
+            port = self.cfg.review_tool_port if self.cfg else "?"
+            messagebox.showerror(
+                "Photo Organizer",
+                f"Killed {len(result.killed_pids)} process(es), but port {port} did not free up "
+                "in time — a new instance was NOT launched (launching anyway would just fail its "
+                "own bind silently). Try again in a moment, or check what's still holding the "
+                "port (Task Manager, or PowerShell's Stop-Process).",
+            )
+        # Refresh immediately rather than waiting for the next 5s tick — the whole point of this button.
+        # (No separate success dialog needed — the refreshed status label says it all.)
+        self._refresh_port_status()
 
     def _tunnel_running(self) -> bool:
         return self.tunnel_proc is not None and self.tunnel_proc.poll() is None

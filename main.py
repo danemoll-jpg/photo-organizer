@@ -14,6 +14,7 @@
     venv\\Scripts\\python main.py review-user add <username>    # Phase 2d: add/update a review_tool.py login
     venv\\Scripts\\python main.py review-user list              # list configured usernames
     venv\\Scripts\\python main.py review-user remove <username> # revoke a login
+    venv\\Scripts\\python main.py restart-review-tool           # kill stale review_tool.py process(es), relaunch fresh
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from src.gps_backfill import run_gps_extraction
 from src.load_captions import load_captions
 from src.logging_setup import setup_logging
 from src.organize import run_phase1
+from src.port_check import restart_review_tool
 
 
 def cmd_init_db(args) -> None:
@@ -229,6 +231,31 @@ def cmd_review_user_remove(args) -> None:
         print(f"No user named '{username}' found. Nothing changed.")
 
 
+def cmd_restart_review_tool(args) -> None:
+    """CLAUDE.md rule 11 / TODO.md's "One-click restart" item: the CLI
+    consumer of src.port_check.restart_review_tool() that "Restart Review
+    Tool.bat" shells out to, so the .bat and the dashboard's Force Restart
+    button both call the exact same underlying mechanism (rule 7) rather
+    than each reimplementing kill-wait-relaunch."""
+    cfg = load_config()
+    port = cfg.review_tool_port
+    result = restart_review_tool(cfg, open_browser=not args.no_browser)
+
+    if result.killed_pids:
+        print(f"Killed {len(result.killed_pids)} process(es) previously bound to port {port}: "
+              f"{', '.join(str(p) for p in result.killed_pids)}")
+    else:
+        print(f"Nothing was bound to port {port} — nothing to kill.")
+
+    if not result.port_freed:
+        print(f"ERROR: port {port} did not free up in time — a new instance was NOT launched. "
+              f"Check what's still holding it (Task Manager, or `netstat -ano | findstr :{port}`) "
+              "and try again.")
+        raise SystemExit(1)
+
+    print(f"Launched a fresh review_tool.py (PID {result.new_pid}) on port {port}.")
+
+
 def cmd_load_captions(args) -> None:
     cfg = load_config()
     logger, _log_path = setup_logging(cfg.log_dir_abs)
@@ -277,6 +304,13 @@ def main() -> None:
     ru_remove = ru_sub.add_parser("remove", help="Remove a user's credential")
     ru_remove.add_argument("username")
     ru_remove.set_defaults(func=cmd_review_user_remove)
+
+    restart_parser = sub.add_parser(
+        "restart-review-tool",
+        help="Kill any stale review_tool.py process(es) bound to review_tool_port and relaunch fresh",
+    )
+    restart_parser.add_argument("--no-browser", action="store_true", help="Don't auto-open a browser tab after relaunching")
+    restart_parser.set_defaults(func=cmd_restart_review_tool)
 
     args = parser.parse_args()
     args.func(args)

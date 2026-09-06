@@ -73,7 +73,14 @@ duplicate any scan/date-resolve/copy-verify-delete logic, it just calls into
   at-a-glance signal that a remote 502 means "the tunnel's fine, the local
   app just isn't running"), or red **Warning: multiple instances** (more
   than one process — see this panel's docstring in `dashboard.py` for the
-  real incident that motivated that check).
+  real incident that motivated that check). A **Force Restart** button
+  next to the status line kills every process bound to that port (all of
+  them, not just one), waits for the port to actually free, then launches
+  a fresh `review_tool.py` — the same mechanism (`src/port_check.py::
+  restart_review_tool()`) `Restart Review Tool.bat` uses for the same
+  purpose from outside the dashboard (or `main.py restart-review-tool`
+  directly). Use whichever's convenient any time a stale process might be
+  serving old code.
 
 `main.py`'s CLI commands keep working exactly as before; the dashboard is an
 additional front end, not a replacement.
