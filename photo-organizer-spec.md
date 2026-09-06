@@ -199,3 +199,21 @@
 **Explicitly out of scope for this phase:**
 - Any actual Phase 3 people/faces editing UI — Phase 3 doesn't exist yet, this only needs to not block it later.
 - Per-user edit permissions/roles — every authenticated user can edit everything, no distinction between the owner and invited guests for this pass.
+
+## Phase 2g — Real video thumbnails in the grid (deferred nice-to-have, now requested)
+
+**Context:** Phase 2e's video-in-grid work used a generic play-icon placeholder for video thumbnails, explicitly deferring real frame extraction as a nice-to-have. The user has now requested the real thing — a first-frame preview, matching what the viewer already shows "for free" via the native `<video>` element.
+
+**Goal:** Extract and cache a real thumbnail image (first frame, or an early keyframe) for each video, served in the grid instead of the placeholder icon.
+
+**Requirements:**
+- **New dependency needed for actual frame decoding** — `hachoir` (already used for video date-metadata) does not decode frames, only metadata. Investigate `opencv-python` or `imageio`+`imageio-ffmpeg` as candidates — prefer whichever installs cleanly with bundled codec support and doesn't require a separately-installed system ffmpeg binary, consistent with this project's existing preference for self-contained Python dependencies. Verify Python 3.14 wheel availability before committing to one, same caution already applied to every other dependency in this project.
+- **Follow the established backfill pattern** (same shape as GPS extraction and captioning): a batch operation that processes videos once, extracts a thumbnail, and caches it to disk (e.g. a `thumbnails/` directory, filename keyed by `file_hash`) — NOT a live per-request extraction on every grid page load. Real throughput should be benchmarked before running against the full library, same as Phase 2's captioning threughput was measured before committing to a full run — video frame decoding is likely slower than GPS's EXIF-read throughput, don't assume it'll be similarly fast.
+- **CLI command + dashboard panel**, per rule 10 — same posture as the GPS Extraction panel (progress bar, results summary, log tail, resumable/safe to cancel).
+- **Graceful fallback**: the grid must continue showing the existing play-icon placeholder for any video whose thumbnail hasn't been generated yet — same "handle partial completion gracefully" principle already applied to captions and GPS data. Never error or show a broken image for an unprocessed video.
+- **A route (or extension of an existing one) in `review_tool.py`** to serve the cached thumbnail file for a given video's `file_hash`, falling back to the placeholder response if no cached thumbnail exists yet.
+- Per rule 11: any session touching `review_tool.py` for this must restart it itself before ending.
+
+**Explicitly out of scope:**
+- Any thumbnail regeneration/re-extraction logic beyond a first pass (e.g. re-extracting if a video file changes) — not requested, don't build it.
+- Extracting anything beyond a single representative frame (e.g. no animated/multi-frame preview) — a static first-frame image only.

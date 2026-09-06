@@ -270,6 +270,17 @@ Three related additions to the grid page's filter area, batched into one session
 
 **Not done this session (flagged, not blocking, per the WebKit caveat above):** a real iOS/Safari device check — recommended as the user's own quick follow-up, same posture as other "code complete, real-world confirmation still pending" checkpoints elsewhere in this file.
 
+## ACTIVE: Phase 2g — Real video thumbnails in the grid
+User asked why the grid shows a generic placeholder for video instead of a real first-frame preview (the viewer already shows this "for free" via the native `<video>` element — the grid needs a real pre-generated thumbnail instead, since loading full video files just to preview them isn't practical at grid scale). See `photo-organizer-spec.md`'s "Phase 2g" section for full requirements. Summary:
+- [ ] Pick a frame-decoding dependency (`opencv-python` or `imageio`+`imageio-ffmpeg` are candidates) — verify Python 3.14 wheel availability first, prefer self-contained codec support over requiring a separate system ffmpeg install
+- [ ] Backfill pattern (same shape as GPS extraction/captioning): batch-process videos once, cache extracted thumbnails to disk keyed by `file_hash` — NOT live per-request extraction
+- [ ] Benchmark real throughput before running full-library — don't assume it's as fast as GPS extraction's EXIF-read speed
+- [ ] CLI command + dashboard panel, per rule 10 (progress bar, results, log tail, resumable/cancelable — same posture as GPS Extraction panel)
+- [ ] Graceful fallback to the existing play-icon placeholder for any video without a cached thumbnail yet — never error or show broken image
+- [ ] New/extended route in `review_tool.py` to serve cached thumbnails, falling back to placeholder response
+- [ ] Per rule 11: restart `review_tool.py` itself before ending this session
+- [ ] Out of scope: thumbnail regeneration on file change, anything beyond a single static frame
+
 ## LOCKED — Phase 3: Face Detection & Clustering
 Do not start. Reference only.
 - insightface (GPU) for detection + embedding, output JSONL (file_hash, path, bbox, embedding, detected_at)
