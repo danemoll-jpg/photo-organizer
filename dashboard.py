@@ -30,6 +30,19 @@ Panels:
   path, just two independent *views* onto that shared log directory.
 - Log viewer — tails the active Phase 1 run's log, or browse any older
   logs/*.log (including old Phase 2 runs, if you want to review one)
+- Review Users — Phase 2d follow-up: manages review_tool.py's login
+  credentials (config.yaml's review_users). Deliberately lives HERE, not in
+  review_tool.py itself — account management is an owner/admin action, and
+  review_tool.py is the internet-facing surface invited guests use, so it
+  shouldn't carry a way to add/remove logins. Calls the exact same
+  src.config.add_or_update_review_user / remove_review_user /
+  list_review_usernames functions `main.py review-user add/list/remove`
+  already uses (plus src.auth.hash_password for the same werkzeug scrypt
+  hash) — no duplicated validation/hashing logic. Password entry uses
+  Tkinter's masked Entry (show="*"), not a terminal getpass prompt, per the
+  user's explicit "no terminal" instruction for this panel. Collapsed by
+  default (start_expanded=False) — this is an infrequent admin action, not
+  something to leave taking up space ahead of the Log viewer.
 
 Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
 body (see _make_collapsible()), so a section you're not using right now
@@ -56,8 +69,18 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from src.auth import hash_password
 from src.caption import CaptionStats, run_phase2
-from src.config import CONFIG_PATH, EXAMPLE_CONFIG_PATH, Config, load_config, save_source_folders
+from src.config import (
+    CONFIG_PATH,
+    EXAMPLE_CONFIG_PATH,
+    Config,
+    add_or_update_review_user,
+    list_review_usernames,
+    load_config,
+    remove_review_user,
+    save_source_folders,
+)
 from src.db import connect, init_db
 from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
@@ -212,6 +235,48 @@ class DashboardApp:
         cap_log_scroll.pack(side="right", fill="y")
         self.caption_log_text.configure(yscrollcommand=cap_log_scroll.set)
 
+        # --- Review Users panel (Phase 2d follow-up) ---
+        ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
+
+        ru_list_row = ttk.Frame(ru_frame)
+        ru_list_row.pack(fill="x", padx=6, pady=(6, 0))
+        self.review_user_listbox = tk.Listbox(ru_list_row, height=4, selectmode="browse")
+        self.review_user_listbox.pack(side="left", fill="both", expand=True)
+        ru_scroll = ttk.Scrollbar(ru_list_row, orient="vertical", command=self.review_user_listbox.yview)
+        ru_scroll.pack(side="right", fill="y")
+        self.review_user_listbox.configure(yscrollcommand=ru_scroll.set)
+
+        ru_btn_row = ttk.Frame(ru_frame)
+        ru_btn_row.pack(fill="x", padx=6, pady=6)
+        ttk.Button(ru_btn_row, text="Remove selected...", command=self._on_remove_review_user).pack(side="left")
+
+        ttk.Separator(ru_frame, orient="horizontal").pack(fill="x", padx=6, pady=(0, 8))
+
+        ru_add_frame = ttk.Frame(ru_frame)
+        ru_add_frame.pack(fill="x", padx=6, pady=(0, 8))
+
+        ttk.Label(ru_add_frame, text="Username:").grid(row=0, column=0, sticky="w", pady=2)
+        self.ru_username_var = tk.StringVar()
+        ttk.Entry(ru_add_frame, textvariable=self.ru_username_var, width=28).grid(
+            row=0, column=1, sticky="w", padx=(6, 0), pady=2
+        )
+
+        ttk.Label(ru_add_frame, text="Password (min 8 chars):").grid(row=1, column=0, sticky="w", pady=2)
+        self.ru_password_var = tk.StringVar()
+        ttk.Entry(ru_add_frame, textvariable=self.ru_password_var, show="*", width=28).grid(
+            row=1, column=1, sticky="w", padx=(6, 0), pady=2
+        )
+
+        ttk.Label(ru_add_frame, text="Confirm password:").grid(row=2, column=0, sticky="w", pady=2)
+        self.ru_confirm_var = tk.StringVar()
+        ttk.Entry(ru_add_frame, textvariable=self.ru_confirm_var, show="*", width=28).grid(
+            row=2, column=1, sticky="w", padx=(6, 0), pady=2
+        )
+
+        ttk.Button(ru_add_frame, text="Add / update user", command=self._on_add_review_user).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+
         # --- Log viewer panel ---
         log_frame = self._make_collapsible("Log viewer", fill="both", expand=True)
 
@@ -258,6 +323,7 @@ class DashboardApp:
             text=f"model: {self.cfg.ollama_model}  (via {self.cfg.ollama_host})  —  scans {self.cfg.dest_root} for JPG/PNG/HEIC"
         )
         self._refresh_folder_list()
+        self._refresh_review_users()
 
     def _refresh_folder_list(self) -> None:
         self.folder_listbox.delete(0, "end")
@@ -572,6 +638,58 @@ class DashboardApp:
         self.caption_log_text.insert("end", new_text)
         self.caption_log_text.see("end")
         self.caption_log_text.configure(state="disabled")
+
+    # --------------------------------------------- Phase 2d: review users
+    def _refresh_review_users(self) -> None:
+        self.review_user_listbox.delete(0, "end")
+        for u in list_review_usernames():
+            self.review_user_listbox.insert("end", u)
+
+    def _on_add_review_user(self) -> None:
+        username = self.ru_username_var.get().strip()
+        password = self.ru_password_var.get()
+        confirm = self.ru_confirm_var.get()
+
+        if not username:
+            messagebox.showerror("Photo Organizer", "Username cannot be empty.")
+            return
+        if len(password) < 8:
+            messagebox.showerror("Photo Organizer", "Password must be at least 8 characters.")
+            return
+        if password != confirm:
+            messagebox.showerror("Photo Organizer", "Passwords didn't match.")
+            return
+
+        if username in list_review_usernames():
+            if not messagebox.askyesno(
+                "Photo Organizer",
+                f"'{username}' already has a credential — overwrite its password?",
+            ):
+                return
+
+        # Same hash_password() (src/auth.py) main.py's `review-user add` uses —
+        # no duplicated hashing/validation logic, per CLAUDE.md rule 7.
+        add_or_update_review_user(username, hash_password(password))
+        self.ru_username_var.set("")
+        self.ru_password_var.set("")
+        self.ru_confirm_var.set("")
+        self._refresh_review_users()
+        messagebox.showinfo(
+            "Photo Organizer", f"Saved. '{username}' can now sign in at review_tool.py's login page."
+        )
+
+    def _on_remove_review_user(self) -> None:
+        sel = self.review_user_listbox.curselection()
+        if not sel:
+            return
+        username = self.review_user_listbox.get(sel[0])
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            f"Remove '{username}'? They will no longer be able to sign in to review_tool.py.",
+        ):
+            return
+        remove_review_user(username)
+        self._refresh_review_users()
 
     # -------------------------------------------------------------- logs
     def _log_dir(self) -> Path:
