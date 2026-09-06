@@ -148,7 +148,7 @@ import webbrowser
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, render_template, request, send_file, session
-from PIL import Image
+from PIL import Image, ImageOps
 
 from src.auth import register_auth
 from src.config import Config, load_config
@@ -993,6 +993,19 @@ def _get_image_bytes(path: str, file_hash: str, max_dim: int) -> bytes:
     # non-local backend only needs a new PhotoStorage implementation, not
     # a change here.
     with _storage.open(path) as f, Image.open(f) as img:
+        # Many phones/cameras store pixel data in a fixed sensor orientation
+        # and record the intended display rotation in the EXIF Orientation
+        # tag rather than physically rotating pixels -- without this, those
+        # photos render sideways/upside down here even though every other
+        # app that reads the tag (Windows Photos, Google Photos, ...) shows
+        # them correctly. exif_transpose() returns a new, already-rotated
+        # in-memory image with the tag normalized to 1; it never touches the
+        # file on disk (`_storage.open` is a read-only file handle, and
+        # nothing here ever writes back to `path`), so the original photo's
+        # bytes/EXIF are completely unaffected -- purely a serving-time
+        # transform for this cropped/resized copy. A no-op (returns a copy
+        # unchanged) for the common orientation=1 case.
+        img = ImageOps.exif_transpose(img)
         img = img.convert("RGB")
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
         buf = io.BytesIO()
