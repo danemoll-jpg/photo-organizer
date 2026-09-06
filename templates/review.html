@@ -66,6 +66,10 @@
       <option>Not available yet</option>
     </select>
   </label>
+  <label class="show-hidden-label">
+    <input type="checkbox" id="f-show-hidden">
+    Show hidden
+  </label>
   <button id="f-apply">Apply</button>
   <button id="f-reset" class="secondary">Reset</button>
   <!-- Grid filter improvements batch: visible only while a filter is
@@ -123,11 +127,37 @@
 
     <div class="viewer-details">
       <div class="viewer-path" id="viewer-path" title=""></div>
-      <div class="viewer-row"><span class="label">Date taken</span><span id="viewer-date"></span></div>
-      <div class="viewer-row"><span class="label">Caption</span><span id="viewer-caption"></span></div>
-      <div class="viewer-row"><span class="label">Tags</span><span id="viewer-tags"></span></div>
-      <div class="viewer-row"><span class="label">Location</span><span id="viewer-location"></span></div>
+      <!-- Phase 2f: an edit/pencil affordance next to every editable field.
+           Each button just opens the ONE shared inline edit form below (see
+           #viewer-edit-form) rather than each row growing its own — kept
+           generic on purpose (data-field says which column it edits) so a
+           future Phase 3 people/faces edit path could reuse the exact same
+           form/endpoint shape without a rearchitect (not built now, Phase 3
+           doesn't exist yet — see photo-organizer-spec.md's Phase 2f). -->
+      <div class="viewer-row"><span class="label">Date taken</span><span id="viewer-date"></span><button type="button" class="edit-btn" data-field="date_taken" title="Edit date taken">&#9998;</button></div>
+      <div class="viewer-row"><span class="label">Caption</span><span id="viewer-caption"></span><button type="button" class="edit-btn" data-field="caption" title="Edit caption">&#9998;</button></div>
+      <div class="viewer-row"><span class="label">Tags</span><span id="viewer-tags"></span><button type="button" class="edit-btn" data-field="tags" title="Edit tags">&#9998;</button></div>
+      <div class="viewer-row"><span class="label">Location</span><span id="viewer-location"></span><button type="button" class="edit-btn" data-field="location" title="Edit location">&#9998;</button></div>
       <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people" class="placeholder">Face detection isn't built yet (Phase 3) — this will show who's in the photo once it is.</span></div>
+
+      <!-- Shared inline edit form -- one at a time, whichever edit-btn above
+           was last clicked (see review.js's openEditForm/closeEditForm). -->
+      <div id="viewer-edit-form" class="viewer-edit-form" hidden>
+        <div class="viewer-edit-label" id="viewer-edit-label"></div>
+        <textarea id="viewer-edit-input" rows="2"></textarea>
+        <!-- Only shown for date_taken -- per spec, must be explicit that
+             this changes only this tool's DB record, never the file itself. -->
+        <div id="viewer-edit-hint" class="viewer-edit-hint" hidden></div>
+        <div id="viewer-edit-error" class="viewer-edit-error" hidden></div>
+        <div class="viewer-edit-actions">
+          <button type="button" id="viewer-edit-save">Save</button>
+          <button type="button" id="viewer-edit-cancel" class="secondary">Cancel</button>
+        </div>
+      </div>
+
+      <div class="viewer-row hide-row">
+        <button type="button" id="viewer-hide-btn" class="hide-btn"></button>
+      </div>
     </div>
 
     <!-- Nav controls: a single set (Phase 2b's original placement). A
@@ -158,7 +188,8 @@
   window.REVIEW_CONFIG = {
     pageSize: {{ page_size }},
     slideshowSeconds: {{ slideshow_seconds }},
-    destRoot: {{ dest_root|tojson }}
+    destRoot: {{ dest_root|tojson }},
+    csrfToken: {{ edit_csrf|tojson }}
   };
 </script>
 <script src="{{ url_for('static', filename='review.js') }}"></script>

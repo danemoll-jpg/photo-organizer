@@ -14,6 +14,19 @@ otherwise), so this never re-reads the same file's EXIF twice. A file
 that's missing/unreadable at check time is left with gps_checked=0 so a
 transient problem (e.g. checked mid-Phase-1-move) gets retried next run
 rather than being silently skipped forever.
+
+Phase 2f: a manual location edit in review_tool.py is permanently protected
+from being silently overwritten here. Before writing gps_lat/gps_lon/
+location_name for a row, this checks src.edits.has_manual_edit(conn,
+file_hash, "location") -- if a human has ever overridden this photo's
+location, the write is skipped (logged, counted in GpsStats.
+skipped_manual_edit) but gps_checked is still set to 1, since a manual
+override is permanent and this row will never need re-examining on that
+basis alone (matching the existing "checked, nothing to do" resumability
+model above, just for a different reason). Every row without a manual edit
+keeps being processed exactly as before -- this is a real behavior change
+to an already-shipped module, tested carefully for that (see
+tests/test_phase2f.py).
 """
 from __future__ import annotations
 
@@ -24,6 +37,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config
+from .edits import has_manual_edit
 from .gps_resolver import resolve_location
 
 
@@ -33,9 +47,13 @@ class GpsStats:
     found: int = 0
     not_found: int = 0
     errors: int = 0
+    skipped_manual_edit: int = 0  # Phase 2f: location NOT overwritten -- a human edited it in review_tool.py
 
     def summary(self) -> str:
-        return f"scanned={self.scanned} found={self.found} not_found={self.not_found} errors={self.errors}"
+        return (
+            f"scanned={self.scanned} found={self.found} not_found={self.not_found} "
+            f"errors={self.errors} skipped_manual_edit={self.skipped_manual_edit}"
+        )
 
 
 def run_gps_extraction(
@@ -82,6 +100,15 @@ def run_gps_extraction(
             if not path.exists():
                 stats.errors += 1
                 logger.error(f"ERROR (GPS): file missing at recorded path {path} — will retry next run")
+            elif has_manual_edit(conn, file_hash, "location"):
+                # Phase 2f: a human already set this photo's location in
+                # review_tool.py -- never silently overwrite it. Still marks
+                # gps_checked=1 (a manual override is permanent, so there's
+                # nothing productive about re-examining this row again next
+                # run either).
+                stats.skipped_manual_edit += 1
+                conn.execute("UPDATE photos SET gps_checked = 1 WHERE file_hash = ?", (file_hash,))
+                logger.info(f"SKIP GPS (manually edited location) hash={file_hash[:12]} {path}")
             else:
                 result = resolve_location(path, is_video=is_video)
                 if result is None:

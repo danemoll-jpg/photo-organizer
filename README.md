@@ -296,11 +296,14 @@ window shows the Flask/Werkzeug request log and is how you stop it
 (close the window, or `Ctrl+C` inside it).
 
 Opens `http://127.0.0.1:5151` (configurable — `review_tool_port` in
-`config.yaml`) in your browser automatically. Read-only by construction: the
-SQLite DB is opened via SQLite's own `mode=ro` URI (an accidental write
-would raise, not silently succeed), and `captions.jsonl` is only ever
-tailed for reading. Nothing here edits captions/tags, and it never runs
-organize/caption/extract-gps itself.
+`config.yaml`) in your browser automatically. Read-only by construction for
+every browsing route: the SQLite DB is opened via SQLite's own `mode=ro`
+URI (an accidental write would raise, not silently succeed), and
+`captions.jsonl` is only ever tailed for reading — and it never runs
+organize/caption/extract-gps itself. **Phase 2f adds one deliberate
+exception**: once you're logged in (see Phase 2d below), you can edit a
+photo's caption/tags/location/date and hide items from the library — see
+"Editable metadata" below for what that does and doesn't touch.
 
 - **Grid/browse view**: paginated (cursor-based, not `OFFSET` — stays fast
   no matter how deep you page into 100k+ rows), with date-range, tag,
@@ -321,10 +324,10 @@ organize/caption/extract-gps itself.
   pauses the slideshow rather than fighting with it. Stepping past the
   last photo on a page — or just letting the slideshow run — transparently
   keeps going into the next page's photos; there's no page-boundary
-  dead-end. The nav controls (Prev/Random/Play-Pause/Next/Order/interval)
-  are duplicated at both the top and bottom of the viewer — handy on
-  mobile or a tall photo, so you're never stuck scrolling back up just to
-  step to the next one; both copies stay in sync with each other either
+  dead-end. The grid's own pager (Prev page/page number/Next page) is
+  duplicated at both the top and bottom of the thumbnail grid — handy when
+  you've scrolled down a long page, so you're never stuck scrolling back up
+  just to turn the page; both copies stay in sync with each other either
   way.
 - **Random navigation**: a **Random** button jumps to a random photo within
   the currently active filters (a one-off "surprise me", separate from
@@ -457,6 +460,43 @@ B2, etc.) would mean writing one new backend class and changing
 `config.yaml`'s `storage_backend`, not rewriting the app. No cloud backend
 is implemented, and nothing has moved off local disk.
 
+## Phase 2f — editable metadata
+
+Now that Phase 2d's real login exists, anyone you've added a login for can
+edit a photo or video directly in the viewer — not just browse. Click the
+✎ next to a field to edit it in place:
+
+- **Caption, tags, location** — free-text edits, saved via ✎ → type → Save.
+  Tags are a comma-separated full replace (not add/remove one at a time).
+  A video never gets an automated caption (Phase 2 doesn't caption video),
+  so its caption button reads **"+ Add caption"** instead of a bare pencil
+  — same mechanism, just starting from empty.
+- **Date taken** — edits the DB record only. It does **not** move, rename,
+  or re-sort the actual file — Phase 1's folder placement is untouched.
+  The edit form says this explicitly so it's never a surprise.
+- **Hide from library** — a button in the viewer toggles a photo/video out
+  of every view (grid, viewer, random, slideshow, stats) entirely. This is
+  **not** a file delete and **not** a database row delete — both would be
+  unsafe here (a row delete in particular would let Phase 1's next rescan
+  silently re-add the file, since it recognizes already-processed files by
+  path/hash, not by row presence). It's just a flag, and it's fully
+  reversible: check **Show hidden** in the filters to see hidden items
+  again (badged, dimmed) and un-hide one the same way you hid it. The
+  actual file is never touched either way.
+
+**Once you edit a field, no automated process will ever silently overwrite
+it again.** Every edit is recorded in an append-only audit log
+(`photo_edits` in the database — file/field/old value/new value/who/when),
+and `main.py load-captions` / `main.py extract-gps` both check it before
+applying an automated write to caption/tags/location, skipping (and
+logging) any field you've already touched. Everything else about a photo
+keeps updating normally — editing a caption doesn't protect its tags or
+location, and vice versa.
+
+Every invited login can edit — there's no owner-vs-guest distinction yet.
+Edits are behind the same login as browsing, plus CSRF protection matching
+the login page's own.
+
 ## Viewing the database
 
 `data/photo_organizer.db` is a plain SQLite file — no server, no login.
@@ -509,7 +549,9 @@ this machine):
    `tags`/`photo_tags` stay empty until you load captions (below), and
    `faces`/`people` stay empty until Phase 3 runs. Heads up:
    `photo_tags.confidence` is also a REAL column — expect the same
-   `#Deleted` issue there if you link `photo_tags` directly.
+   `#Deleted` issue there if you link `photo_tags` directly. `photo_edits`
+   (Phase 2f's manual-edit audit log) has no REAL columns, so it links
+   directly without needing a view.
 
 **Loading captions into the database:** Phase 2 only ever writes
 `captions.jsonl` (see above) — it doesn't touch the database. To make

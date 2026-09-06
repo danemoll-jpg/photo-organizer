@@ -34,9 +34,19 @@ CREATE TABLE IF NOT EXISTS photos (
     gps_lat                   REAL,                                -- decimal degrees, NULL if no GPS EXIF found (or not yet checked)
     gps_lon                   REAL,                                -- decimal degrees
     location_name             TEXT,                                -- offline reverse-geocoded place name, e.g. "Marietta, GA"
-    gps_checked               INTEGER NOT NULL DEFAULT 0           -- 1 once GPS extraction has been attempted for this row, whether or
+    gps_checked               INTEGER NOT NULL DEFAULT 0,          -- 1 once GPS extraction has been attempted for this row, whether or
                                                                      -- not GPS data was actually found — lets extraction resume without
                                                                      -- ever re-reading the same file's EXIF twice (CLAUDE.md rule 1)
+    -- Phase 2f: "Hide from library" — NOT a physical file delete, NOT a DB
+    -- row delete either (see photo-organizer-spec.md's Phase 2f section for
+    -- why both are unsafe here). 1 = permanently excluded from every
+    -- review_tool.py view (grid/viewer/random/slideshow/stats) until
+    -- reversed via the same "Show hidden" + un-hide mechanism. Phase 1/1b's
+    -- rescan matching (by current_path/original_path/hash) never looks at
+    -- this column, so the hide is safe from a future rescan silently
+    -- resurrecting the row. Edited the same way as any other field below —
+    -- see photo_edits, field_name='excluded'.
+    excluded                  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_date ON photos(date_taken_year, date_taken_month);
@@ -69,7 +79,7 @@ SELECT
     status, caption, processed_at, phase1_verified,
     CAST(file_mtime AS TEXT) AS file_mtime,
     CAST(gps_lat AS TEXT) AS gps_lat, CAST(gps_lon AS TEXT) AS gps_lon,
-    location_name, gps_checked
+    location_name, gps_checked, excluded
 FROM photos;
 
 -- Read-only view for browsing captions/tags together in Access, one row
@@ -132,3 +142,33 @@ CREATE TABLE IF NOT EXISTS people (
     assigned_name     TEXT,
     notes              TEXT
 );
+
+-- Phase 2f: manual-edit audit trail for review_tool.py's new edit endpoints.
+-- Append-only (never updated or deleted) -- one row per edit, not one row
+-- per (file_hash, field_name). This is the actual protection mechanism
+-- rule 11-adjacent automated writers must respect: `main.py load-captions`
+-- and src/gps_backfill.py both check "does ANY row exist here for this
+-- (file_hash, field_name)?" (see src/edits.py::has_manual_edit) before
+-- applying an automated write to caption/tags/location, and skip (logging
+-- it) if one does -- permanently, since a manual edit is never expired or
+-- cleared automatically. Deliberately a table, not one boolean column per
+-- field on `photos`, so it also gives a real audit trail (who changed what,
+-- when, from what) across multiple invited editors (Phase 2d: every
+-- authenticated user can edit). field_name is one of src/edits.py's
+-- EDITABLE_FIELDS ('caption' | 'tags' | 'location' | 'date_taken' |
+-- 'excluded') -- "excluded" (Hide from library) uses this exact same
+-- mechanism, it's just another field name here, not a separate table/flag.
+CREATE TABLE IF NOT EXISTS photo_edits (
+    edit_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash    TEXT NOT NULL REFERENCES photos(file_hash) ON DELETE CASCADE,
+    field_name   TEXT NOT NULL,
+    old_value    TEXT,             -- prior value (NULL if there was none), stringified
+    new_value    TEXT,             -- the value just written, stringified
+    edited_by    TEXT NOT NULL,    -- config.yaml review_users username that made this edit
+    edited_at    TEXT NOT NULL     -- ISO 8601 UTC timestamp
+);
+
+-- Supports has_manual_edit()'s per-(file_hash, field_name) existence check
+-- without a table scan, and _row_to_dict()'s "which fields on this one row
+-- were ever manually edited" lookup (both in review_tool.py/src/edits.py).
+CREATE INDEX IF NOT EXISTS idx_photo_edits_hash_field ON photo_edits(file_hash, field_name);

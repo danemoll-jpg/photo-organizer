@@ -98,6 +98,27 @@ a fetch() call). Phase 2d also introduced a storage-abstraction seam
 (src/storage.py::PhotoStorage) between this file and "where photo bytes
 actually live" — local disk today (LocalDiskStorage), groundwork only for
 a possible future cloud-storage backend, not an actual migration.
+
+Phase 2f (deliberate, significant reversal of the "read-only" framing
+above): now that Phase 2d's real auth exists, every authenticated user can
+edit caption/tags/location/date_taken via a new, narrowly-scoped
+/api/edit/<file_hash> route (see src/edits.py) — the ONLY route in this
+whole file that writes to the DB. It uses its own separate read-write
+connection (get_db_write()), CSRF-protected exactly like login/logout (a
+per-session token minted at login — see src/auth.py — compared against the
+request body), against a server-side allow-list of field names
+(src.edits.EDITABLE_FIELDS) so a client can never name an arbitrary column.
+Every OTHER route above and below is completely untouched: they still all
+go through get_db()'s mode=ro connection, and still cannot write even by
+accident. A manual edit is permanently protected from a future automated
+overwrite by main.py load-captions / src/gps_backfill.py (see src/edits.py
+::has_manual_edit) — _row_to_dict below checks this per row so an edited
+caption/tags value is shown instead of the live captions.jsonl cache's
+value the moment it's edited, not just after some future reload.
+"Hide from library" (the `excluded` column) uses this exact same edit/audit
+mechanism — it's just another field name, not a separate code path — and
+every browsing route (_build_filters) now excludes excluded=1 rows by
+default, revealed again only via a "Show hidden" toggle (show_hidden=1).
 """
 from __future__ import annotations
 
@@ -105,6 +126,7 @@ import argparse
 import hashlib
 import io
 import json
+import logging
 import mimetypes
 import random
 import sqlite3
@@ -117,6 +139,7 @@ from PIL import Image
 
 from src.auth import register_auth
 from src.config import Config, load_config
+from src.edits import EDITABLE_FIELDS, apply_edit, current_tags, manual_edit_fields
 from src.logging_setup import setup_logging
 from src.port_check import listening_pids
 from src.storage import PhotoStorage, get_storage
@@ -136,6 +159,7 @@ app = Flask(__name__)
 _cfg: Config
 _video_exts: set[str] = set()
 _storage: PhotoStorage
+_logger: logging.Logger = logging.getLogger("photo_organizer")  # overwritten by main() with the real configured logger
 
 
 class CaptionsCache:
@@ -218,6 +242,20 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def get_db_write() -> sqlite3.Connection:
+    """Phase 2f: a fresh READ-WRITE connection per call, used ONLY by the
+    /api/edit/<file_hash> route below -- every other route in this file
+    still exclusively uses get_db()'s mode=ro connection above, completely
+    unchanged. A separate connection (not a mode=ro one reopened without
+    the flag) so it's structurally obvious at every call site which code
+    path is allowed to write, matching this file's existing "read-only,
+    deliberately" posture for everything else (see module docstring)."""
+    conn = sqlite3.connect(str(_cfg.db_path_abs))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
 def _build_filters(args) -> tuple[str, list]:
     """Shared WHERE-clause builder for every query below: date range
     (against date_taken -- ISO8601 text sorts correctly lexicographically)
@@ -247,6 +285,15 @@ def _build_filters(args) -> tuple[str, list]:
     live-cache lookup needed, so it stays on the cheap indexed/LIKE SQL
     path rather than forcing every query through the batched-scan path
     tag/caption-keyword filtering needs.
+
+    `show_hidden` (Phase 2f "Hide from library"): by default every route
+    that calls this excludes `excluded=1` rows entirely -- they're meant to
+    have permanently disappeared from the tool, per spec. Passing
+    show_hidden=1 (the UI's "Show hidden" checkbox) lifts that restriction
+    so a hidden item can be found again and un-hidden via the same edit
+    mechanism (see /api/edit/<file_hash>) -- it does NOT restrict to ONLY
+    hidden items, it just stops filtering them out, so hidden and visible
+    items are browsable together (the front end marks hidden ones).
     """
     clauses = ["1=1"]
     params: list = []
@@ -256,6 +303,7 @@ def _build_filters(args) -> tuple[str, list]:
     location = (args.get("location") or "").strip()
     has_location = (args.get("has_location") or "").strip().lower()
     media_type = (args.get("media_type") or "").strip().lower()
+    show_hidden = (args.get("show_hidden") or "").strip().lower() in ("1", "true", "yes")
     if date_from:
         clauses.append("date_taken >= ?")
         params.append(date_from)
@@ -293,6 +341,8 @@ def _build_filters(args) -> tuple[str, list]:
             like_params = []
         clauses.append(video_clause if media_type == "video" else f"NOT {video_clause}")
         params.extend(like_params)
+    if not show_hidden:
+        clauses.append("excluded = 0")
     sql = " AND ".join(clauses)
     return sql, params
 
@@ -528,10 +578,15 @@ def _random_order_for(conn, where, params, extra_pred, seed: str) -> list[str]:
     return paths
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict:
+def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+    """`conn` (Phase 2f) is needed to check whether this row's caption/tags
+    have ever been manually edited -- see the branch below. Every call site
+    already has a live connection open (the same one used to fetch `row`),
+    so this is never a new connection, just threading the existing one
+    through."""
     d = dict(row)
     file_hash = d["file_hash"]
-    cap = _captions_cache.get(file_hash)
+    edited_fields = manual_edit_fields(conn, file_hash)
     current_path = d["current_path"] or ""
     dest_root = str(_cfg.dest_root_path)
     relative_path = current_path
@@ -541,6 +596,30 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     # Phase 2g: only a video can have a cached thumbnail, so the stat() call
     # is skipped entirely for the (large majority) of rows that are photos.
     has_thumbnail = is_video and _thumbnail_path(file_hash).exists()
+
+    # Phase 2f: caption/tags normally come from the live captions.jsonl
+    # cache (see module docstring -- always-live, no reruns needed), but
+    # once a human has edited either field for this file_hash, the DB
+    # column (photos.caption / the tags/photo_tags join, both written by
+    # apply_edit -- see src/edits.py) becomes the permanent source of truth
+    # for THAT field instead, so an edit is reflected the instant it's
+    # saved rather than only after some future load-captions run
+    # overwrites the cache's notion of it (which it now won't -- see
+    # has_manual_edit in load_captions.py/gps_backfill.py). The two fields
+    # are tracked independently: editing only tags on an AI-captioned photo
+    # still shows the AI caption, and vice versa.
+    cap = _captions_cache.get(file_hash)
+    if "caption" in edited_fields:
+        caption_value = d["caption"]
+        captioned = caption_value is not None
+    else:
+        caption_value = cap.get("caption") if cap else None
+        captioned = cap is not None
+    if "tags" in edited_fields:
+        tags_value = current_tags(conn, file_hash)
+    else:
+        tags_value = (cap.get("tags") if cap else None) or []
+
     return {
         "file_hash": file_hash,
         "current_path": current_path,
@@ -551,11 +630,20 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "status": d["status"],
         "is_video": is_video,
         "has_thumbnail": has_thumbnail,
-        "captioned": cap is not None,
-        "caption": cap.get("caption") if cap else None,
-        "tags": cap.get("tags") if cap else [],
+        "captioned": captioned,
+        "caption": caption_value,
+        "tags": tags_value,
         "location_name": d.get("location_name"),
         "gps_checked": bool(d.get("gps_checked")),
+        # Phase 2f: "Hide from library" -- see _build_filters' show_hidden
+        # handling. Carried on every response (not just when show_hidden is
+        # active) so the front end can badge/style a hidden item whenever
+        # one happens to be in view.
+        "excluded": bool(d.get("excluded")),
+        # Which editable fields have ever been manually touched on this row
+        # -- not currently rendered distinctly by the front end, but harmless
+        # to expose now rather than needing a new field later.
+        "edited_fields": sorted(edited_fields),
         # Phase 3 doesn't exist yet -- always None. Kept on every response
         # now (rather than added later) so the front-end's reserved
         # people/faces section never needs new wiring once it does; see
@@ -587,7 +675,7 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
             has_next = len(matches) > limit
             rows = matches[:limit]
             has_prev = after is not None
-        return [_row_to_dict(r) for r in rows], has_next, has_prev
+        return [_row_to_dict(r, conn) for r in rows], has_next, has_prev
     if before is not None:
         sql = f"SELECT * FROM photos WHERE {where} AND current_path < ? ORDER BY current_path DESC LIMIT ?"
         rows = conn.execute(sql, params + [before, limit + 1]).fetchall()
@@ -605,7 +693,7 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
         has_next = len(rows) > limit
         rows = rows[:limit]
         has_prev = after is not None
-    return [_row_to_dict(r) for r in rows], has_next, has_prev
+    return [_row_to_dict(r, conn) for r in rows], has_next, has_prev
 
 
 @app.route("/")
@@ -617,6 +705,11 @@ def index():
         dest_root=str(_cfg.dest_root_path),
         current_user=session.get("user"),
         logout_csrf=session.get("_csrf"),
+        # Phase 2f: the exact same per-session token the logout form above
+        # already uses — review.js sends it back on every /api/edit/<hash>
+        # call, checked against session["_csrf"] the same way login/logout
+        # already are (see api_edit's docstring).
+        edit_csrf=session.get("_csrf"),
     )
 
 
@@ -746,7 +839,7 @@ def api_nav():
                     offset = _feistel_permute(idx, total, seed)
                     sql = f"SELECT * FROM photos WHERE {where} ORDER BY current_path LIMIT 1 OFFSET ?"
                     row = conn.execute(sql, params + [offset]).fetchone()
-            return jsonify({"item": _row_to_dict(row) if row is not None else None})
+            return jsonify({"item": _row_to_dict(row, conn) if row is not None else None})
 
         cursor = request.args.get("cursor") or None
         direction = request.args.get("dir", "next")
@@ -768,9 +861,10 @@ def api_nav():
                 p.append(cursor)
             sql += " ORDER BY current_path ASC LIMIT 1"
             row = conn.execute(sql, p).fetchone()
+        item = _row_to_dict(row, conn) if row is not None else None
     finally:
         conn.close()
-    return jsonify({"item": _row_to_dict(row) if row is not None else None})
+    return jsonify({"item": item})
 
 
 @app.route("/api/random")
@@ -785,9 +879,69 @@ def api_random():
         where, params = _build_filters(request.args)
         extra_pred = _build_extra_predicate(request.args)
         row = _pick_random_row(conn, where, params, extra_pred)
+        item = _row_to_dict(row, conn) if row is not None else None
     finally:
         conn.close()
-    return jsonify({"item": _row_to_dict(row) if row is not None else None})
+    return jsonify({"item": item})
+
+
+@app.route("/api/edit/<file_hash>", methods=["POST"])
+def api_edit(file_hash: str):
+    """Phase 2f: the ONE write path in this whole file — every other route
+    above/below is still exclusively read-only (see module docstring).
+    Behind the same auth gate as every non-public route already (nothing
+    special needed here — src/auth.py's before_request already covers
+    /api/*), PLUS its own CSRF check matching login/logout's pattern
+    exactly: a per-session token minted at login (src/auth.py), compared
+    against this request's body, not a header or query param — a mismatch
+    (including a session with no token at all, e.g. one somehow reaching
+    this route without ever having logged in through this app) is rejected
+    before any DB write is attempted.
+
+    Body: {"field": <one of src.edits.EDITABLE_FIELDS>, "value": ...,
+    "csrf_token": "..."}. `field` is checked against the server-side
+    allow-list before ever reaching apply_edit() — an unknown name is
+    rejected outright, never trusted from the client, matching this
+    project's existing "server-side allow-list, don't trust the client"
+    posture elsewhere (e.g. src/port_check.py's restart only ever kills
+    PIDs it looked up itself).
+
+    Returns the freshly-updated photo (same shape /api/photos/.../api/nav
+    items already have) on success, so the front end can just re-render
+    from the response rather than re-fetching."""
+    data = request.get_json(silent=True) or {}
+    if data.get("csrf_token") != session.get("_csrf"):
+        return jsonify({"error": "Your session looks stale — reload the page and try again."}), 403
+
+    field = data.get("field")
+    if field not in EDITABLE_FIELDS:
+        return jsonify({"error": f"{field!r} is not an editable field."}), 400
+    value = data.get("value")
+    edited_by = session.get("user") or "unknown"
+
+    write_conn = get_db_write()
+    try:
+        try:
+            apply_edit(write_conn, file_hash, field, value, edited_by=edited_by, logger=_logger)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+    finally:
+        write_conn.close()
+
+    # Re-read through the normal read-only connection (untouched by the
+    # write above) so the response reflects exactly what every other route
+    # would now show for this photo — same _row_to_dict path, same
+    # manual-edit-aware caption/tags resolution.
+    _captions_cache.refresh()
+    read_conn = get_db()
+    try:
+        row = read_conn.execute("SELECT * FROM photos WHERE file_hash = ?", (file_hash,)).fetchone()
+        if row is None:
+            return jsonify({"error": "Photo not found."}), 404
+        item = _row_to_dict(row, read_conn)
+    finally:
+        read_conn.close()
+    return jsonify({"item": item})
 
 
 # Small bounded in-memory cache of already-downscaled JPEG bytes, keyed by
@@ -931,7 +1085,7 @@ def _open_browser_later(url: str) -> None:
 
 
 def main() -> None:
-    global _cfg, _video_exts, _captions_cache, _storage
+    global _cfg, _video_exts, _captions_cache, _storage, _logger
 
     parser = argparse.ArgumentParser(description="Phase 2b/2d — Photo Organizer review/spot-check tool")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1, localhost-only)")
@@ -956,6 +1110,7 @@ def main() -> None:
     # events land in logs/organize_<timestamp>.log alongside everything
     # else, not a second parallel log.
     logger, log_path = setup_logging(_cfg.log_dir_abs)
+    _logger = logger
     register_auth(app, _cfg, logger=logger)
     if not _cfg.review_users:
         print("WARNING: no review_users configured in config.yaml — nobody can log in yet.")

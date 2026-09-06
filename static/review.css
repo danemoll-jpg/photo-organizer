@@ -139,6 +139,10 @@ body {
 .filters-hint { color: var(--muted); font-size: 12px; margin-left: auto; }
 .filters-hint code { background: var(--badge-bg); padding: 1px 4px; border-radius: 3px; }
 
+/* Phase 2f: "Show hidden" checkbox -- a plain row-oriented label, unlike
+   every other .filters label (which stack a text caption over an input). */
+.show-hidden-label { flex-direction: row !important; align-items: center; gap: 6px !important; }
+
 /* Grid filter improvements batch: result count, shown only while a filter
    is active (see review.js's refreshStats/hasActiveFilters). Sits between
    the Apply/Reset buttons and the path hint, at the same baseline. */
@@ -262,6 +266,12 @@ body {
 .card .card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .badge { background: var(--badge-bg); color: var(--text); border-radius: 10px; padding: 1px 8px; font-size: 11px; }
 .badge.location { background: transparent; border: 1px solid var(--border); }
+/* Phase 2f: "Hide from library" -- a hidden item is only ever visible in
+   the grid at all when "Show hidden" is checked (see _build_filters'
+   show_hidden), so this badge + dimming exists purely to make it obvious
+   which visible cards are the hidden ones in that mode. */
+.badge.hidden-flag { background: var(--danger); color: #fff; }
+.card.card-hidden { opacity: 0.55; }
 
 .empty-state { padding: 40px; text-align: center; color: var(--muted); }
 
@@ -317,6 +327,63 @@ body {
 .viewer-row { margin-bottom: 12px; font-size: 13px; line-height: 1.4; }
 .viewer-row .label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin-bottom: 2px; }
 .viewer-row .placeholder { color: var(--muted); font-style: italic; }
+
+/* Phase 2f: editable metadata -- the pencil/"+ Add caption" button next to
+   a field, and the one shared inline edit form opened by whichever button
+   was clicked (see review.js's openEditForm/closeEditForm). */
+.edit-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 0 0 6px;
+  vertical-align: middle;
+}
+.edit-btn:hover { color: var(--accent); }
+.viewer-edit-form {
+  margin: -4px 0 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.viewer-edit-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin-bottom: 6px; }
+.viewer-edit-form textarea {
+  width: 100%;
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  resize: vertical;
+}
+.viewer-edit-hint { font-size: 11px; color: var(--muted); font-style: italic; margin-top: 6px; }
+.viewer-edit-error { font-size: 12px; color: var(--danger); margin-top: 6px; }
+.viewer-edit-actions { display: flex; gap: 8px; margin-top: 8px; }
+.viewer-edit-actions button {
+  padding: 5px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+  font-size: 12px;
+}
+.viewer-edit-actions button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+.hide-row { margin-top: 20px; }
+.hide-btn {
+  width: 100%;
+  padding: 8px;
+  border-radius: 5px;
+  border: 1px solid var(--danger);
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 13px;
+}
+.hide-btn.is-hidden { border-color: var(--accent); color: var(--accent); }
 .viewer-controls {
   grid-column: 1 / 3;
   grid-row: 2;

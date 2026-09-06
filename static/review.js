@@ -63,6 +63,25 @@
  *     already makes (no new network request).
  *   - A media_type filter (All/Photos only/Videos only), same closed-
  *     <select> pattern as Location.
+ *
+ * Phase 2f (this follow-up session) -- the tool is no longer read-only:
+ *   - Edit/pencil buttons next to Date taken/Caption/Tags/Location in the
+ *     viewer open ONE shared inline edit form (openEditForm/closeEditForm/
+ *     saveEdit below), fetch()-posting to /api/edit/<hash> with the same
+ *     CSRF token the logout form already carries (window.REVIEW_CONFIG.
+ *     csrfToken -- see templates/review.html). A video's caption button
+ *     reads "+ Add caption" instead of a bare pencil when it has none yet
+ *     (see renderViewerItem) -- same mechanism, just starting from empty,
+ *     per spec.
+ *   - "Hide from library" / un-hide (toggleHidden below) uses the exact
+ *     same /api/edit/<hash> endpoint with field="excluded" -- not a
+ *     separate action. Hiding the CURRENTLY OPEN item while "Show hidden"
+ *     is off makes it vanish from every filtered view immediately, so the
+ *     viewer closes back to the grid rather than keep displaying an item
+ *     that no longer matches anything.
+ *   - A new "Show hidden" checkbox (state.filters.show_hidden) reveals
+ *     already-hidden items again (mixed in with visible ones, badged and
+ *     dimmed -- see renderGrid) so they can be found and un-hidden.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -73,7 +92,7 @@
   const NO_LOCATION_VALUE = "__no_location__";
 
   const state = {
-    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "" },
+    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", show_hidden: false },
     pageSize: cfg.pageSize,
     grid: { items: [], firstCursor: null, lastCursor: null, hasNext: false, hasPrev: false, pageNum: 1 },
     viewer: {
@@ -119,6 +138,17 @@
   const viewerRandomBtn = el("viewer-random");
   const viewerOrderSelect = el("viewer-order");
 
+  // Phase 2f: editable metadata + "Hide from library"
+  const editFormEl = el("viewer-edit-form");
+  const editLabelEl = el("viewer-edit-label");
+  const editInputEl = el("viewer-edit-input");
+  const editHintEl = el("viewer-edit-hint");
+  const editErrorEl = el("viewer-edit-error");
+  const editSaveBtn = el("viewer-edit-save");
+  const editCancelBtn = el("viewer-edit-cancel");
+  const hideBtn = el("viewer-hide-btn");
+  const captionEditBtn = document.querySelector('.edit-btn[data-field="caption"]');
+
   // ---- persisted slideshow interval (per-browser convenience only) ----
   try {
     const saved = localStorage.getItem("review_slideshow_seconds");
@@ -151,6 +181,7 @@
       location: state.filters.location,
       has_location: state.filters.has_location,
       media_type: state.filters.media_type,
+      show_hidden: state.filters.show_hidden ? "1" : "",
     };
   }
 
@@ -310,7 +341,11 @@
     gridEmptyEl.hidden = state.grid.items.length > 0;
     for (const item of state.grid.items) {
       const card = document.createElement("div");
-      card.className = "card";
+      // Phase 2f: a hidden item is only ever IN this list at all when
+      // "Show hidden" is checked (see _build_filters' show_hidden on the
+      // server) -- dim + badge it so it's obviously the hidden one, not a
+      // silently-missing distinction.
+      card.className = "card" + (item.excluded ? " card-hidden" : "");
       const thumb = !item.is_video
         ? `<img loading="lazy" src="/image/${item.file_hash}?max=400" alt="">`
         // Phase 2g: a real cached first-frame thumbnail when one exists
@@ -331,6 +366,7 @@
           <div class="card-date">${fmtDate(item.date_taken)}${item.date_source ? " · " + item.date_source : ""}</div>
           ${captionHtml(item)}
           <div class="card-tags">
+            ${item.excluded ? `<span class="badge hidden-flag">Hidden</span>` : ""}
             ${(item.tags || []).slice(0, 6).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join("")}
             ${item.location_name ? `<span class="badge location">📍 ${escapeHtml(item.location_name)}</span>` : ""}
           </div>
@@ -344,7 +380,16 @@
     forEach(gridPageInfoEls, (span) => { span.textContent = pageText; });
   }
 
-  async function loadGridPage({ after, before, resetPageNum } = {}) {
+  // Phase 2f: keepPageNum re-fetches whatever page is CURRENTLY on screen
+  // (using the exact same after/before cursor that produced it) without
+  // treating it as a forward/backward step -- used after an edit/hide/
+  // un-hide so the grid reflects the change without silently jumping back
+  // to page 1 while still showing a stale "Page N" label.
+  async function loadGridPage({ after, before, resetPageNum, keepPageNum } = {}) {
+    if (keepPageNum) {
+      after = state.grid.lastAfter;
+      before = state.grid.lastBefore;
+    }
     const params = { ...currentFilterParams(), limit: state.pageSize };
     if (after) params.after = after;
     if (before) params.before = before;
@@ -354,7 +399,10 @@
     state.grid.hasPrev = data.has_prev;
     state.grid.firstCursor = data.items.length ? data.items[0].current_path : null;
     state.grid.lastCursor = data.items.length ? data.items[data.items.length - 1].current_path : null;
+    state.grid.lastAfter = after || null;
+    state.grid.lastBefore = before || null;
     if (resetPageNum) state.grid.pageNum = 1;
+    else if (keepPageNum) { /* re-fetched the same page in place -- leave pageNum exactly as it was */ }
     else if (after) state.grid.pageNum += 1;
     else if (before) state.grid.pageNum = Math.max(1, state.grid.pageNum - 1);
     renderGrid();
@@ -392,6 +440,7 @@
       state.filters.has_location = "";
     }
     state.filters.media_type = el("f-media-type").value;
+    state.filters.show_hidden = el("f-show-hidden").checked;
     hideTagSuggestions();
     loadGridPage({ resetPageNum: true });
     refreshStats();
@@ -413,6 +462,7 @@
     el("f-caption-kw").value = "";
     el("f-location").value = "";
     el("f-media-type").value = "";
+    el("f-show-hidden").checked = false;
     applyFilters();
   });
 
@@ -422,6 +472,7 @@
   function renderViewerItem(item) {
     state.viewer.current = item;
     viewerNoMore.hidden = true;
+    closeEditForm(); // Phase 2f: never leave a stale edit form open across a nav step
     if (!item) return;
     // Phase 2e: the viewer plays actual video via <video>, switching away
     // from the <img> used for photos -- always pause+clear the video
@@ -458,6 +509,15 @@
       : (item.gps_checked
           ? `<span class="placeholder">No location available</span>`
           : `<span class="placeholder">Not yet checked for GPS data</span>`);
+
+    // Phase 2f: an uncaptioned item (any not-yet-captioned photo, or ANY
+    // video — which never gets an automated caption at all) shows "+ Add
+    // caption" instead of a bare pencil, since there's nothing to "edit"
+    // yet — same underlying mechanism either way, just starting from empty.
+    if (captionEditBtn) captionEditBtn.textContent = item.captioned ? "✎" : "+ Add caption";
+
+    hideBtn.textContent = item.excluded ? "Un-hide from library" : "🚫 Hide from library";
+    hideBtn.classList.toggle("is-hidden", Boolean(item.excluded));
   }
 
   function openViewer(item) {
@@ -613,6 +673,130 @@
     try { localStorage.setItem("review_slideshow_seconds", String(secs)); } catch (e) { /* ignore */ }
     if (state.viewer.playing) startSlideshow(); // restart with the new interval immediately
   });
+
+  // ---------------------------------------------------------------------
+  // Phase 2f: editable metadata (caption / tags / location / date taken)
+  // ---------------------------------------------------------------------
+  const EDIT_FIELD_LABELS = {
+    caption: "Caption",
+    tags: "Tags (comma-separated)",
+    location: "Location",
+    date_taken: "Date taken (YYYY-MM-DD, or a full ISO timestamp)",
+  };
+  // Only date_taken gets an explicit caveat -- per spec, editing it must be
+  // clearly stated as changing only this tool's DB record, never the file.
+  const EDIT_FIELD_HINTS = {
+    date_taken: "This only changes this tool's record — it does NOT move, rename, or re-sort the actual file. Phase 1's folder placement is unaffected.",
+  };
+  let editingField = null;
+
+  function valueForField(item, field) {
+    if (field === "caption") return item.caption || "";
+    if (field === "tags") return (item.tags || []).join(", ");
+    if (field === "location") return item.location_name || "";
+    if (field === "date_taken") return (item.date_taken || "").slice(0, 10);
+    return "";
+  }
+
+  function openEditForm(field) {
+    if (!state.viewer.current) return;
+    editingField = field;
+    editLabelEl.textContent = EDIT_FIELD_LABELS[field] || field;
+    editInputEl.value = valueForField(state.viewer.current, field);
+    editHintEl.textContent = EDIT_FIELD_HINTS[field] || "";
+    editHintEl.hidden = !EDIT_FIELD_HINTS[field];
+    editErrorEl.hidden = true;
+    editErrorEl.textContent = "";
+    editFormEl.hidden = false;
+    editInputEl.focus();
+  }
+
+  function closeEditForm() {
+    editingField = null;
+    editFormEl.hidden = true;
+    editErrorEl.hidden = true;
+    editErrorEl.textContent = "";
+  }
+
+  document.querySelectorAll(".edit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => openEditForm(btn.dataset.field));
+  });
+  editCancelBtn.addEventListener("click", closeEditForm);
+
+  async function postEdit(fileHash, field, value) {
+    return fetch(`/api/edit/${fileHash}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ field, value, csrf_token: cfg.csrfToken }),
+    });
+  }
+
+  async function saveEdit() {
+    if (!editingField || !state.viewer.current) return;
+    let value = editInputEl.value;
+    if (editingField === "tags") {
+      value = value.split(",").map((t) => t.trim()).filter(Boolean);
+    }
+    editSaveBtn.disabled = true;
+    editErrorEl.hidden = true;
+    try {
+      const res = await postEdit(state.viewer.current.file_hash, editingField, value);
+      if (res.status === 401) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        editErrorEl.textContent = data.error || `Save failed (${res.status}).`;
+        editErrorEl.hidden = false;
+        return;
+      }
+      renderViewerItem(data.item); // also closes the edit form, via closeEditForm() at the top
+      loadGridPage({ keepPageNum: true }); // grid card for this item may show a different caption/tags/location now
+      refreshStats();
+    } catch (e) {
+      editErrorEl.textContent = "Save failed — network error. Try again.";
+      editErrorEl.hidden = false;
+    } finally {
+      editSaveBtn.disabled = false;
+    }
+  }
+  editSaveBtn.addEventListener("click", saveEdit);
+
+  // ---------------------------------------------------------------------
+  // Phase 2f: "Hide from library" (reversible -- see "Show hidden" filter)
+  // ---------------------------------------------------------------------
+  async function toggleHidden() {
+    if (!state.viewer.current) return;
+    const newVal = !state.viewer.current.excluded;
+    hideBtn.disabled = true;
+    try {
+      const res = await postEdit(state.viewer.current.file_hash, "excluded", newVal);
+      if (res.status === 401) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "Could not update — try again.");
+        return;
+      }
+      if (newVal && !state.filters.show_hidden) {
+        // Just hidden, and the current view doesn't show hidden items --
+        // it no longer matches anything currently on screen (grid or
+        // viewer), per spec. Close back to the grid rather than keep
+        // displaying an item that's supposed to have disappeared.
+        closeViewer();
+      } else {
+        renderViewerItem(data.item);
+      }
+      loadGridPage({ keepPageNum: true });
+      refreshStats();
+    } finally {
+      hideBtn.disabled = false;
+    }
+  }
+  hideBtn.addEventListener("click", toggleHidden);
 
   // ---------------------------------------------------------------------
   // Init

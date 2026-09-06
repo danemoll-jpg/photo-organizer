@@ -70,6 +70,10 @@ def _migrate(conn: sqlite3.Connection, logger: logging.Logger) -> None:
         ("gps_lon", "REAL"),
         ("location_name", "TEXT"),
         ("gps_checked", "INTEGER NOT NULL DEFAULT 0"),
+        # Phase 2f "Hide from library" -- see schema.sql/photo-organizer-spec.md.
+        # Defaults to 0 for every pre-existing row, which is exactly right:
+        # nothing was ever hidden before this column existed.
+        ("excluded", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE photos ADD COLUMN {col} {ddl}")
