@@ -51,6 +51,20 @@ to viewer/slideshow navigation (/api/nav), per spec. See
 _build_filters/_build_extra_predicate for how the two different filter
 "sources" (plain DB columns vs. the live captions cache) are combined.
 
+Grid/Viewer nav cleanup follow-up: the Location and Tag filters became
+dropdown/autocomplete controls fed by /api/facets (distinct known values
+from the DB — `tags.tag_name` and `photos.location_name`), instead of
+free-text search, so the user picks a real existing value instead of
+guessing spelling/formatting. `location` matching switched from substring
+LIKE to an exact match to match dropdown semantics. The old standalone
+GPS has/no-location toggle was folded into the same Location dropdown as
+a "No location" option (still `has_location=no` under the hood — see
+_build_filters) since it was otherwise redundant. The old free-text
+"Folder contains" filter was removed from the UI (redundant with the
+date-range pickers given the YYYY/YYYY-MM layout) — the `folder` query
+param itself stays supported server-side (harmless, still covered by
+existing tests) even though nothing in the UI sends it anymore.
+
 Phase 2d added remote/shared access: real session-based login (see
 src/auth.py — a small local username+password list in config.yaml's
 review_users, rate-limited, NOT HTTP Basic Auth), meant to be reached
@@ -179,7 +193,7 @@ def _build_filters(args) -> tuple[str, list]:
     """Shared WHERE-clause builder for every query below: date range
     (against date_taken -- ISO8601 text sorts correctly lexicographically)
     + folder substring (against current_path) + GPS/location (Phase 2c:
-    place-name substring against `location_name`, and/or a has/no-location
+    place-name filter against `location_name`, and/or a has/no-location
     toggle against the same column). All of these are plain DB columns, so
     they stay on the cheap indexed-or-LIKE SQL path. Tag and
     caption-keyword filtering (also Phase 2c) are deliberately NOT here --
@@ -188,6 +202,13 @@ def _build_filters(args) -> tuple[str, list]:
     earlier judgment call — see module docstring): they're plain `photos`
     rows like any other, filtered the same way. Returns
     (sql_fragment_after_WHERE, params).
+
+    `location` is an EXACT match, not substring -- since the Grid/Viewer
+    nav cleanup follow-up, the client only ever sends a value picked from
+    /api/facets' list of real, already-existing `location_name` values, so
+    there's no spelling/formatting to fuzzy-match against anymore. `folder`
+    stays substring/LIKE -- it has no dropdown, and no source of truth for
+    "every folder" to pick from the way tags/locations do.
     """
     clauses = ["1=1"]
     params: list = []
@@ -206,8 +227,8 @@ def _build_filters(args) -> tuple[str, list]:
         clauses.append("current_path LIKE ?")
         params.append(f"%{folder}%")
     if location:
-        clauses.append("location_name LIKE ?")
-        params.append(f"%{location}%")
+        clauses.append("location_name = ?")
+        params.append(location)
     if has_location == "yes":
         clauses.append("location_name IS NOT NULL")
     elif has_location == "no":
@@ -542,6 +563,38 @@ def index():
         current_user=session.get("user"),
         logout_csrf=session.get("_csrf"),
     )
+
+
+@app.route("/api/facets")
+def api_facets():
+    """Distinct known values for the grid's Location and Tag filter
+    controls (Grid/Viewer nav cleanup follow-up) -- backed by the DB
+    (`tags.tag_name`, `photos.location_name`), not the live captions.jsonl
+    cache, since this just needs a reasonable list to pick from, not
+    up-to-the-second freshness. Actual filtering is unaffected by that lag:
+    tag matching still goes through _build_extra_predicate against the live
+    cache exactly as before (see its docstring) -- the Tag control is a
+    free-text <input> with a <datalist> of these suggestions, not a closed
+    <select>, so a brand new tag from an in-progress Phase 2 run that
+    hasn't reached `main.py load-captions` yet is still filterable if typed
+    exactly. Location IS a closed <select> (see _build_filters' note on why
+    it can be exact-match), so a location added to the DB by extract-gps
+    after the page loaded won't appear until the next page load/refresh --
+    acceptable since extract-gps is a fast, user-run, occasional step (see
+    CLAUDE.md), not a multi-day background process like Phase 2 captioning.
+    """
+    conn = get_db()
+    try:
+        tags = [r[0] for r in conn.execute(
+            "SELECT tag_name FROM tags ORDER BY tag_name COLLATE NOCASE"
+        ).fetchall()]
+        locations = [r[0] for r in conn.execute(
+            "SELECT DISTINCT location_name FROM photos "
+            "WHERE location_name IS NOT NULL ORDER BY location_name COLLATE NOCASE"
+        ).fetchall()]
+    finally:
+        conn.close()
+    return jsonify({"tags": tags, "locations": locations})
 
 
 @app.route("/api/stats")

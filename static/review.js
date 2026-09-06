@@ -27,12 +27,36 @@
  *   show a play-icon placeholder instead of a decoded thumbnail, and the
  *   viewer swaps in a real <video> element (playing /video/<hash> — see
  *   renderViewerItem) in place of the <img> used for photos.
+ *
+ * Grid/Viewer nav control cleanup (this follow-up):
+ *   - The viewer's top+bottom nav-control duplication (added, then found
+ *     to have been built in the wrong place) is REVERTED — the viewer is
+ *     back to a single set of controls, referenced by id like before that
+ *     feature ever existed.
+ *   - The grid's page-number/prev-next pager gets that duplication
+ *     instead (top+bottom of the thumbnail grid) — see the grid-prev-btn/
+ *     grid-next-btn/grid-page-info NodeLists below, same "shared classes,
+ *     every copy kept in sync" pattern the viewer used to use.
+ *   - Location and Tag filters are now backed by /api/facets (distinct
+ *     known values from the DB): Location is a closed <select> (folds in
+ *     the old standalone GPS has/no-location toggle as a "No location"
+ *     option), Tag is a free-text <input> with a <datalist> of
+ *     suggestions (196 distinct tags at last count — too many for a
+ *     comfortable plain <select>, but exact-match filtering still works
+ *     for any value typed, listed or not — see _build_extra_predicate).
+ *   - The old free-text "Folder contains" filter is removed (redundant
+ *     with the date-range pickers given the YYYY/YYYY-MM layout).
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
 
+  // Sentinel value for the Location dropdown's "No location" option —
+  // translated to has_location=no rather than sent as a literal location
+  // name (see currentFilterParams).
+  const NO_LOCATION_VALUE = "__no_location__";
+
   const state = {
-    filters: { date_from: "", date_to: "", folder: "", tag: "", caption_kw: "", location: "", has_location: "" },
+    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "" },
     pageSize: cfg.pageSize,
     grid: { items: [], firstCursor: null, lastCursor: null, hasNext: false, hasPrev: false, pageNum: 1 },
     viewer: {
@@ -52,9 +76,16 @@
   const statsEl = el("stats");
   const gridEl = el("grid");
   const gridEmptyEl = el("grid-empty");
-  const gridPageInfo = el("grid-page-info");
-  const gridPrevBtn = el("grid-prev");
-  const gridNextBtn = el("grid-next");
+
+  // Grid pager is duplicated top+bottom in the HTML (same classes, no ids
+  // -- ids must be unique) so every group below is a NodeList of BOTH
+  // copies. Every handler operates on the whole list so the two copies can
+  // never show conflicting state (e.g. one page ahead of the other).
+  const els = (cls) => document.querySelectorAll("." + cls);
+  const forEach = (list, fn) => list.forEach(fn);
+  const gridPageInfoEls = els("grid-page-info");
+  const gridPrevBtnEls = els("grid-prev-btn");
+  const gridNextBtnEls = els("grid-next-btn");
 
   const viewerEl = el("viewer");
   const viewerImg = el("viewer-img");
@@ -65,19 +96,10 @@
   const viewerCaption = el("viewer-caption");
   const viewerTags = el("viewer-tags");
   const viewerLocation = el("viewer-location");
-
-  // Nav controls are duplicated top+bottom in the HTML (same classes, no
-  // ids -- ids must be unique) so every group below is a NodeList of BOTH
-  // copies. Every handler operates on the whole list so the two copies can
-  // never show conflicting state (e.g. one saying "Play", the other "Pause").
-  const els = (cls) => document.querySelectorAll("." + cls);
-  const viewerPlayPauseEls = els("viewer-playpause-btn");
-  const viewerIntervalEls = els("viewer-interval-input");
-  const viewerRandomBtnEls = els("viewer-random-btn");
-  const viewerOrderSelectEls = els("viewer-order-select");
-  const viewerPrevBtnEls = els("viewer-prev-btn");
-  const viewerNextBtnEls = els("viewer-next-btn");
-  const forEach = (list, fn) => list.forEach(fn);
+  const viewerPlayPause = el("viewer-playpause");
+  const viewerInterval = el("viewer-interval");
+  const viewerRandomBtn = el("viewer-random");
+  const viewerOrderSelect = el("viewer-order");
 
   // ---- persisted slideshow interval (per-browser convenience only) ----
   try {
@@ -86,7 +108,7 @@
       const secs = parseFloat(saved);
       if (secs > 0) {
         state.viewer.intervalMs = secs * 1000;
-        forEach(viewerIntervalEls, (elm) => { elm.value = secs; });
+        viewerInterval.value = secs;
       }
     }
   } catch (e) { /* localStorage unavailable -- fine, just use the config default */ }
@@ -102,10 +124,10 @@
   function currentFilterParams() {
     // Note: no "people" param — the people/faces filter is deliberately
     // inert (disabled control, Phase 3 doesn't exist yet) and never sent.
+    // Note: no "folder" param — that filter was removed from the UI.
     return {
       date_from: state.filters.date_from,
       date_to: state.filters.date_to,
-      folder: state.filters.folder,
       tag: state.filters.tag,
       caption_kw: state.filters.caption_kw,
       location: state.filters.location,
@@ -156,6 +178,30 @@
   }
 
   // ---------------------------------------------------------------------
+  // Facets (Location/Tag dropdown+autocomplete data)
+  // ---------------------------------------------------------------------
+  async function loadFacets() {
+    try {
+      const data = await fetchJSON("/api/facets");
+      const locSel = el("f-location");
+      for (const name of data.locations || []) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        locSel.appendChild(opt);
+      }
+      const tagList = el("f-tag-list");
+      for (const name of data.tags || []) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        tagList.appendChild(opt);
+      }
+    } catch (e) {
+      // Non-fatal: filters just show "Any"/no suggestions until reloaded.
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Stats
   // ---------------------------------------------------------------------
   async function refreshStats() {
@@ -196,9 +242,10 @@
       card.addEventListener("click", () => openViewer(item));
       gridEl.appendChild(card);
     }
-    gridPrevBtn.disabled = !state.grid.hasPrev;
-    gridNextBtn.disabled = !state.grid.hasNext;
-    gridPageInfo.textContent = state.grid.items.length ? `Page ${state.grid.pageNum}` : "—";
+    forEach(gridPrevBtnEls, (btn) => { btn.disabled = !state.grid.hasPrev; });
+    forEach(gridNextBtnEls, (btn) => { btn.disabled = !state.grid.hasNext; });
+    const pageText = state.grid.items.length ? `Page ${state.grid.pageNum}` : "—";
+    forEach(gridPageInfoEls, (span) => { span.textContent = pageText; });
   }
 
   async function loadGridPage({ after, before, resetPageNum } = {}) {
@@ -217,12 +264,12 @@
     renderGrid();
   }
 
-  el("grid-next").addEventListener("click", () => {
+  forEach(gridNextBtnEls, (btn) => btn.addEventListener("click", () => {
     if (state.grid.hasNext) loadGridPage({ after: state.grid.lastCursor });
-  });
-  el("grid-prev").addEventListener("click", () => {
+  }));
+  forEach(gridPrevBtnEls, (btn) => btn.addEventListener("click", () => {
     if (state.grid.hasPrev) loadGridPage({ before: state.grid.firstCursor });
-  });
+  }));
   el("f-pagesize").addEventListener("change", (e) => {
     state.pageSize = parseInt(e.target.value, 10);
     loadGridPage({ resetPageNum: true });
@@ -234,11 +281,20 @@
   function applyFilters() {
     state.filters.date_from = el("f-date-from").value;
     state.filters.date_to = el("f-date-to").value;
-    state.filters.folder = el("f-folder").value.trim();
     state.filters.tag = el("f-tag").value.trim();
     state.filters.caption_kw = el("f-caption-kw").value.trim();
-    state.filters.location = el("f-location").value.trim();
-    state.filters.has_location = el("f-has-location").value;
+    // Location dropdown: the "No location" option reproduces the old
+    // standalone GPS toggle's has_location=no semantics (matches both
+    // "checked, nothing found" and "never checked" rows) instead of
+    // sending a literal location name.
+    const locValue = el("f-location").value;
+    if (locValue === NO_LOCATION_VALUE) {
+      state.filters.location = "";
+      state.filters.has_location = "no";
+    } else {
+      state.filters.location = locValue;
+      state.filters.has_location = "";
+    }
     loadGridPage({ resetPageNum: true });
     refreshStats();
     // The filtered set just changed size/membership -- any in-progress
@@ -249,17 +305,15 @@
     else { state.viewer.randomSeed = null; state.viewer.randomIdx = 0; }
   }
   el("f-apply").addEventListener("click", applyFilters);
-  for (const id of ["f-folder", "f-tag", "f-caption-kw", "f-location"]) {
+  for (const id of ["f-tag", "f-caption-kw"]) {
     el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
   }
   el("f-reset").addEventListener("click", () => {
     el("f-date-from").value = "";
     el("f-date-to").value = "";
-    el("f-folder").value = "";
     el("f-tag").value = "";
     el("f-caption-kw").value = "";
     el("f-location").value = "";
-    el("f-has-location").value = "";
     applyFilters();
   });
 
@@ -372,7 +426,7 @@
     }
     renderViewerItem(data.item);
   }
-  forEach(viewerRandomBtnEls, (btn) => btn.addEventListener("click", jumpRandom));
+  viewerRandomBtn.addEventListener("click", jumpRandom);
 
   // Fetches idx 0 of a brand-new random-order seed and shows it -- used
   // both when the order toggle is switched to Random and when the active
@@ -414,22 +468,19 @@
     renderViewerItem(data.item);
   }
 
-  forEach(viewerOrderSelectEls, (sel) => sel.addEventListener("change", (e) => {
+  viewerOrderSelect.addEventListener("change", (e) => {
     state.viewer.order = e.target.value;
-    // Keep the other copy of the select in sync (top <-> bottom) without
-    // re-firing this same change handler on it.
-    forEach(viewerOrderSelectEls, (other) => { other.value = state.viewer.order; });
     if (state.viewer.order === "random") startRandomOrder();
-  }));
+  });
 
-  forEach(viewerNextBtnEls, (btn) => btn.addEventListener("click", () => {
+  el("viewer-next").addEventListener("click", () => {
     if (state.viewer.order === "random") stepRandomNav("next", { manual: true });
     else stepViewer("next", { manual: true });
-  }));
-  forEach(viewerPrevBtnEls, (btn) => btn.addEventListener("click", () => {
+  });
+  el("viewer-prev").addEventListener("click", () => {
     if (state.viewer.order === "random") stepRandomNav("prev", { manual: true });
     else stepViewer("prev", { manual: true });
-  }));
+  });
 
   function autoStep() {
     if (state.viewer.order === "random") stepRandomNav("next");
@@ -438,19 +489,15 @@
 
   function startSlideshow() {
     state.viewer.playing = true;
-    forEach(viewerPlayPauseEls, (btn) => {
-      btn.textContent = "⏸ Pause";
-      btn.classList.add("playing");
-    });
+    viewerPlayPause.textContent = "⏸ Pause";
+    viewerPlayPause.classList.add("playing");
     clearInterval(state.viewer.timer);
     state.viewer.timer = setInterval(autoStep, state.viewer.intervalMs);
   }
   function pauseSlideshow() {
     state.viewer.playing = false;
-    forEach(viewerPlayPauseEls, (btn) => {
-      btn.textContent = "▶ Play";
-      btn.classList.remove("playing");
-    });
+    viewerPlayPause.textContent = "▶ Play";
+    viewerPlayPause.classList.remove("playing");
     clearInterval(state.viewer.timer);
     state.viewer.timer = null;
   }
@@ -459,21 +506,20 @@
     if (state.viewer.playing) pauseSlideshow();
     else startSlideshow();
   }
-  forEach(viewerPlayPauseEls, (btn) => btn.addEventListener("click", toggleSlideshow));
+  viewerPlayPause.addEventListener("click", toggleSlideshow);
 
-  forEach(viewerIntervalEls, (input) => input.addEventListener("change", () => {
-    const secs = Math.max(0.5, parseFloat(input.value) || cfg.slideshowSeconds);
+  viewerInterval.addEventListener("change", () => {
+    const secs = Math.max(0.5, parseFloat(viewerInterval.value) || cfg.slideshowSeconds);
     state.viewer.intervalMs = secs * 1000;
-    // Keep the other copy's field in sync (top <-> bottom).
-    forEach(viewerIntervalEls, (other) => { other.value = secs; });
     try { localStorage.setItem("review_slideshow_seconds", String(secs)); } catch (e) { /* ignore */ }
     if (state.viewer.playing) startSlideshow(); // restart with the new interval immediately
-  }));
+  });
 
   // ---------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------
   loadGridPage({ resetPageNum: true });
   refreshStats();
+  loadFacets();
   setInterval(refreshStats, 30000); // periodic, cheap: lets "captioned so far" creep up live while the tool sits open
 })();

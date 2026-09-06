@@ -21,6 +21,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import piexif
 from PIL import Image
@@ -87,6 +88,13 @@ def _setup(tmp: Path):
     insert("h4", p4, "2021-06-04T09:00:00", location_name=None, gps_checked=0)  # never checked
     insert("h5", p5, "2021-06-05T09:00:00", location_name="Miami, FL", gps_checked=1)
     insert("h6_video", video, "2021-06-06T09:00:00", is_video=True)
+    # Mirrors what `main.py load-captions` would have loaded from the
+    # captions.jsonl below (tags: beach / birthday / cake) -- populated
+    # here directly rather than actually running the loader, since only
+    # /api/facets (Grid/Viewer nav cleanup) reads this table; tag
+    # *filtering* itself still goes through the live captions cache, not
+    # this table (see _build_extra_predicate).
+    conn.execute("INSERT INTO tags (tag_name) VALUES ('beach'), ('birthday'), ('cake')")
     conn.commit()
     conn.close()
 
@@ -142,10 +150,14 @@ def test_new_filters_alone(tmp: Path) -> None:
     assert hashes == {"h3"}, hashes
     print("  caption_kw=candles -> exactly the birthday-cake photo  OK")
 
-    resp = client.get("/api/photos?location=Miami&limit=50")
+    # Grid/Viewer nav cleanup: `location` is now an EXACT match (the client
+    # only ever sends a value picked from /api/facets' real, already-stored
+    # location_name values, not an arbitrary substring) -- see
+    # review_tool.py's _build_filters docstring.
+    resp = client.get("/api/photos?location=Miami%2C+FL&limit=50")
     hashes = {i["file_hash"] for i in resp.get_json()["items"]}
     assert hashes == {"h1", "h5"}, hashes
-    print("  location=Miami -> exactly the 2 Miami photos  OK")
+    print("  location=Miami, FL (exact) -> exactly the 2 Miami photos  OK")
 
     resp = client.get("/api/photos?has_location=yes&limit=50")
     hashes = {i["file_hash"] for i in resp.get_json()["items"]}
@@ -169,6 +181,24 @@ def test_new_filters_alone(tmp: Path) -> None:
     resp = client.get("/api/photos?tag=nonexistent-tag&limit=50")
     assert resp.get_json()["items"] == []
     print("  a tag with zero matches returns an empty (not broken) result  OK")
+
+
+def test_facets_endpoint(tmp: Path) -> None:
+    print("\n=== Grid/Viewer nav cleanup: /api/facets (Location/Tag dropdown data) ===")
+    _rt, client = _setup(tmp)
+
+    resp = client.get("/api/facets")
+    data = resp.get_json()
+    assert data["tags"] == ["beach", "birthday", "cake"], data["tags"]
+    assert data["locations"] == ["Marietta, GA", "Miami, FL"], data["locations"]
+    print("  distinct tags (from `tags` table) and locations (from `photos.location_name`), both sorted  OK")
+
+    # The dropdown's values must actually work as exact-match filters
+    # against the endpoints that matter (see _build_filters' docstring).
+    resp = client.get(f"/api/photos?location={quote(data['locations'][1])}&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h1", "h5"}, hashes
+    print("  a facet-supplied location value round-trips through /api/photos correctly  OK")
 
 
 def test_people_filter_is_inert(tmp: Path) -> None:
@@ -313,6 +343,7 @@ def main() -> None:
     print(f"Working in {tmp}")
     try:
         test_new_filters_alone(tmp)
+        test_facets_endpoint(tmp)
         test_people_filter_is_inert(tmp)
         test_nav_respects_new_filters(tmp)
         test_random_button_respects_filters(tmp)
