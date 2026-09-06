@@ -74,6 +74,7 @@ from PIL import Image
 from src.auth import register_auth
 from src.config import Config, load_config
 from src.logging_setup import setup_logging
+from src.port_check import listening_pids
 from src.storage import PhotoStorage, get_storage
 
 try:
@@ -781,6 +782,26 @@ def main() -> None:
         print("Add one with: venv\\Scripts\\python main.py review-user add <username>")
 
     port = args.port or _cfg.review_tool_port
+
+    # Cheap warning, not a hard block (see dashboard.py's Remote Access
+    # panel / CLAUDE.md for the real incident this guards against): if
+    # something's already bound to this port, launching another instance
+    # anyway is exactly how stale duplicate processes stack up. A genuine
+    # restart-after-crash false positive (previous process still releasing
+    # the socket) is possible but rare and harmless to just notice —
+    # Flask's own bind attempt below will fail loudly if the port is
+    # truly taken, so this is purely an early, clearer heads-up.
+    existing_pids = listening_pids(port)
+    if existing_pids:
+        print(
+            f"WARNING: {len(existing_pids)} process(es) already appear to be listening on "
+            f"port {port} (PID(s): {', '.join(str(p) for p in existing_pids)}). If one of "
+            "those predates a recent code change (e.g. an auth/security fix), it's still "
+            "silently serving the OLD version — this exact pattern caused a real (if "
+            "temporary) auth bypass before. Consider stopping the other instance(s) first "
+            "(Task Manager, or PowerShell's Stop-Process -Id <pid> -Force)."
+        )
+
     url = f"http://{args.host if args.host != '0.0.0.0' else '127.0.0.1'}:{port}/"
     print(f"Photo Organizer review tool — read-only against {_cfg.db_path_abs} and {_cfg.captions_path_abs}")
     print(f"Log file: {log_path}")

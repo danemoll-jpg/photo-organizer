@@ -57,10 +57,19 @@
   const viewerCaption = el("viewer-caption");
   const viewerTags = el("viewer-tags");
   const viewerLocation = el("viewer-location");
-  const viewerPlayPause = el("viewer-playpause");
-  const viewerInterval = el("viewer-interval");
-  const viewerRandomBtn = el("viewer-random");
-  const viewerOrderSelect = el("viewer-order");
+
+  // Nav controls are duplicated top+bottom in the HTML (same classes, no
+  // ids -- ids must be unique) so every group below is a NodeList of BOTH
+  // copies. Every handler operates on the whole list so the two copies can
+  // never show conflicting state (e.g. one saying "Play", the other "Pause").
+  const els = (cls) => document.querySelectorAll("." + cls);
+  const viewerPlayPauseEls = els("viewer-playpause-btn");
+  const viewerIntervalEls = els("viewer-interval-input");
+  const viewerRandomBtnEls = els("viewer-random-btn");
+  const viewerOrderSelectEls = els("viewer-order-select");
+  const viewerPrevBtnEls = els("viewer-prev-btn");
+  const viewerNextBtnEls = els("viewer-next-btn");
+  const forEach = (list, fn) => list.forEach(fn);
 
   // ---- persisted slideshow interval (per-browser convenience only) ----
   try {
@@ -69,7 +78,7 @@
       const secs = parseFloat(saved);
       if (secs > 0) {
         state.viewer.intervalMs = secs * 1000;
-        viewerInterval.value = secs;
+        forEach(viewerIntervalEls, (elm) => { elm.value = secs; });
       }
     }
   } catch (e) { /* localStorage unavailable -- fine, just use the config default */ }
@@ -321,7 +330,7 @@
     }
     renderViewerItem(data.item);
   }
-  viewerRandomBtn.addEventListener("click", jumpRandom);
+  forEach(viewerRandomBtnEls, (btn) => btn.addEventListener("click", jumpRandom));
 
   // Fetches idx 0 of a brand-new random-order seed and shows it -- used
   // both when the order toggle is switched to Random and when the active
@@ -363,19 +372,22 @@
     renderViewerItem(data.item);
   }
 
-  viewerOrderSelect.addEventListener("change", (e) => {
+  forEach(viewerOrderSelectEls, (sel) => sel.addEventListener("change", (e) => {
     state.viewer.order = e.target.value;
+    // Keep the other copy of the select in sync (top <-> bottom) without
+    // re-firing this same change handler on it.
+    forEach(viewerOrderSelectEls, (other) => { other.value = state.viewer.order; });
     if (state.viewer.order === "random") startRandomOrder();
-  });
+  }));
 
-  el("viewer-next").addEventListener("click", () => {
+  forEach(viewerNextBtnEls, (btn) => btn.addEventListener("click", () => {
     if (state.viewer.order === "random") stepRandomNav("next", { manual: true });
     else stepViewer("next", { manual: true });
-  });
-  el("viewer-prev").addEventListener("click", () => {
+  }));
+  forEach(viewerPrevBtnEls, (btn) => btn.addEventListener("click", () => {
     if (state.viewer.order === "random") stepRandomNav("prev", { manual: true });
     else stepViewer("prev", { manual: true });
-  });
+  }));
 
   function autoStep() {
     if (state.viewer.order === "random") stepRandomNav("next");
@@ -384,15 +396,19 @@
 
   function startSlideshow() {
     state.viewer.playing = true;
-    viewerPlayPause.textContent = "⏸ Pause";
-    viewerPlayPause.classList.add("playing");
+    forEach(viewerPlayPauseEls, (btn) => {
+      btn.textContent = "⏸ Pause";
+      btn.classList.add("playing");
+    });
     clearInterval(state.viewer.timer);
     state.viewer.timer = setInterval(autoStep, state.viewer.intervalMs);
   }
   function pauseSlideshow() {
     state.viewer.playing = false;
-    viewerPlayPause.textContent = "▶ Play";
-    viewerPlayPause.classList.remove("playing");
+    forEach(viewerPlayPauseEls, (btn) => {
+      btn.textContent = "▶ Play";
+      btn.classList.remove("playing");
+    });
     clearInterval(state.viewer.timer);
     state.viewer.timer = null;
   }
@@ -401,14 +417,16 @@
     if (state.viewer.playing) pauseSlideshow();
     else startSlideshow();
   }
-  viewerPlayPause.addEventListener("click", toggleSlideshow);
+  forEach(viewerPlayPauseEls, (btn) => btn.addEventListener("click", toggleSlideshow));
 
-  viewerInterval.addEventListener("change", () => {
-    const secs = Math.max(0.5, parseFloat(viewerInterval.value) || cfg.slideshowSeconds);
+  forEach(viewerIntervalEls, (input) => input.addEventListener("change", () => {
+    const secs = Math.max(0.5, parseFloat(input.value) || cfg.slideshowSeconds);
     state.viewer.intervalMs = secs * 1000;
+    // Keep the other copy's field in sync (top <-> bottom).
+    forEach(viewerIntervalEls, (other) => { other.value = secs; });
     try { localStorage.setItem("review_slideshow_seconds", String(secs)); } catch (e) { /* ignore */ }
     if (state.viewer.playing) startSlideshow(); // restart with the new interval immediately
-  });
+  }));
 
   // ---------------------------------------------------------------------
   // Init

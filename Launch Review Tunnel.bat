@@ -6,10 +6,16 @@ rem
 rem One-time setup (per machine) BEFORE this launcher will work -- see
 rem README.md's "Remote access" section for the full walkthrough:
 rem   1. cloudflared tunnel login
-rem   2. cloudflared tunnel create photo-organizer
+rem   2. cloudflared tunnel create photo-viewer
 rem   3. Write %USERPROFILE%\.cloudflared\config.yml (see
 rem      cloudflared-config.example.yml in this repo for the template)
-rem   4. cloudflared tunnel route dns photo-organizer <your-hostname>
+rem   4. cloudflared tunnel route dns photo-viewer <your-hostname>
+rem
+rem "photo-viewer" is this project's actual tunnel name (already created
+rem and confirmed working end-to-end -- see CLAUDE.md's Phase 2d
+rem checkpoint), not a placeholder -- also config-driven as
+rem cloudflare_tunnel_name in config.yaml for dashboard.py's Remote Access
+rem panel, which runs the exact same `cloudflared tunnel run` command.
 rem
 rem review_tool.py itself must ALSO be running (Launch Review Tool.bat) --
 rem this tunnel only forwards to http://127.0.0.1:<review_tool_port>, it
@@ -36,7 +42,7 @@ if not exist "%USERPROFILE%\.cloudflared\config.yml" (
     exit /b 1
 )
 
-cloudflared tunnel run photo-organizer
+cloudflared tunnel run photo-viewer
 
 echo.
 echo Tunnel stopped -- review_tool.py is no longer reachable remotely (it's

@@ -129,3 +129,12 @@ login_rate_limit_window_seconds: 900
 # today — groundwork only for a possible future cloud-storage backend
 # (S3/B2/etc.), see src/storage.py. Do not change this.
 storage_backend: "local"
+
+# --- Phase 2d follow-up: Remote Access panel (dashboard.py) ---
+# The Cloudflare Tunnel's name, exactly as registered via
+# `cloudflared tunnel create <name>` (see README.md's "Remote access"
+# section) — config-driven per this project's own rule rather than
+# hardcoded, since it's specific to whichever Cloudflare account/machine
+# this is set up on. dashboard.py's "Remote Access" panel runs
+# `cloudflared tunnel run <this>` for its Start Tunnel button.
+cloudflare_tunnel_name: "photo-viewer"

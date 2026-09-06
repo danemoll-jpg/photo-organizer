@@ -86,19 +86,40 @@
       <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people" class="placeholder">Face detection isn't built yet (Phase 3) — this will show who's in the photo once it is.</span></div>
     </div>
 
-    <div class="viewer-controls">
-      <button id="viewer-prev" title="Previous (&larr;)">&larr; Prev</button>
-      <button id="viewer-random" title="Jump to a random matching photo">&#128256; Random</button>
-      <button id="viewer-playpause" class="play">&#9654; Play</button>
-      <button id="viewer-next" title="Next (&rarr;)">Next &rarr;</button>
+    <!-- Nav controls, duplicated top+bottom (see review.js) so mobile/long-page
+         users never have to scroll back up just to step to the next photo.
+         Both copies share classes (not ids -- ids must be unique) and are
+         wired to the exact same handlers/state, kept in sync either way. -->
+    <div class="viewer-controls viewer-controls-top">
+      <button class="viewer-prev-btn" title="Previous (&larr;)">&larr; Prev</button>
+      <button class="viewer-random-btn" title="Jump to a random matching photo">&#128256; Random</button>
+      <button class="viewer-playpause-btn play">&#9654; Play</button>
+      <button class="viewer-next-btn" title="Next (&rarr;)">Next &rarr;</button>
       <label class="order-label">Order
-        <select id="viewer-order">
+        <select class="viewer-order-select">
           <option value="chronological" selected>Chronological</option>
           <option value="random">Random</option>
         </select>
       </label>
       <label class="interval-label">Every
-        <input type="number" id="viewer-interval" min="1" max="600" step="0.5" value="{{ slideshow_seconds }}">
+        <input type="number" class="viewer-interval-input" min="1" max="600" step="0.5" value="{{ slideshow_seconds }}">
+        sec
+      </label>
+    </div>
+
+    <div class="viewer-controls viewer-controls-bottom">
+      <button class="viewer-prev-btn" title="Previous (&larr;)">&larr; Prev</button>
+      <button class="viewer-random-btn" title="Jump to a random matching photo">&#128256; Random</button>
+      <button class="viewer-playpause-btn play">&#9654; Play</button>
+      <button class="viewer-next-btn" title="Next (&rarr;)">Next &rarr;</button>
+      <label class="order-label">Order
+        <select class="viewer-order-select">
+          <option value="chronological" selected>Chronological</option>
+          <option value="random">Random</option>
+        </select>
+      </label>
+      <label class="interval-label">Every
+        <input type="number" class="viewer-interval-input" min="1" max="600" step="0.5" value="{{ slideshow_seconds }}">
         sec
       </label>
     </div>

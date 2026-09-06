@@ -88,6 +88,15 @@ class Config:
     # rewrite of review_tool.py — see photo-organizer-spec.md's Phase 2d.
     storage_backend: str = "local"
 
+    # Phase 2d follow-up: dashboard.py's Remote Access panel runs
+    # `cloudflared tunnel run <this>` for its Start Tunnel button. The
+    # tunnel's actual name is specific to whichever Cloudflare account/
+    # machine set it up (`cloudflared tunnel create <name>` — see
+    # README.md's "Remote access" section), so this is config-driven per
+    # rule 4 rather than hardcoded in dashboard.py. Default matches this
+    # user's own already-confirmed-working tunnel (see CLAUDE.md).
+    cloudflare_tunnel_name: str = "photo-viewer"
+
     # --- derived, absolute paths ---
     @property
     def dest_root_path(self) -> Path:
@@ -176,6 +185,7 @@ def load_config(path: Path | None = None) -> Config:
         login_rate_limit_attempts=raw.get("login_rate_limit_attempts", 5),
         login_rate_limit_window_seconds=raw.get("login_rate_limit_window_seconds", 900),
         storage_backend=raw.get("storage_backend", "local"),
+        cloudflare_tunnel_name=raw.get("cloudflare_tunnel_name", "photo-viewer"),
     )
 
 

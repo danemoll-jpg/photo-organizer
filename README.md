@@ -65,6 +65,12 @@ duplicate any scan/date-resolve/copy-verify-delete logic, it just calls into
 - **Log viewer** — pick any `logs/organize_*.log` from the dropdown to
   browse it, or leave "Auto-tail active run" checked to watch the current
   run's log live. Same log files the CLI writes — no separate GUI-only log.
+- **Remote Access** — Phase 2d follow-up. Start/Stop buttons for the
+  Cloudflare Tunnel (see "Phase 2d — remote/shared access" below), plus a
+  status line for `review_tool.py` itself that specifically checks what's
+  bound to its configured port and warns clearly if more than one process
+  is involved — see this panel's docstring in `dashboard.py` for the real
+  incident that motivated the port check.
 
 `main.py`'s CLI commands keep working exactly as before; the dashboard is an
 additional front end, not a replacement.
@@ -257,7 +263,11 @@ organize/caption/extract-gps itself.
   pauses the slideshow rather than fighting with it. Stepping past the
   last photo on a page — or just letting the slideshow run — transparently
   keeps going into the next page's photos; there's no page-boundary
-  dead-end.
+  dead-end. The nav controls (Prev/Random/Play-Pause/Next/Order/interval)
+  are duplicated at both the top and bottom of the viewer — handy on
+  mobile or a tall photo, so you're never stuck scrolling back up just to
+  step to the next one; both copies stay in sync with each other either
+  way.
 - **Random navigation**: a **Random** button jumps to a random photo within
   the currently active filters (a one-off "surprise me", separate from
   slideshow order below). The slideshow's **Order** control toggles between
@@ -333,11 +343,13 @@ domain to use — this step needs to be done by you interactively, it's
 your account.
 
 ```bash
-cloudflared tunnel create photo-organizer
+cloudflared tunnel create photo-viewer
 ```
 Creates the tunnel and writes a credentials file to
 `%USERPROFILE%\.cloudflared\<tunnel-id>.json`. Note the tunnel ID it
-prints.
+prints. (`photo-viewer` is just a name you choose here — this project's
+own already-set-up tunnel uses that name, confirmed working end-to-end;
+pick whatever you like if setting this up fresh.)
 
 Create `%USERPROFILE%\.cloudflared\config.yml` — see
 **`cloudflared-config.example.yml`** in this repo for the exact template
@@ -345,7 +357,7 @@ Create `%USERPROFILE%\.cloudflared\config.yml` — see
 e.g. `photos.yourdomain.com`).
 
 ```bash
-cloudflared tunnel route dns photo-organizer photos.yourdomain.com
+cloudflared tunnel route dns photo-viewer photos.yourdomain.com
 ```
 Adds the DNS record in Cloudflare pointing that hostname at your tunnel.
 
@@ -354,10 +366,16 @@ From then on, whenever you want remote access live:
    its default `127.0.0.1` binding, **don't** pass `--host 0.0.0.0` for
    this. cloudflared reaches it over loopback only, so the app itself
    never needs to listen on a LAN/router-facing interface at all.
-2. Run **`Launch Review Tunnel.bat`** (or `cloudflared tunnel run
-   photo-organizer`) — keep its window open too. Closing it takes the
-   tunnel down; `review_tool.py` keeps running locally, just no longer
-   reachable from outside until the tunnel's back up.
+2. Run **`Launch Review Tunnel.bat`**, or use `dashboard.py`'s **Remote
+   Access** panel's Start/Stop buttons (either just runs `cloudflared
+   tunnel run <cloudflare_tunnel_name from config.yaml, default
+   "photo-viewer">` for you) — keep it running for as long as you want
+   the tunnel up. Stopping it (or closing the dashboard, if it started
+   the tunnel) takes the tunnel down; `review_tool.py` keeps running
+   locally, just no longer reachable from outside until the tunnel's back
+   up. The dashboard panel also warns if more than one `review_tool.py`
+   process turns out to be bound to its port — see the incident note in
+   CLAUDE.md this was added to catch.
 3. Share `https://photos.yourdomain.com` (or whatever hostname you
    routed) with whoever you added a login for in step 1.
 

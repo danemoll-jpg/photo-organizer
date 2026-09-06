@@ -43,6 +43,41 @@ Panels:
   user's explicit "no terminal" instruction for this panel. Collapsed by
   default (start_expanded=False) — this is an infrequent admin action, not
   something to leave taking up space ahead of the Log viewer.
+- Remote Access — Phase 2d follow-up, added directly in response to a real
+  incident (see CLAUDE.md/TODO.md): four separate stale review_tool.py
+  processes were all found LISTENING on port 5151 at once, and the one
+  actually serving a phone's request predated Phase 2d's login code, so it
+  let the phone straight through with no auth prompt. Two independent
+  pieces:
+    1. review_tool.py status — NOT a simple up/down probe (a probe would
+       have seen SOMETHING answering that night and reported "running",
+       never surfacing that it was the wrong, stale instance). Instead
+       queries src.port_check.listening_pids(cfg.review_tool_port) — the
+       same `netstat -ano` approach used to diagnose the real incident —
+       and warns clearly, distinctly styled, if MORE than one PID is bound
+       to the port. Refreshes on a background timer plus a manual
+       "Refresh" button; dashboard.py has no code path that launches
+       review_tool.py itself, so this is detection/warning only, not
+       prevention (see TODO.md's follow-up note on why).
+    2. Cloudflare Tunnel Start/Stop — spawns/terminates
+       `cloudflared tunnel run <cfg.cloudflare_tunnel_name>` as a
+       subprocess (same "background worker, only touch Tk widgets from the
+       main thread via self.msg_queue" pattern as the Phase 1/2 panels
+       above), with its console output tailed live into its own Text
+       widget (same look as the Log viewer / Phase 2 log tail, but sourced
+       from the subprocess's own stdout pipe rather than a log file, since
+       cloudflared writes to console, not to logs/organize_*.log). Stop
+       terminates (falling back to kill after a timeout) — and so does
+       closing the whole dashboard window (see _on_close), so a cloudflared
+       process this dashboard started never survives the dashboard closing.
+       This panel controls an ALREADY-configured tunnel (needs
+       %USERPROFILE%\\.cloudflared\\config.yml to already exist, same
+       one-time setup Launch Review Tunnel.bat has always needed) — it
+       doesn't do first-time Cloudflare account linking.
+  Collapsed by default (start_expanded=False), same reasoning as Review
+  Users — but its background status-refresh timer keeps running either
+  way, so reopening it always shows current state immediately, never a
+  stale snapshot from before it was collapsed.
 
 Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
 body (see _make_collapsible()), so a section you're not using right now
@@ -63,6 +98,7 @@ from __future__ import annotations
 
 import queue
 import shutil
+import subprocess
 import threading
 import tkinter as tk
 from dataclasses import replace
@@ -85,6 +121,7 @@ from src.db import connect, init_db
 from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
 from src.pick_sources import merge_and_save, pick_sources_interactive
+from src.port_check import listening_pids
 
 
 class DashboardApp:
@@ -110,10 +147,18 @@ class DashboardApp:
         self._caption_log_path: Path | None = None
         self._caption_log_read_pos = 0
 
+        # Remote Access panel (Phase 2d follow-up): the cloudflared
+        # subprocess this dashboard itself spawned, if any. None whenever
+        # no tunnel was started from here (including: never started, or
+        # already stopped/exited) — see _tunnel_running().
+        self.tunnel_proc: subprocess.Popen | None = None
+
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(50, self._load_config_or_onboard)
         self.root.after(200, self._poll_queue)
         self.root.after(500, self._tail_tick)
+        self.root.after(300, self._port_status_tick)
 
     # ------------------------------------------------------------------ UI
     def _make_collapsible(self, title: str, fill: str = "x", expand: bool = False,
@@ -276,6 +321,41 @@ class DashboardApp:
         ttk.Button(ru_add_frame, text="Add / update user", command=self._on_add_review_user).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
+
+        # --- Remote Access panel (Phase 2d follow-up) ---
+        style = ttk.Style()
+        style.configure("Warn.TLabel", foreground="#b30000")
+
+        ra_frame = self._make_collapsible("Remote Access (Cloudflare Tunnel)", start_expanded=False)
+
+        ra_status_row = ttk.Frame(ra_frame)
+        ra_status_row.pack(fill="x", padx=6, pady=(6, 0))
+        self.review_tool_status_label = ttk.Label(
+            ra_status_row, text="review_tool.py: (checking port status...)",
+            wraplength=740, justify="left",
+        )
+        self.review_tool_status_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(ra_status_row, text="Refresh", command=self._refresh_port_status).pack(side="right", anchor="n")
+
+        ttk.Separator(ra_frame, orient="horizontal").pack(fill="x", padx=6, pady=6)
+
+        ra_tunnel_row = ttk.Frame(ra_frame)
+        ra_tunnel_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.tunnel_status_label = ttk.Label(ra_tunnel_row, text="Tunnel: Stopped")
+        self.tunnel_status_label.pack(side="left")
+        self.tunnel_start_btn = ttk.Button(ra_tunnel_row, text="Start Tunnel", command=self._on_tunnel_start)
+        self.tunnel_start_btn.pack(side="right", padx=(6, 0))
+        self.tunnel_stop_btn = ttk.Button(ra_tunnel_row, text="Stop Tunnel", command=self._on_tunnel_stop, state="disabled")
+        self.tunnel_stop_btn.pack(side="right")
+
+        ttk.Label(ra_frame, text="Tunnel console output:").pack(anchor="w", padx=6)
+        ra_log_body = ttk.Frame(ra_frame)
+        ra_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.tunnel_log_text = tk.Text(ra_log_body, height=8, state="disabled", wrap="none")
+        self.tunnel_log_text.pack(side="left", fill="both", expand=True)
+        ra_log_scroll = ttk.Scrollbar(ra_log_body, orient="vertical", command=self.tunnel_log_text.yview)
+        ra_log_scroll.pack(side="right", fill="y")
+        self.tunnel_log_text.configure(yscrollcommand=ra_log_scroll.set)
 
         # --- Log viewer panel ---
         log_frame = self._make_collapsible("Log viewer", fill="both", expand=True)
@@ -495,6 +575,12 @@ class DashboardApp:
                     elif kind == "caption_error":
                         _, err = msg
                         self._on_caption_error(err)
+                    elif kind == "tunnel_output":
+                        _, proc, line = msg
+                        self._append_tunnel_log(proc, line)
+                    elif kind == "tunnel_exited":
+                        _, proc, returncode = msg
+                        self._on_tunnel_exited(proc, returncode)
                 except Exception:
                     pass  # see docstring above -- never let one bad message stop future polling
         except queue.Empty:
@@ -691,6 +777,177 @@ class DashboardApp:
         remove_review_user(username)
         self._refresh_review_users()
 
+    # ---------------------------------------------- Remote Access (Phase 2d)
+    def _refresh_port_status(self) -> None:
+        """Queries what's actually bound to review_tool.py's configured
+        port right now (src.port_check.listening_pids — a netstat-based
+        check, not a "does something respond" probe — see this panel's
+        docstring in the module header for why that distinction is exactly
+        what a real incident hinged on) and updates the status label,
+        switching to the Warn style if more than one PID is involved."""
+        if self.cfg is None:
+            return
+        port = self.cfg.review_tool_port
+        try:
+            pids = listening_pids(port)
+        except Exception as e:
+            self.review_tool_status_label.configure(
+                text=f"review_tool.py: status check failed ({e})", style="TLabel"
+            )
+            return
+        if not pids:
+            self.review_tool_status_label.configure(
+                text=f"review_tool.py: not running — nothing bound to port {port}",
+                style="TLabel",
+            )
+        elif len(pids) == 1:
+            self.review_tool_status_label.configure(
+                text=f"review_tool.py: running (1 process, PID {pids[0]}, port {port})",
+                style="TLabel",
+            )
+        else:
+            pid_list = ", ".join(str(p) for p in pids)
+            self.review_tool_status_label.configure(
+                text=(
+                    f"⚠ WARNING: {len(pids)} separate processes are bound to port {port} "
+                    f"(PIDs: {pid_list}). This is the exact stale-duplicate-process pattern "
+                    "that caused a real (temporary) auth bypass before — an old process "
+                    "predating a security fix kept silently serving requests (see "
+                    "CLAUDE.md). Stop all but one (Task Manager, or PowerShell's "
+                    "Stop-Process -Id <pid> -Force) and relaunch a single fresh instance."
+                ),
+                style="Warn.TLabel",
+            )
+
+    def _port_status_tick(self) -> None:
+        # Same self-rescheduling-loop reasoning as _poll_queue/_tail_tick
+        # above: one failure here must never silently stop future checks.
+        try:
+            self._refresh_port_status()
+        except Exception:
+            pass
+        self.root.after(5000, self._port_status_tick)
+
+    def _tunnel_running(self) -> bool:
+        return self.tunnel_proc is not None and self.tunnel_proc.poll() is None
+
+    def _on_tunnel_start(self) -> None:
+        if self._tunnel_running():
+            return
+        tunnel_config = Path.home() / ".cloudflared" / "config.yml"
+        if not tunnel_config.exists():
+            messagebox.showerror(
+                "Photo Organizer",
+                f"No tunnel config found at {tunnel_config}.\n\n"
+                "This panel controls an ALREADY-configured tunnel — it doesn't do the "
+                "one-time Cloudflare account-linking steps (cloudflared tunnel login / "
+                "create / route dns). See README.md's \"Remote access\" section.",
+            )
+            return
+
+        tunnel_name = self.cfg.cloudflare_tunnel_name
+        try:
+            self.tunnel_proc = subprocess.Popen(
+                ["cloudflared", "tunnel", "run", tunnel_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except FileNotFoundError:
+            messagebox.showerror(
+                "Photo Organizer",
+                "cloudflared not found on PATH. Install it first:\n"
+                "  winget install --id Cloudflare.cloudflared -e\n"
+                "Then relaunch the dashboard (PATH only refreshes for new processes).",
+            )
+            return
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Failed to start tunnel: {e}")
+            return
+
+        self._set_tunnel_log_text("")
+        self.tunnel_status_label.configure(text=f"Tunnel: Running ({tunnel_name}, PID {self.tunnel_proc.pid})")
+        self.tunnel_start_btn.configure(state="disabled")
+        self.tunnel_stop_btn.configure(state="normal")
+        threading.Thread(target=self._tunnel_reader_worker, args=(self.tunnel_proc,), daemon=True).start()
+
+    def _tunnel_reader_worker(self, proc: subprocess.Popen) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push through self.msg_queue (same convention as the Phase 1/2
+        # workers above). Reads until cloudflared's stdout closes (i.e. the
+        # process exited, whether on its own or via terminate()/kill()
+        # below), then reports the exit so the buttons/status can flip back.
+        #
+        # Every message carries `proc` itself so the handlers can tell a
+        # fresh message apart from a STALE one — if Stop is clicked and
+        # Start clicked again quickly, this worker's own "tunnel_exited"
+        # for the OLD process can still be sitting in the queue behind a
+        # newer "tunnel_output"/state change for the process that replaced
+        # it; without the identity check, that stale exit message would
+        # wipe out self.tunnel_proc for the NEW (still very much alive)
+        # process, making the dashboard falsely report "stopped" while an
+        # untracked cloudflared process kept running. Caught by this
+        # session's own rapid-restart test, not just theoretical.
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    self.msg_queue.put(("tunnel_output", proc, line))
+        except Exception:
+            pass
+        finally:
+            returncode = proc.wait()
+            self.msg_queue.put(("tunnel_exited", proc, returncode))
+
+    def _on_tunnel_stop(self) -> None:
+        if not self._tunnel_running():
+            return
+        self.tunnel_status_label.configure(text="Tunnel: Stopping...")
+        self.tunnel_stop_btn.configure(state="disabled")
+        threading.Thread(target=self._terminate_tunnel, args=(self.tunnel_proc,), daemon=True).start()
+
+    def _terminate_tunnel(self, proc: subprocess.Popen) -> None:
+        # Runs on a background thread so a slow-to-die process can't freeze
+        # the UI. Doesn't push its own "done" message -- _tunnel_reader_worker
+        # (already running on its own thread against this same proc) sees
+        # stdout close and posts "tunnel_exited" once it's actually gone,
+        # which is what flips the buttons/status back. Same termination
+        # path _on_close uses at window-close time, so Stop and closing the
+        # dashboard both guarantee no orphaned cloudflared process is left
+        # running (see TODO.md's follow-up).
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        except Exception:
+            pass
+
+    def _on_tunnel_exited(self, proc: subprocess.Popen, returncode: int) -> None:
+        if proc is not self.tunnel_proc:
+            return  # stale message from an already-superseded process -- see _tunnel_reader_worker
+        self.tunnel_proc = None
+        self.tunnel_status_label.configure(text=f"Tunnel: Stopped (exit code {returncode})")
+        self.tunnel_start_btn.configure(state="normal")
+        self.tunnel_stop_btn.configure(state="disabled")
+
+    def _append_tunnel_log(self, proc: subprocess.Popen, line: str) -> None:
+        if proc is not self.tunnel_proc:
+            return  # stale output from an already-superseded process -- see _tunnel_reader_worker
+        self.tunnel_log_text.configure(state="normal")
+        self.tunnel_log_text.insert("end", line)
+        self.tunnel_log_text.see("end")
+        self.tunnel_log_text.configure(state="disabled")
+
+    def _set_tunnel_log_text(self, text: str) -> None:
+        self.tunnel_log_text.configure(state="normal")
+        self.tunnel_log_text.delete("1.0", "end")
+        self.tunnel_log_text.insert("1.0", text)
+        self.tunnel_log_text.configure(state="disabled")
+
     # -------------------------------------------------------------- logs
     def _log_dir(self) -> Path:
         return self.cfg.log_dir_abs if self.cfg else Path("logs")
@@ -738,6 +995,27 @@ class DashboardApp:
         except Exception:
             pass
         self.root.after(500, self._tail_tick)
+
+    # ------------------------------------------------------------- close
+    def _on_close(self) -> None:
+        # If this dashboard started the tunnel, closing the window must not
+        # leave it orphaned (cloudflared is a separate OS process — a
+        # Windows child process does NOT get killed just because its
+        # parent Python process exits). Done synchronously (not via a
+        # worker thread) since the window is closing anyway; a few seconds'
+        # delay here is acceptable, unlike the Stop button's async path
+        # above which shouldn't block the still-open UI.
+        if self._tunnel_running():
+            try:
+                self.tunnel_proc.terminate()
+                try:
+                    self.tunnel_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.tunnel_proc.kill()
+                    self.tunnel_proc.wait(timeout=5)
+            except Exception:
+                pass
+        self.root.destroy()
 
     def _append_new_log_lines(self) -> None:
         if self.current_log_path is None or not self.current_log_path.exists():
