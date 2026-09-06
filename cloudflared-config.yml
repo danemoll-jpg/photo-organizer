@@ -13,16 +13,13 @@
 
 # From `cloudflared tunnel create photo-organizer` -- it prints this ID
 # and also names the credentials file after it.
-tunnel: <TUNNEL-ID-FROM-tunnel-create>
-credentials-file: C:\Users\<you>\.cloudflared\<TUNNEL-ID-FROM-tunnel-create>.json
+tunnel: dac842d2-4d5b-4244-a6af-1e80ace522da
+credentials-file: C:\Users\danmo\.cloudflared\dac842d2-4d5b-4244-a6af-1e80ace522da.json
 
 ingress:
-  # review_tool.py listens on 127.0.0.1 only (its default --host) --
-  # cloudflared reaches it over loopback, so the app never needs to
-  # listen on a LAN/router-facing interface. Match the port to
-  # config.yaml's review_tool_port (default 5151).
-  - hostname: photos.yourdomain.com
-    service: http://127.0.0.1:5151
+  - hostname: photos.mollphotos.org
+    service: http://localhost:5151
+
   # Required catch-all: any request cloudflared gets for a hostname not
   # listed above (shouldn't normally happen for a single-hostname tunnel
   # like this one, but cloudflared requires an explicit fallback rule).
