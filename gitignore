@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# --- Project data (never commit — personal photo metadata) ---
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+data/
+logs/
+*.log
+
+# --- Cloudflare Tunnel (real config has account-specific tunnel ID + credentials path) ---
+cloudflared-config.yml
+!cloudflared-config.example.yml
+
+# --- Config with machine-specific paths (source/dest folders, API keys) ---
+config.yaml
+config.yml
+config.json
+config.local.*
+.env
+
+# --- Face embeddings / model artifacts (large, regenerable, personal) ---
+*.faiss
+*.index
+embeddings/
+face_clusters/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Sample/test images if you keep a local test folder in-repo ---
+samples/
+test_images/
