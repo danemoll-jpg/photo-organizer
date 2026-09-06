@@ -219,3 +219,34 @@
 **Explicitly out of scope:**
 - Any thumbnail regeneration/re-extraction logic beyond a first pass (e.g. re-extracting if a video file changes) — not requested, don't build it.
 - Extracting anything beyond a single representative frame (e.g. no animated/multi-frame preview) — a static first-frame image only.
+
+## Phase 2h — Bulk selection/editing in the grid, and mobile viewer layout
+
+**Part A: Multi-select bulk editing on the grid page.**
+
+**Goal:** Let the user select multiple photos/videos in the grid at once and apply an edit to all of them in one action — motivated directly by GPS backfill gaps (many files missing location can share the correct one) and other batch cleanup needs.
+
+**Requirements:**
+- **Selection mechanism**: a checkbox (or click-to-toggle-select) per grid item. Track selection as a set of `file_hash` values, persisting across pagination within the same session (so selecting items on page 1, then paging to page 2, doesn't lose the earlier selections) — no need to support "select all matching current filter" beyond what's actually visible/paged through.
+- **A bulk-action bar** appears once 1+ items are selected, showing the count and available actions, plus a "Clear selection" control.
+- **Bulk actions to support:**
+  - **Set location** — same dropdown (existing distinct-location list) as the single-item edit UI. Applies the chosen location to every selected item.
+  - **Add tag** — adds ONE new tag to every selected item's EXISTING tag set (a union/append, NOT a full replace — this is different from the single-item edit's "full replace tags" semantics, since different selected files likely have different existing tags that must not be destroyed).
+  - **Set date** (lower priority per the user's own hedging — "maybe") — sets `date_taken` to a chosen value for every selected item. Same caveat as any date edit: DB-metadata-only, never moves/renames/re-sorts files.
+  - **Hide** — applies the existing reversible `excluded` flag to every selected item.
+- **Every bulk action is still a real, audited edit** — goes through the same `photo_edits` audit mechanism as a single-item edit (so each is permanently protected from future automated overwrite, same as any manual edit), with `edited_by` reflecting the actual logged-in user (not a synthetic batch-tool tag — this is a real person interactively choosing a real batch through the UI, unlike the fully-automated date-audit tool).
+- **New endpoint(s)** needed for this (a bulk-edit route accepting a list of `file_hash` values + field + value), behind the same auth + CSRF protection as the existing single-edit endpoint, using the same server-side field allow-list. Every authenticated user can bulk-edit (consistent with the existing "everyone can edit" decision) — no new permission tier.
+- Show a clear success/failure summary after a bulk action (e.g. "12 updated, 0 failed") rather than silently succeeding or failing.
+
+**Part B: Mobile phone viewer layout.**
+
+**Context:** The viewer works fine on desktop and iPad, but on a phone-sized screen, the photo/video renders too small because the metadata/info panel (caption, tags, location, date, edit controls) takes up too much of the limited vertical space.
+
+**Requirements:**
+- On narrow (phone-width) viewports specifically, make the info panel collapsible/toggleable — collapsed or minimized by default so the photo/video itself gets the bulk of the screen, with an obvious toggle (icon/button) to expand and see/edit the metadata on demand.
+- Desktop and iPad/tablet-width layouts are NOT to be changed — this is a phone-specific responsive breakpoint fix, not a redesign of the whole viewer.
+- Must not break any existing editing functionality — the info panel's contents (and their edit controls) work exactly the same once expanded, this is purely a show/hide layout change for narrow screens.
+
+**Explicitly out of scope for this phase:**
+- "Select all matching the current filter" (beyond what's visibly paged through) for bulk selection — not requested.
+- Any change to desktop/tablet viewer layout.

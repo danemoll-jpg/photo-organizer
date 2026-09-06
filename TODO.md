@@ -338,6 +338,23 @@ User feedback after actually trying to use this panel: (1) the panel needs scrol
 - [x] Rule 10/11/12 N/A — dashboard-only UI work, `review_tool.py` untouched, no schema change (reuses the same `src.date_audit` functions the general workflow already called).
 - **Not done this session, the user's own call, unchanged from before:** actually clicking either one-click button (or the general Apply Fix/Apply Sequence Fix buttons) for real against the live production DB — the 822 and 1,705 real corrections are previewed/verified but still awaiting the user's own confirm click, same posture as every prior session's finding.
 
+## ACTIVE: Phase 2h — Bulk grid selection/editing + mobile viewer layout
+See `photo-organizer-spec.md`'s "Phase 2h" section for full requirements. Summary:
+
+**Part A — bulk editing:**
+- [ ] Checkbox/toggle-select per grid item, selection persists across pagination (a `file_hash` set), a bulk-action bar with count + "Clear selection"
+- [ ] Bulk actions: Set location (dropdown, same list as single-edit), Add tag (**union/append to each item's existing tags, NOT full-replace** — different from single-edit's tag semantics, don't reuse that code path blindly), Set date (lower priority per user), Hide (existing `excluded` flag)
+- [ ] Every bulk action goes through the same `photo_edits` audit mechanism as single edits — `edited_by` = the real logged-in user, not a synthetic tag
+- [ ] New bulk-edit endpoint(s), same auth/CSRF/field-allow-list as the existing single-edit endpoint — every authenticated user can bulk-edit, no new permission tier
+- [ ] Clear success/failure summary after a bulk action, not silent
+
+**Part B — mobile viewer layout:**
+- [ ] On phone-width viewports specifically, make the info panel (caption/tags/location/date/edit controls) collapsible/toggleable, collapsed by default so the photo/video gets most of the screen — obvious toggle to expand
+- [ ] Desktop and iPad/tablet layouts unchanged — phone-specific breakpoint only
+- [ ] Editing functionality itself unchanged once the panel is expanded — this is a show/hide layout change only
+
+- [ ] Per rule 11/12 as applicable (this touches `review_tool.py` directly — restart required; likely no schema change beyond what Phase 2f already has, confirm).
+
 ## LOCKED — Phase 3: Face Detection & Clustering
 Do not start. Reference only.
 - insightface (GPU) for detection + embedding, output JSONL (file_hash, path, bbox, embedding, detected_at)
