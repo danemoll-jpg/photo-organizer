@@ -106,6 +106,14 @@
 
   async function fetchJSON(url) {
     const res = await fetch(url);
+    if (res.status === 401) {
+      // Phase 2d: session expired/logged out mid-use. The page itself is
+      // already gated server-side (a fresh page load would've redirected
+      // to /login), so this only fires for a fetch() made from a page
+      // that was open before the session ended -- bounce there now.
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+      throw new Error("Unauthorized — redirecting to login");
+    }
     if (!res.ok) throw new Error(`Request failed: ${res.status}`);
     return res.json();
   }

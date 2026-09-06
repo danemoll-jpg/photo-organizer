@@ -40,6 +40,21 @@ filter — old and new — applies identically to the grid (/api/photos) and
 to viewer/slideshow navigation (/api/nav), per spec. See
 _build_filters/_build_extra_predicate for how the two different filter
 "sources" (plain DB columns vs. the live captions cache) are combined.
+
+Phase 2d added remote/shared access: real session-based login (see
+src/auth.py — a small local username+password list in config.yaml's
+review_users, rate-limited, NOT HTTP Basic Auth), meant to be reached
+either directly on localhost or through a separate Cloudflare Tunnel (see
+README.md/photo-organizer-spec.md — independent of Plex's own remote
+access, never reusing it). Every route except /login, /logout, and
+/static/* now requires a session (src/auth.py::register_auth's
+before_request hook) — a browser navigation redirects to /login, an
+unauthenticated /api/* or /image/* call gets a plain 401 (review.js
+bounces itself to /login on that, since a redirect response doesn't help
+a fetch() call). Phase 2d also introduced a storage-abstraction seam
+(src/storage.py::PhotoStorage) between this file and "where photo bytes
+actually live" — local disk today (LocalDiskStorage), groundwork only for
+a possible future cloud-storage backend, not an actual migration.
 """
 from __future__ import annotations
 
@@ -53,10 +68,13 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request, session
 from PIL import Image
 
+from src.auth import register_auth
 from src.config import Config, load_config
+from src.logging_setup import setup_logging
+from src.storage import PhotoStorage, get_storage
 
 try:
     import pillow_heif
@@ -72,6 +90,7 @@ app = Flask(__name__)
 # lifetime of this process (a single-user local tool, not multi-tenant).
 _cfg: Config
 _video_exts: set[str] = set()
+_storage: PhotoStorage
 
 
 class CaptionsCache:
@@ -513,6 +532,8 @@ def index():
         page_size=_cfg.review_page_size,
         slideshow_seconds=_cfg.review_slideshow_seconds,
         dest_root=str(_cfg.dest_root_path),
+        current_user=session.get("user"),
+        logout_csrf=session.get("_csrf"),
     )
 
 
@@ -667,13 +688,17 @@ _image_cache_order: list[tuple[str, int]] = []
 _image_cache_lock = threading.Lock()
 
 
-def _get_image_bytes(path: Path, file_hash: str, max_dim: int) -> bytes:
+def _get_image_bytes(path: str, file_hash: str, max_dim: int) -> bytes:
     key = (file_hash, max_dim)
     with _image_cache_lock:
         cached = _image_cache.get(key)
     if cached is not None:
         return cached
-    with Image.open(path) as img:
+    # Routed through the storage abstraction (Phase 2d groundwork — see
+    # src/storage.py) rather than opening `path` directly, so a future
+    # non-local backend only needs a new PhotoStorage implementation, not
+    # a change here.
+    with _storage.open(path) as f, Image.open(f) as img:
         img = img.convert("RGB")
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
         buf = io.BytesIO()
@@ -704,8 +729,8 @@ def serve_image(file_hash: str):
         conn.close()
     if row is None:
         abort(404)
-    path = Path(row[0])
-    if not path.exists():
+    path = row[0]
+    if not _storage.exists(path):
         abort(404)
     max_dim = min(max(int(request.args.get("max", 1600)), 100), 4000)
     try:
@@ -725,9 +750,9 @@ def _open_browser_later(url: str) -> None:
 
 
 def main() -> None:
-    global _cfg, _video_exts, _captions_cache
+    global _cfg, _video_exts, _captions_cache, _storage
 
-    parser = argparse.ArgumentParser(description="Phase 2b — Photo Organizer review/spot-check tool")
+    parser = argparse.ArgumentParser(description="Phase 2b/2d — Photo Organizer review/spot-check tool")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1, localhost-only)")
     parser.add_argument("--port", type=int, default=None, help="Override config.yaml's review_tool_port")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open a browser tab")
@@ -735,6 +760,7 @@ def main() -> None:
 
     _cfg = load_config()
     _video_exts = _cfg.video_extensions_normalized
+    _storage = get_storage(_cfg)
     _captions_cache = CaptionsCache(_cfg.captions_path_abs)
     _captions_cache.refresh()
 
@@ -744,10 +770,25 @@ def main() -> None:
             "there's nothing to review yet."
         )
 
+    # Phase 2d: same shared logging path every other entry point uses (see
+    # src/logging_setup.py / CLAUDE.md rule 3) — login/logout/rate-limit
+    # events land in logs/organize_<timestamp>.log alongside everything
+    # else, not a second parallel log.
+    logger, log_path = setup_logging(_cfg.log_dir_abs)
+    register_auth(app, _cfg, logger=logger)
+    if not _cfg.review_users:
+        print("WARNING: no review_users configured in config.yaml — nobody can log in yet.")
+        print("Add one with: venv\\Scripts\\python main.py review-user add <username>")
+
     port = args.port or _cfg.review_tool_port
     url = f"http://{args.host if args.host != '0.0.0.0' else '127.0.0.1'}:{port}/"
     print(f"Photo Organizer review tool — read-only against {_cfg.db_path_abs} and {_cfg.captions_path_abs}")
+    print(f"Log file: {log_path}")
     print(f"Open: {url}")
+    if args.host == "0.0.0.0":
+        print("NOTE: for Cloudflare Tunnel access, keep the default --host 127.0.0.1 — "
+              "cloudflared reaches this app over loopback, so it never needs to listen "
+              "on a LAN/router-facing interface at all (see README.md's Phase 2d section).")
     if not args.no_browser:
         _open_browser_later(url)
 

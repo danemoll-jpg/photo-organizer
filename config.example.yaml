@@ -93,3 +93,39 @@ review_page_size: 40
 # value on launch — it's also a live, user-changeable field in the UI
 # itself, not fixed to whatever's here.
 review_slideshow_seconds: 5.0
+
+# --- Phase 2d: Remote/Shared Access (review_tool.py) ---
+# Standalone from Phase 1/1b/2's config above — auth + storage for the
+# review tool only. See README.md's "Remote access" section for the full
+# setup (adding users, running the Cloudflare Tunnel).
+
+# One username+password pair per invited person — managed with
+# `main.py review-user add/list/remove`, not by hand-editing this list.
+# password_hash is a werkzeug scrypt hash, never a plaintext password.
+# Empty by default: nobody can log in until at least one is added.
+review_users: []
+# review_users:
+#   - username: dan
+#     password_hash: "scrypt:32768:8:1$....."
+
+# Session cookie's Secure flag. False (default) so the tool still works
+# logging in directly over plain http://127.0.0.1 on this PC. The real
+# HTTPS protection for remote access comes from the Cloudflare Tunnel
+# terminating TLS at Cloudflare's edge, not from this flag — set true only
+# if this will ever ONLY be opened via its https:// tunnel hostname.
+session_cookie_secure: false
+
+# How many days a login stays valid (a persistent session cookie, not a
+# fresh login every visit).
+session_lifetime_days: 30
+
+# Login brute-force protection: this many failed attempts within this
+# many seconds (per client IP AND per attempted username, whichever locks
+# out first) blocks further attempts against that key. See src/auth.py.
+login_rate_limit_attempts: 5
+login_rate_limit_window_seconds: 900
+
+# Where photo bytes are read from. "local" is the only implemented value
+# today — groundwork only for a possible future cloud-storage backend
+# (S3/B2/etc.), see src/storage.py. Do not change this.
+storage_backend: "local"

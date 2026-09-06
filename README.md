@@ -279,6 +279,98 @@ organize/caption/extract-gps itself.
   video by design, so showing them would mean a permanent, misleading
   "not yet captioned" that will never resolve.
 
+## Phase 2d — remote/shared access
+
+Lets you (or someone you invite) reach `review_tool.py` from outside your
+home network, over real HTTPS, password-gated — without opening any port
+on your router. Two independent pieces: login (this app) and network
+exposure (a Cloudflare Tunnel). Fully separate from Plex's own remote
+access — neither depends on the other, neither's uptime affects the other.
+
+### 1. Add a login for each person
+
+```bash
+venv\Scripts\python main.py review-user add <username>
+```
+
+Prompts for a password (hidden input, not echoed, never taken as a CLI
+arg so it can't land in shell history) and saves a hashed credential to
+`config.yaml`'s `review_users` — never the plaintext password. One
+username+password pair per person; not a shared password, not a full
+signup system. Everyone with a login currently sees the whole library —
+there's no per-person restriction (not asked for), but nothing assumes
+that so deeply it couldn't be added later.
+
+```bash
+venv\Scripts\python main.py review-user list      # see who's configured
+venv\Scripts\python main.py review-user remove <username>   # revoke access
+```
+
+Then just open `review_tool.py` (`Launch Review Tool.bat`, as before) — it
+now shows a login page first. Signing in is a real session (a signed
+cookie), not a re-login on every click, and persists for 30 days by
+default (`session_lifetime_days` in `config.yaml`). A **Log out** button
+sits in the top-right once signed in.
+
+Repeated wrong passwords get rate-limited (5 attempts per 15 minutes by
+default, per IP and per attempted username — see `login_rate_limit_*` in
+`config.yaml`) — you'll see a "Too many failed attempts" message rather
+than the login just silently accepting more guesses.
+
+### 2. Expose it — Cloudflare Tunnel (not port-forwarding)
+
+This gives `review_tool.py` a real `https://` URL without opening any
+inbound port on your router, and without relying on Plex's own remote
+access at all. One-time setup per machine (requires your own Cloudflare
+account — a free one is fine — with a domain already using Cloudflare's
+nameservers):
+
+```bash
+cloudflared tunnel login
+```
+Opens a browser to authenticate with your Cloudflare account and pick the
+domain to use — this step needs to be done by you interactively, it's
+your account.
+
+```bash
+cloudflared tunnel create photo-organizer
+```
+Creates the tunnel and writes a credentials file to
+`%USERPROFILE%\.cloudflared\<tunnel-id>.json`. Note the tunnel ID it
+prints.
+
+Create `%USERPROFILE%\.cloudflared\config.yml` — see
+**`cloudflared-config.example.yml`** in this repo for the exact template
+(fill in your tunnel ID, credentials-file path, and the hostname you want,
+e.g. `photos.yourdomain.com`).
+
+```bash
+cloudflared tunnel route dns photo-organizer photos.yourdomain.com
+```
+Adds the DNS record in Cloudflare pointing that hostname at your tunnel.
+
+From then on, whenever you want remote access live:
+1. Run `review_tool.py` as usual (`Launch Review Tool.bat`) — keep it on
+   its default `127.0.0.1` binding, **don't** pass `--host 0.0.0.0` for
+   this. cloudflared reaches it over loopback only, so the app itself
+   never needs to listen on a LAN/router-facing interface at all.
+2. Run **`Launch Review Tunnel.bat`** (or `cloudflared tunnel run
+   photo-organizer`) — keep its window open too. Closing it takes the
+   tunnel down; `review_tool.py` keeps running locally, just no longer
+   reachable from outside until the tunnel's back up.
+3. Share `https://photos.yourdomain.com` (or whatever hostname you
+   routed) with whoever you added a login for in step 1.
+
+### Storage abstraction (groundwork, not a migration)
+
+`review_tool.py` reads photo bytes through a small `PhotoStorage`
+interface (`src/storage.py`) instead of touching the filesystem directly.
+Today there's only one backend — local disk, exactly as before — this is
+just groundwork so a future move to cloud object storage (S3, Backblaze
+B2, etc.) would mean writing one new backend class and changing
+`config.yaml`'s `storage_backend`, not rewriting the app. No cloud backend
+is implemented, and nothing has moved off local disk.
+
 ## Viewing the database
 
 `data/photo_organizer.db` is a plain SQLite file — no server, no login.

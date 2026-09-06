@@ -51,6 +51,43 @@ class Config:
     review_page_size: int = 40
     review_slideshow_seconds: float = 5.0
 
+    # --- Phase 2d: remote/shared access (review_tool.py auth + storage) ---
+    # One username+password pair per invited person — NOT a single shared
+    # password, NOT a full account-management system (see CLAUDE.md/TODO.md).
+    # password_hash is a werkzeug scrypt hash (src/auth.py::hash_password),
+    # never a plaintext password. Managed via `main.py review-user
+    # add/list/remove` rather than hand-editing this list, though hand-
+    # editing is harmless if ever needed (it's just YAML).
+    review_users: list[dict] = field(default_factory=list)
+    # Session cookie's Secure flag. Default False so the tool still works
+    # when accessed directly over plain http://127.0.0.1 on the user's own
+    # PC (a browser refuses to send a Secure cookie back over http, which
+    # would otherwise silently break local login). The real HTTPS
+    # protection for remote access comes from the Cloudflare Tunnel
+    # terminating TLS at Cloudflare's edge (see photo-organizer-spec.md's
+    # Phase 2d) — the cookie is only ever on the wire, in plaintext,
+    # between the browser and Cloudflare's edge either way (that hop is
+    # HTTPS regardless of this flag; cloudflared<->this app is loopback-
+    # only, never leaves the machine). Set true if this tool will only
+    # ever be opened via its https:// tunnel hostname, never directly.
+    session_cookie_secure: bool = False
+    # How long a login stays valid (browser session cookie persists this
+    # long, not just until the browser closes) -- "session persistence"
+    # per spec, not a re-login-every-visit experience.
+    session_lifetime_days: int = 30
+    # Login brute-force rate limiting (src/auth.py::LoginRateLimiter): this
+    # many failed attempts within this many seconds (per client IP AND
+    # per attempted username, whichever is stricter) locks out further
+    # attempts against that key until the window slides past the oldest
+    # failure. See src/auth.py's module docstring for the full reasoning.
+    login_rate_limit_attempts: int = 5
+    login_rate_limit_window_seconds: int = 900
+    # Phase 2d storage-abstraction groundwork (src/storage.py): "local" is
+    # the only implemented backend. Exists so a future cloud-storage swap
+    # (S3/B2/etc.) is a new backend class + this one config value, not a
+    # rewrite of review_tool.py — see photo-organizer-spec.md's Phase 2d.
+    storage_backend: str = "local"
+
     # --- derived, absolute paths ---
     @property
     def dest_root_path(self) -> Path:
@@ -133,19 +170,64 @@ def load_config(path: Path | None = None) -> Config:
         ollama_host=raw.get("ollama_host", "http://localhost:11434"),
         captions_path=raw.get("captions_path", "data/captions.jsonl"),
         caption_max_dimension=raw.get("caption_max_dimension", 1024),
+        review_users=raw.get("review_users", []) or [],
+        session_cookie_secure=raw.get("session_cookie_secure", False),
+        session_lifetime_days=raw.get("session_lifetime_days", 30),
+        login_rate_limit_attempts=raw.get("login_rate_limit_attempts", 5),
+        login_rate_limit_window_seconds=raw.get("login_rate_limit_window_seconds", 900),
+        storage_backend=raw.get("storage_backend", "local"),
     )
+
+
+def _load_raw(path: Path | None = None) -> dict:
+    cfg_path = path or CONFIG_PATH
+    if not cfg_path.exists():
+        print(f"ERROR: {cfg_path} not found. Copy config.example.yaml to config.yaml first.", file=sys.stderr)
+        sys.exit(1)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _save_raw(raw: dict, path: Path | None = None) -> None:
+    cfg_path = path or CONFIG_PATH
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
 def save_source_folders(folders: list[str], path: Path | None = None) -> None:
     """Update just source_folders in config.yaml, preserving everything else
     and comments as best-effort (full rewrite of the mapping — YAML comments
     in the user's config.yaml will NOT be preserved by this round-trip)."""
-    cfg_path = path or CONFIG_PATH
-    if not cfg_path.exists():
-        print(f"ERROR: {cfg_path} not found. Copy config.example.yaml to config.yaml first.", file=sys.stderr)
-        sys.exit(1)
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    raw = _load_raw(path)
     raw["source_folders"] = folders
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(raw, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    _save_raw(raw, path)
+
+
+# --- Phase 2d: review_tool.py login credentials (config.yaml's review_users) ---
+# Managed here (rather than hand-editing YAML) via `main.py review-user
+# add/list/remove` — see main.py and src/auth.py::hash_password. Same
+# "preserve everything else, full rewrite of the mapping" caveat as
+# save_source_folders above.
+
+def add_or_update_review_user(username: str, password_hash: str, path: Path | None = None) -> None:
+    raw = _load_raw(path)
+    users = [u for u in (raw.get("review_users") or []) if u.get("username") != username]
+    users.append({"username": username, "password_hash": password_hash})
+    raw["review_users"] = users
+    _save_raw(raw, path)
+
+
+def remove_review_user(username: str, path: Path | None = None) -> bool:
+    """Returns True if a user was actually removed, False if no such
+    username existed (so the CLI can say so rather than silently no-op)."""
+    raw = _load_raw(path)
+    users = raw.get("review_users") or []
+    remaining = [u for u in users if u.get("username") != username]
+    raw["review_users"] = remaining
+    _save_raw(raw, path)
+    return len(remaining) != len(users)
+
+
+def list_review_usernames(path: Path | None = None) -> list[str]:
+    raw = _load_raw(path)
+    return [u.get("username") for u in (raw.get("review_users") or [])]

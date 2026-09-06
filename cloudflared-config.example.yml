@@ -1,0 +1,29 @@
+# Template for %USERPROFILE%\.cloudflared\config.yml -- NOT read from this
+# repo location; cloudflared always reads its config from the user profile
+# (or wherever `cloudflared tunnel run --config <path>` points). Copy the
+# shape below there and fill in your own values. See README.md's "Remote
+# access" section for the full one-time setup this depends on
+# (cloudflared tunnel login / create / route dns).
+#
+# Why not commit a real one: `credentials-file` points at a secret JSON
+# cloudflared writes when you run `tunnel create` (proves your account
+# owns this tunnel) -- that file, the tunnel ID below, and your chosen
+# hostname are all specific to your Cloudflare account, not something to
+# share or commit.
+
+# From `cloudflared tunnel create photo-organizer` -- it prints this ID
+# and also names the credentials file after it.
+tunnel: <TUNNEL-ID-FROM-tunnel-create>
+credentials-file: C:\Users\<you>\.cloudflared\<TUNNEL-ID-FROM-tunnel-create>.json
+
+ingress:
+  # review_tool.py listens on 127.0.0.1 only (its default --host) --
+  # cloudflared reaches it over loopback, so the app never needs to
+  # listen on a LAN/router-facing interface. Match the port to
+  # config.yaml's review_tool_port (default 5151).
+  - hostname: photos.yourdomain.com
+    service: http://127.0.0.1:5151
+  # Required catch-all: any request cloudflared gets for a hostname not
+  # listed above (shouldn't normally happen for a single-hostname tunnel
+  # like this one, but cloudflared requires an explicit fallback rule).
+  - service: http_status:404

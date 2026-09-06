@@ -45,6 +45,66 @@ body {
 .topbar h1 { font-size: 18px; margin: 0; }
 .subtitle { color: var(--muted); font-weight: normal; font-size: 14px; }
 .stats { color: var(--muted); font-size: 13px; }
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.logout-form { display: flex; align-items: center; gap: 8px; }
+.logged-in-as { font-size: 12px; color: var(--muted); }
+.logout-btn {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+.logout-btn:hover { border-color: var(--accent); }
+
+/* --- Phase 2d: login page --- */
+.login-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+.login-card {
+  width: 100%;
+  max-width: 320px;
+  padding: 28px 26px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.login-card h1 { font-size: 20px; margin: 0 0 2px; }
+.login-sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+.login-card form { display: flex; flex-direction: column; gap: 14px; }
+.login-card label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+.login-card input {
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+}
+.login-card button {
+  margin-top: 4px;
+  padding: 9px 14px;
+  border-radius: 5px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+  font-size: 14px;
+}
+.login-error {
+  background: var(--badge-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
 
 .filters {
   display: flex;

@@ -9,7 +9,16 @@
 <body>
 <header class="topbar">
   <h1>Photo Organizer <span class="subtitle">— Review / Spot-Check</span></h1>
-  <div id="stats" class="stats">Loading…</div>
+  <div class="topbar-right">
+    <div id="stats" class="stats">Loading…</div>
+    {% if current_user %}
+    <form method="post" action="{{ url_for('logout') }}" class="logout-form">
+      <input type="hidden" name="csrf_token" value="{{ logout_csrf }}">
+      <span class="logged-in-as">{{ current_user }}</span>
+      <button type="submit" class="logout-btn">Log out</button>
+    </form>
+    {% endif %}
+  </div>
 </header>
 
 <section class="filters" id="filters">

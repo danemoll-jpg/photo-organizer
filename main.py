@@ -11,6 +11,9 @@
     venv\\Scripts\\python main.py caption --limit <folder>  # caption just one folder first
     venv\\Scripts\\python main.py extract-gps                # Phase 2b: EXIF GPS -> offline reverse-geocoded place name
     venv\\Scripts\\python main.py extract-gps --limit <folder prefix>  # just one folder first
+    venv\\Scripts\\python main.py review-user add <username>    # Phase 2d: add/update a review_tool.py login
+    venv\\Scripts\\python main.py review-user list              # list configured usernames
+    venv\\Scripts\\python main.py review-user remove <username> # revoke a login
 """
 from __future__ import annotations
 
@@ -173,6 +176,59 @@ def cmd_extract_gps(args) -> None:
     print(stats.summary())
 
 
+def cmd_review_user_add(args) -> None:
+    """Phase 2d: add or update a review_tool.py login credential. Prompts
+    for the password interactively (hidden input via getpass) rather than
+    taking it as a CLI arg, so it never lands in shell history."""
+    import getpass
+
+    from src.auth import hash_password
+    from src.config import add_or_update_review_user, list_review_usernames
+
+    username = args.username.strip()
+    if not username:
+        print("ERROR: username cannot be empty.")
+        return
+    if username in list_review_usernames():
+        answer = input(f"'{username}' already has a credential — overwrite its password? [y/N]: ").strip().lower()
+        if answer != "y":
+            print("Aborted, nothing changed.")
+            return
+
+    password = getpass.getpass(f"Password for '{username}' (min 8 chars): ")
+    if len(password) < 8:
+        print("ERROR: password must be at least 8 characters. Nothing changed.")
+        return
+    confirm = getpass.getpass("Confirm password: ")
+    if password != confirm:
+        print("ERROR: passwords didn't match. Nothing changed.")
+        return
+
+    add_or_update_review_user(username, hash_password(password))
+    print(f"Saved. '{username}' can now sign in at review_tool.py's login page.")
+
+
+def cmd_review_user_list(args) -> None:
+    from src.config import list_review_usernames
+    users = list_review_usernames()
+    if not users:
+        print("No review_tool.py users configured yet.")
+        print("Add one with: main.py review-user add <username>")
+        return
+    print("Configured review_tool.py users:")
+    for u in users:
+        print(f"  - {u}")
+
+
+def cmd_review_user_remove(args) -> None:
+    from src.config import remove_review_user
+    username = args.username.strip()
+    if remove_review_user(username):
+        print(f"Removed '{username}' — they can no longer sign in.")
+    else:
+        print(f"No user named '{username}' found. Nothing changed.")
+
+
 def cmd_load_captions(args) -> None:
     cfg = load_config()
     logger, _log_path = setup_logging(cfg.log_dir_abs)
@@ -211,6 +267,16 @@ def main() -> None:
     gps_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
                              help="Only process photos whose current_path starts with this prefix (try a small folder first)")
     gps_parser.set_defaults(func=cmd_extract_gps)
+
+    ru_parser = sub.add_parser("review-user", help="Phase 2d: manage review_tool.py login credentials (config.yaml's review_users)")
+    ru_sub = ru_parser.add_subparsers(dest="review_user_command", required=True)
+    ru_add = ru_sub.add_parser("add", help="Add a new user or change an existing user's password (prompts, hidden input)")
+    ru_add.add_argument("username")
+    ru_add.set_defaults(func=cmd_review_user_add)
+    ru_sub.add_parser("list", help="List configured usernames").set_defaults(func=cmd_review_user_list)
+    ru_remove = ru_sub.add_parser("remove", help="Remove a user's credential")
+    ru_remove.add_argument("username")
+    ru_remove.set_defaults(func=cmd_review_user_remove)
 
     args = parser.parse_args()
     args.func(args)
