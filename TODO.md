@@ -245,6 +245,15 @@ See `photo-organizer-spec.md`'s "Phase 2f" section for full requirements — thi
 - [x] Not a JS/logic bug in either case — this was purely about which controls exist where. The video-viewer functionality itself (play/pause, scrubbing, closing) was already working correctly and needed no changes — confirmed untouched by this session's diff.
 - **Not done this session (flagged, not blocking):** the two already-running `review_tool.py` processes found at session start (see CLAUDE.md's Project state) were left untouched, per the project's now-standing convention of not restarting/killing a process it didn't start without being asked — they're still serving the pre-this-session UI. The user needs to restart `review_tool.py` themselves (safe: read-only, no persisted state beyond the in-memory captions-cache/random-order caches) to see these changes.
 
+## ACTIVE: One-click restart for review_tool.py (kill stale + relaunch)
+User is tired of manually running `netstat`/kill/relaunch every time a stale `review_tool.py` process is serving old code — this has come up repeatedly this project. **This is also now a new standing rule (CLAUDE.md rule 11): from this session onward, ANY session touching `review_tool.py` (or its templates/static/supporting modules) must restart it itself before ending — not leave that for the user.** Deliverables:
+- [ ] **A reusable restart mechanism** (e.g. a function in `src/port_check.py` or a small new module — avoid duplicating logic across the two consumers below, per rule 7): finds any process(es) currently bound to the configured `review_tool_port` (reuse existing `listening_pids()`), kills them safely, waits for the port to actually free before proceeding, then launches `review_tool.py` fresh. Reads the port from config, doesn't hardcode 5151.
+- [ ] **"Restart Review Tool.bat"** in the repo root, for the user's own manual use, built on top of the same underlying mechanism.
+- [ ] **A "Force Restart" button in the dashboard's existing Remote Access panel**, calling the same underlying mechanism programmatically (not shelling out to the .bat) — consistent with rule 10. Should update the panel's existing 3-state status indicator immediately after restarting rather than waiting for the next 5s poll tick.
+- [ ] Handle the "more than one stale process" case explicitly (this project has hit exactly that before, more than once) — kill all of them, not just the first one found.
+- [ ] Test the actual kill-wait-relaunch sequence for real, not just each piece in isolation — confirm no race where the new process tries to bind before the old one's port has actually released.
+- [ ] **This session itself must end by using this new mechanism** to restart `review_tool.py` (it touched the file, building the restart capability into it) — the very first real-world use of the tool it just built, and the first session to actually follow the new rule 11.
+
 ## LOCKED — Phase 3: Face Detection & Clustering
 Do not start. Reference only.
 - insightface (GPU) for detection + embedding, output JSONL (file_hash, path, bbox, embedding, detected_at)
