@@ -170,3 +170,32 @@
 - Actually migrating to cloud storage — that's a future, separate decision, not part of this build.
 - Per-person visibility restrictions (see above) — full access for every account for now.
 - Any onboarding/installer/packaging work related to the "give this to friends/family" longer-term direction — that's a separate future concern, not part of making remote access work for the user's own invited people today.
+
+## Phase 2e — Small fixes: dashboard health indicator + video visibility in review_tool.py
+
+**Dashboard "is the local app down" indicator:** The Remote Access panel's existing `review_tool.py` status check emphasizes warning about *multiple* stale processes, but doesn't clearly surface a simple "not running at all" state. Make it a proper three-state indicator: Running (exactly 1 process bound to the configured port) / Not Running (zero) / Warning: multiple instances (more than 1, existing behavior). This directly addresses a real support need — the user discovered via a live 502 error that "the site is down" actually means "the local app on my PC isn't running," and there was no dashboard-visible way to know that at a glance.
+
+**Video visibility in `review_tool.py`:** Video rows already exist in the DB (same `organize.py`/`_process_one` pipeline as photos — hash, path, date, all populated) but are currently excluded from every review-tool view (grid, viewer, stats) by a judgment call made when video had zero chance of ever having a caption. Reverse this: include video rows in the grid/viewer/stats.
+- Caption field for a video with none: show plainly as "No caption" rather than "Not yet captioned" (the latter wrongly implies a pending automated process that will eventually complete).
+- Location: video GPS remains genuinely unavailable (confirmed absent from container metadata) — videos will always show "no location," which is correct/expected, not a bug to chase.
+- The viewer needs to actually play video (a `<video>` element), not just display an `<img>` — the display area must switch based on file type. Existing nav/filter/random/slideshow mechanics should work uniformly across photos and video in the same filtered set.
+- Grid thumbnails: real video-frame thumbnail extraction is a nice-to-have, not required for this pass — a generic video/play-icon placeholder in the grid is an acceptable v1; the real `<video>` player only needs to appear in the full viewer.
+- Since this is the same `review_tool.py` the remote-access tunnel already serves, videos become part of the online/remote version automatically — no separate work needed for that.
+
+## Phase 2f — Editable metadata in review_tool.py (breaks the tool's prior read-only guarantee, on purpose)
+
+**Context:** `review_tool.py` has been structurally read-only this entire project (SQLite opened via `mode=ro`, enforced at the connection level, not just convention) — that was the right call before real authentication existed. Now that Phase 2d's login system is in place, the user wants real editing: captions, tags, location, date, and (once Phase 3 exists) people/faces — including creating captions for video, which never had an automated one to begin with. Every invited/authenticated user (not just the owner) can edit.
+
+**Requirements:**
+
+- **A separate, write-capable DB connection**, used ONLY by new edit endpoints. The existing read-only connection stays exactly as-is for every browsing/GET path — this is additive, not a relaxation of the existing read guarantee for normal use.
+- **Editable fields, to start:** caption, tags (full replace-the-list is fine, doesn't need granular add/remove), location (a free-text override of `location_name`), date taken (with an explicit, visible caveat in the UI: editing this only changes the DB record — it does NOT move, rename, or re-sort the actual file; Phase 1's folder placement is untouched). Design the underlying mechanism generically enough that adding an edit path for people/faces once Phase 3 exists doesn't require re-architecting this — don't build the people/faces UI now (Phase 3 doesn't exist), just don't paint this into a corner.
+- **Video captions are "create," not "edit"** — same mechanism, just starting from an empty/null value instead of overwriting an AI-generated one. Surface an "Add caption" affordance for videos using the same UI/endpoint as editing a photo's caption.
+- **Manual edits must be permanently protected from future automated overwrites.** Once a user edits a field, no automated process should ever silently overwrite it again. Recommended mechanism: a dedicated audit-log table (e.g. `photo_edits`: file_hash, field_name, old_value, new_value, edited_by, edited_at) rather than one boolean-per-field column on `photos` — this both gives a genuine audit trail (useful with multiple invited editors) and gives any automated writer a single, generic place to check "has a human touched this specific field on this file" before writing.
+- **`main.py load-captions` and `src/gps_backfill.py` must both be updated** to check this audit log before applying an automated write to caption/tags or location fields respectively, skipping (and logging as skipped-due-to-manual-edit) any field that already has a manual edit on record. This is a real behavior change to two already-shipped, already-tested pieces of code — test carefully that normal (non-edited) rows continue updating exactly as before, and only edited fields get skipped.
+- **Security, since this is internet-facing and every invited user can now write, not just read:** new edit endpoints must sit behind the existing auth gate (already true for all non-login/logout/static routes) AND get CSRF protection matching the existing login/logout pattern. Validate against an explicit allow-list of editable field names server-side — never accept an arbitrary field name from the client. Reasonable length limits on free-text fields (caption, location override) to prevent abuse.
+- **UI:** add real edit controls (e.g. an edit/pencil affordance next to caption/tags/location/date in the viewer) that submit via `fetch()` to the new endpoints and update the displayed value in place on success, with a clear error state on failure (don't silently swallow a failed edit).
+
+**Explicitly out of scope for this phase:**
+- Any actual Phase 3 people/faces editing UI — Phase 3 doesn't exist yet, this only needs to not block it later.
+- Per-user edit permissions/roles — every authenticated user can edit everything, no distinction between the owner and invited guests for this pass.

@@ -203,6 +203,29 @@ Both priority bugs were reproduced for real (not just reasoned about) and fixed 
   - **Checked whether the same class of gap exists elsewhere (Phase 1b's video logging), as this item asked:** no gap found — video files go through `organize.py::_process_one`, the exact same per-file logging path Phase 1's photos already use (per CLAUDE.md rule 9, video reuses Phase 1's logging as-is, not a separate implementation), so there was never a separate "video logs less" code path to begin with.
 - [x] **Blank results box during a run, both panels — fixed.** `_on_caption_start()`/`_on_gps_start()` now set the results box to `"Running..."` instead of `""` when a run begins, replaced by the real summary on completion/error same as before.
 
+## ACTIVE: Phase 2e — Small fixes: dashboard health indicator + video visibility
+See `photo-organizer-spec.md`'s "Phase 2e" section for full requirements. Summary:
+- [ ] Remote Access panel's `review_tool.py` status check becomes a proper 3-state indicator: Running / **Not Running** (new — currently no clear "down" state, just a warning-on-multiple) / Warning: multiple instances (existing)
+- [ ] Reverse the earlier judgment call excluding video from `review_tool.py` — include video rows in grid/viewer/stats. Video rows already have DB data (hash/path/date) from the shared `organize.py` pipeline; only the display logic needs to change.
+- [ ] Caption field for video: "No caption" (not "Not yet captioned" — the latter wrongly implies a pending process)
+- [ ] Location for video: "no location" is correct/expected (confirmed absent from container metadata), not a bug
+- [ ] Viewer must actually play video (`<video>` element), switching display type by file extension — nav/filter/random/slideshow should work uniformly across photos and video in one filtered set
+- [ ] Grid thumbnails: a generic video/play-icon placeholder is fine for v1 — real frame-extraction thumbnails are a nice-to-have, not required
+- [ ] No extra work needed for remote/online access — same `review_tool.py` the tunnel already serves
+
+## ACTIVE: Phase 2f — Editable metadata in review_tool.py
+See `photo-organizer-spec.md`'s "Phase 2f" section for full requirements — this is a deliberate, significant reversal of the tool's prior structural read-only guarantee, now that Phase 2d's real auth exists. Summary:
+- [ ] New write-capable DB connection for edit endpoints ONLY — existing read-only connection stays untouched for all browsing/GET paths
+- [ ] Editable fields to start: caption, tags (full-replace is fine), location (free-text override), date taken (UI must clearly state this only changes the DB record, does NOT move/rename/re-sort the actual file)
+- [ ] Design the edit mechanism generically enough that people/faces editing can be added later without a rearchitect — but don't build any Phase 3 UI now, Phase 3 doesn't exist
+- [ ] Video captions are "create" not "edit" (same mechanism, starting from empty) — surface an "Add caption" affordance for video
+- [ ] **Manual edits must be permanently protected from future automated overwrites.** Recommended: a `photo_edits` audit table (file_hash, field_name, old_value, new_value, edited_by, edited_at) rather than per-field boolean columns — gives an audit trail AND a generic check point for any automated writer
+- [ ] Update `main.py load-captions` AND `src/gps_backfill.py` to check this audit log before overwriting caption/tags/location — skip (and log as skipped-due-to-manual-edit) any field with a recorded manual edit. Test carefully: normal/non-edited rows must keep updating exactly as before, only edited fields get skipped
+- [ ] Every authenticated user can edit (no per-user roles/permissions for this pass) — user explicitly confirmed this
+- [ ] New edit endpoints: behind the existing auth gate (already true for all non-login/logout/static routes) AND CSRF-protected, matching the login/logout pattern. Server-side allow-list of editable field names — never trust an arbitrary field name from the client. Reasonable length limits on free-text fields.
+- [ ] UI: edit/pencil affordances next to caption/tags/location/date in the viewer, submitting via fetch(), updating in place on success, clear error state on failure (don't silently swallow it)
+- [ ] Explicitly out of scope: any Phase 3 people/faces editing UI, per-user edit permissions/roles
+
 ## LOCKED — Phase 3: Face Detection & Clustering
 Do not start. Reference only.
 - insightface (GPU) for detection + embedding, output JSONL (file_hash, path, bbox, embedding, detected_at)
