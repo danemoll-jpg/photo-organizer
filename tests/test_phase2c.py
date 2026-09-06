@@ -152,8 +152,11 @@ def test_new_filters_alone(tmp: Path) -> None:
     assert hashes == {"h1", "h3", "h5"}, hashes
     resp = client.get("/api/photos?has_location=no&limit=50")
     hashes = {i["file_hash"] for i in resp.get_json()["items"]}
-    assert hashes == {"h2", "h4"}, hashes  # both "checked, none found" and "never checked"
-    print("  has_location=yes/no partition correctly (including never-checked rows)  OK")
+    # h2/h4: "checked, none found" and "never checked" respectively. h6_video
+    # (Phase 2e, included alongside photos now): video GPS is genuinely
+    # unavailable, so it correctly lands here too -- not a special case.
+    assert hashes == {"h2", "h4", "h6_video"}, hashes
+    print("  has_location=yes/no partition correctly (never-checked rows + video, all 'no location')  OK")
 
     # /api/stats must reflect these new filters too, same regression class
     # as Phase 2b's date/folder fix.
@@ -176,7 +179,10 @@ def test_people_filter_is_inert(tmp: Path) -> None:
     # of e.g. a hand-crafted URL.
     resp = client.get("/api/photos?people=someone&limit=50")
     hashes = {i["file_hash"] for i in resp.get_json()["items"]}
-    assert hashes == {"h1", "h2", "h3", "h4", "h5"}, hashes  # unaffected -- video still excluded, nothing else filtered
+    # Phase 2e: video is included alongside photos now, so the unfiltered
+    # set is all 6 rows -- 'people' being ignored is the only thing under
+    # test here.
+    assert hashes == {"h1", "h2", "h3", "h4", "h5", "h6_video"}, hashes
     print("  an unrecognized 'people' param is silently ignored, not applied as a filter  OK")
 
 
@@ -240,21 +246,23 @@ def test_random_order_slideshow_no_extra_pred(tmp: Path) -> None:
     _rt, client = _setup(tmp)
 
     # No tag/caption filter -> the no-extra_pred (_feistel_permute) path.
-    # Video excluded, so the filtered set is exactly {h1..h5}, size 5.
+    # Phase 2e: video is included alongside photos, so the filtered set is
+    # {h1..h5, h6_video}, size 6.
+    all_hashes = {"h1", "h2", "h3", "h4", "h5", "h6_video"}
     seed = "test-seed-123"
     seen = []
-    for idx in range(5):
+    for idx in range(6):
         resp = client.get(f"/api/nav?mode=random&seed={seed}&idx={idx}")
         item = resp.get_json()["item"]
-        assert item is not None, f"idx={idx} should still be within the 5-item permutation"
+        assert item is not None, f"idx={idx} should still be within the 6-item permutation"
         seen.append(item["file_hash"])
-    assert set(seen) == {"h1", "h2", "h3", "h4", "h5"}, seen
-    assert len(set(seen)) == 5, f"a true permutation must never repeat a hash across idx 0..4, got {seen}"
-    print(f"  seed={seed!r} idx 0..4 visits all 5 matching photos exactly once: {seen}  OK")
+    assert set(seen) == all_hashes, seen
+    assert len(set(seen)) == 6, f"a true permutation must never repeat a hash across idx 0..5, got {seen}"
+    print(f"  seed={seed!r} idx 0..5 visits all 6 matching rows (photos + video) exactly once: {seen}  OK")
 
-    resp = client.get(f"/api/nav?mode=random&seed={seed}&idx=5")
+    resp = client.get(f"/api/nav?mode=random&seed={seed}&idx=6")
     assert resp.get_json()["item"] is None, "idx past the end of the filtered set must return null"
-    print("  idx=5 (one past the set size) correctly returns item: null  OK")
+    print("  idx=6 (one past the set size) correctly returns item: null  OK")
 
     resp = client.get(f"/api/nav?mode=random&seed={seed}&idx=-1")
     assert resp.get_json()["item"] is None, "a negative idx must not crash or wrap around"
@@ -265,10 +273,10 @@ def test_random_order_slideshow_no_extra_pred(tmp: Path) -> None:
     # must independently still be valid full permutations.
     seed2 = "another-seed-456"
     seen2 = []
-    for idx in range(5):
+    for idx in range(6):
         resp = client.get(f"/api/nav?mode=random&seed={seed2}&idx={idx}")
         seen2.append(resp.get_json()["item"]["file_hash"])
-    assert set(seen2) == {"h1", "h2", "h3", "h4", "h5"}
+    assert set(seen2) == all_hashes
     print(f"  a second seed also yields a valid full permutation: {seen2} "
           f"({'differs' if seen2 != seen else 'happens to match'} from the first)  OK")
 

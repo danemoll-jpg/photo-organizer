@@ -34,6 +34,21 @@ class PhotoStorage(ABC):
         this path — used as `with storage.open(path) as f: Image.open(f)`.
         Caller is responsible for closing it (via the `with` block)."""
 
+    def local_path(self, path: str) -> str | None:
+        """A real local filesystem path for this item, if the backend has
+        one — None otherwise. Added for Phase 2e's video playback: Flask's
+        `send_file(..., conditional=True)` needs a real path (or file
+        descriptor it can `stat()`) to serve HTTP range requests, which
+        video scrubbing depends on — unlike photo serving, which already
+        decodes the whole image into memory via `open()` regardless, so it
+        never needed this. Every backend still works through `open()`/
+        `exists()` for everything else; this is only consulted as an
+        optimization for range-capable streaming, with a full-read fallback
+        when it returns None (see review_tool.py's video route). The
+        default (used by any future non-local backend that doesn't
+        override this) is None."""
+        return None
+
 
 class LocalDiskStorage(PhotoStorage):
     """Today's only backend: `path` is a real local filesystem path, same
@@ -47,6 +62,9 @@ class LocalDiskStorage(PhotoStorage):
 
     def open(self, path: str) -> BinaryIO:
         return open(path, "rb")
+
+    def local_path(self, path: str) -> str | None:
+        return path
 
 
 def get_storage(cfg) -> PhotoStorage:

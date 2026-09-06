@@ -22,10 +22,20 @@ Read-only, deliberately:
   already produced, including "nothing yet", which must show clearly as
   such (e.g. "Not yet captioned"), never as an error or a blank gap.
 
-Video files are deliberately excluded from every query here (see
-_video_exclusion_sql): Phase 2 never captions video by design (see
-caption.py), so a video row would otherwise show as permanently "not yet
-captioned" forever, which is misleading rather than informative.
+Video files (Phase 2e): included in every query, grid, and the viewer,
+same as photos — they already have real DB rows (hash/path/date) from the
+shared organize.py pipeline, only display logic differed before. Since
+Phase 2 never captions video by design (see caption.py), an uncaptioned
+video shows plainly as "No caption" (not "Not yet captioned", which
+wrongly implies a pending automated process — see _row_to_dict's
+`is_video` field and review.js). GPS/location is genuinely unavailable
+for video (confirmed absent from container metadata — see
+gps_resolver.py) so it always renders as "no location", same as any
+photo that's been checked and had none found — not a special case.
+Grid thumbnails show a generic video/play-icon placeholder rather than a
+real decoded frame (nice-to-have, not built); the full viewer plays the
+actual file via a `<video>` element backed by the /video/<file_hash>
+route below, not the photo-only /image/<file_hash> route.
 
 People/faces: Phase 3 doesn't exist yet. Every photo response carries a
 `people` field that is always `None` right now — the template renders a
@@ -49,7 +59,7 @@ README.md/photo-organizer-spec.md — independent of Plex's own remote
 access, never reusing it). Every route except /login, /logout, and
 /static/* now requires a session (src/auth.py::register_auth's
 before_request hook) — a browser navigation redirects to /login, an
-unauthenticated /api/* or /image/* call gets a plain 401 (review.js
+unauthenticated /api/*, /image/*, or /video/* call gets a plain 401 (review.js
 bounces itself to /login on that, since a redirect response doesn't help
 a fetch() call). Phase 2d also introduced a storage-abstraction seam
 (src/storage.py::PhotoStorage) between this file and "where photo bytes
@@ -62,13 +72,14 @@ import argparse
 import hashlib
 import io
 import json
+import mimetypes
 import random
 import sqlite3
 import threading
 import webbrowser
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, render_template, request, session
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file, session
 from PIL import Image
 
 from src.auth import register_auth
@@ -164,26 +175,19 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
-def _video_exclusion_sql() -> str:
-    if not _video_exts:
-        return ""
-    return " AND (" + " AND ".join("filename NOT LIKE ?" for _ in _video_exts) + ")"
-
-
-def _video_exclusion_params() -> list[str]:
-    return [f"%{ext}" for ext in sorted(_video_exts)]
-
-
 def _build_filters(args) -> tuple[str, list]:
     """Shared WHERE-clause builder for every query below: date range
     (against date_taken -- ISO8601 text sorts correctly lexicographically)
     + folder substring (against current_path) + GPS/location (Phase 2c:
     place-name substring against `location_name`, and/or a has/no-location
-    toggle against the same column) + the video exclusion above. All of
-    these are plain DB columns, so they stay on the cheap indexed-or-LIKE
-    SQL path. Tag and caption-keyword filtering (also Phase 2c) are
-    deliberately NOT here -- see _build_extra_predicate for why those two
-    need a different mechanism. Returns (sql_fragment_after_WHERE, params).
+    toggle against the same column). All of these are plain DB columns, so
+    they stay on the cheap indexed-or-LIKE SQL path. Tag and
+    caption-keyword filtering (also Phase 2c) are deliberately NOT here --
+    see _build_extra_predicate for why those two need a different
+    mechanism. Video rows are NOT excluded here (Phase 2e reversed that
+    earlier judgment call — see module docstring): they're plain `photos`
+    rows like any other, filtered the same way. Returns
+    (sql_fragment_after_WHERE, params).
     """
     clauses = ["1=1"]
     params: list = []
@@ -212,10 +216,12 @@ def _build_filters(args) -> tuple[str, list]:
         # just ones checked-and-found-nothing -- both cases really do have
         # "no location" to show right now, and extract-gps is a separate,
         # user-run step (see CLAUDE.md), so most of the library may not be
-        # checked yet at any given time.
+        # checked yet at any given time. Video rows land here too now
+        # (Phase 2e) -- gps_backfill.py checks them like any other file and
+        # always records no coordinates, so they correctly show "no
+        # location" through this same path, not a special case.
         clauses.append("location_name IS NULL")
-    sql = " AND ".join(clauses) + _video_exclusion_sql()
-    params.extend(_video_exclusion_params())
+    sql = " AND ".join(clauses)
     return sql, params
 
 
@@ -744,6 +750,45 @@ def serve_image(file_hash: str):
     # change for the life of this DB.
     resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return resp
+
+
+@app.route("/video/<file_hash>")
+def serve_video(file_hash: str):
+    """Streams the actual video file for the viewer's <video> element
+    (Phase 2e) -- unlike serve_image, this is NOT re-encoded/downscaled:
+    video files are already reasonably sized and there's no equivalent of
+    PIL's cheap thumbnail() for video, so this just serves the original
+    bytes. Looked up by file_hash, same as serve_image, so a stale/
+    bookmarked URL can't read an arbitrary filesystem path.
+
+    Uses send_file(..., conditional=True) so the browser can issue HTTP
+    Range requests (needed for scrubbing/seeking, and for some browsers'
+    initial-load behavior) -- that needs a real local path Werkzeug can
+    stat() and seek(), which _storage.local_path() provides for today's
+    only backend (LocalDiskStorage). A future non-local backend without a
+    real path falls back to serving the whole file as one response (no
+    range support) rather than failing outright -- video playback still
+    works, just without scrubbing, until that backend adds proper range
+    support of its own."""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT current_path, filename FROM photos WHERE file_hash = ?", (file_hash,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        abort(404)
+    path, filename = row["current_path"], row["filename"]
+    if Path(filename or "").suffix.lower() not in _video_exts:
+        abort(404)  # /video/* is for video rows only -- use /image/<hash> for photos
+    if not _storage.exists(path):
+        abort(404)
+    mimetype = mimetypes.guess_type(filename or path)[0] or "video/mp4"
+    local_path = _storage.local_path(path)
+    if local_path is not None:
+        return send_file(local_path, mimetype=mimetype, conditional=True)
+    with _storage.open(path) as f:
+        data = f.read()
+    return Response(data, mimetype=mimetype)
 
 
 def _open_browser_later(url: str) -> None:

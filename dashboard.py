@@ -91,12 +91,18 @@ Panels:
        have seen SOMETHING answering that night and reported "running",
        never surfacing that it was the wrong, stale instance). Instead
        queries src.port_check.listening_pids(cfg.review_tool_port) — the
-       same `netstat -ano` approach used to diagnose the real incident —
-       and warns clearly, distinctly styled, if MORE than one PID is bound
-       to the port. Refreshes on a background timer plus a manual
-       "Refresh" button; dashboard.py has no code path that launches
-       review_tool.py itself, so this is detection/warning only, not
-       prevention (see TODO.md's follow-up note on why).
+       same `netstat -ano` approach used to diagnose the real incident.
+       A proper 3-state indicator (Phase 2e), each with its own label
+       style so the state reads at a glance, not just from the text:
+       Running (exactly 1 PID, "Ok.TLabel", green), Not Running (zero
+       PIDs, "Down.TLabel", orange — this is the state that was missing
+       before Phase 2e: a user seeing a remote 502 had no dashboard-visible
+       way to tell "the tunnel is fine, the local app just isn't running"),
+       and Warning: multiple instances (more than 1 PID, "Warn.TLabel",
+       red — the original incident). Refreshes on a background timer plus
+       a manual "Refresh" button; dashboard.py has no code path that
+       launches review_tool.py itself, so this is detection/warning only,
+       not prevention (see TODO.md's follow-up note on why).
     2. Cloudflare Tunnel Start/Stop — spawns/terminates
        `cloudflared tunnel run <cfg.cloudflare_tunnel_name>` as a
        subprocess (same "background worker, only touch Tk widgets from the
@@ -413,6 +419,8 @@ class DashboardApp:
         # --- Remote Access panel (Phase 2d follow-up) ---
         style = ttk.Style()
         style.configure("Warn.TLabel", foreground="#b30000")
+        style.configure("Down.TLabel", foreground="#b35c00")
+        style.configure("Ok.TLabel", foreground="#1a7f37")
 
         ra_frame = self._make_collapsible("Remote Access (Cloudflare Tunnel)", start_expanded=False)
 
@@ -1023,8 +1031,10 @@ class DashboardApp:
         port right now (src.port_check.listening_pids — a netstat-based
         check, not a "does something respond" probe — see this panel's
         docstring in the module header for why that distinction is exactly
-        what a real incident hinged on) and updates the status label,
-        switching to the Warn style if more than one PID is involved."""
+        what a real incident hinged on) and updates the status label as a
+        proper 3-state indicator (Phase 2e): Running / Not Running /
+        Warning: multiple instances — each with its own label style so the
+        state is visible at a glance, not just from reading the text."""
         if self.cfg is None:
             return
         port = self.cfg.review_tool_port
@@ -1037,13 +1047,18 @@ class DashboardApp:
             return
         if not pids:
             self.review_tool_status_label.configure(
-                text=f"review_tool.py: not running — nothing bound to port {port}",
-                style="TLabel",
+                text=(
+                    f"● Not Running — nothing bound to port {port}. If a remote/tunnel "
+                    "visit is showing an error, this is likely why: the tunnel itself "
+                    "may be fine, but review_tool.py isn't running on this PC. Start it "
+                    "(Launch Review Tool.bat) if it should be."
+                ),
+                style="Down.TLabel",
             )
         elif len(pids) == 1:
             self.review_tool_status_label.configure(
-                text=f"review_tool.py: running (1 process, PID {pids[0]}, port {port})",
-                style="TLabel",
+                text=f"● Running — 1 process, PID {pids[0]}, port {port}",
+                style="Ok.TLabel",
             )
         else:
             pid_list = ", ".join(str(p) for p in pids)

@@ -6,7 +6,7 @@ under E:\\Pics (same posture as tests/test_phase2_pipeline.py):
      src/gps_backfill.py) -- see test_gps_extract_and_geocode().
   2. review_tool.py's read-only JSON API (Flask test client, no real HTTP
      server started) -- pagination, filters, the live-captions-cache
-     refresh, and video exclusion.
+     refresh, and (Phase 2e) video rows being included alongside photos.
 
 Usage:
     venv\\Scripts\\python tests\\test_phase2b.py
@@ -29,6 +29,7 @@ from src.config import Config
 from src.db import connect, init_db
 from src.gps_backfill import run_gps_extraction
 from src.gps_resolver import extract_gps_coords, reverse_geocode, resolve_location
+from src.storage import get_storage
 
 try:
     import pillow_heif
@@ -195,41 +196,56 @@ def test_review_tool_api(tmp: Path) -> None:
 
     review_tool._cfg = cfg
     review_tool._video_exts = cfg.video_extensions_normalized
+    review_tool._storage = get_storage(cfg)
     review_tool._captions_cache = review_tool.CaptionsCache(cfg.captions_path_abs)
     review_tool._captions_cache.refresh()
 
     client = review_tool.app.test_client()
 
-    # --- video exclusion + "not yet captioned" + basic fields ---
+    all_hashes = {"hash_captioned", "hash_pending", "hash_third", "hash_video"}
+
+    # --- Phase 2e: video included alongside photos + basic fields ---
     resp = client.get("/api/photos?limit=50")
     data = resp.get_json()
     hashes = {item["file_hash"] for item in data["items"]}
-    assert "hash_video" not in hashes, "video row leaked into the review tool's results"
-    assert {"hash_captioned", "hash_pending", "hash_third"} == hashes
+    assert hashes == all_hashes, "video row must appear in the review tool's results (Phase 2e)"
     by_hash = {item["file_hash"]: item for item in data["items"]}
     assert by_hash["hash_captioned"]["captioned"] is True
     assert by_hash["hash_captioned"]["caption"] == "A test photo."
     assert by_hash["hash_captioned"]["tags"] == ["test", "fixture"]
     assert by_hash["hash_captioned"]["location_name"] == "Marietta, GA"
+    assert by_hash["hash_captioned"]["is_video"] is False
     assert by_hash["hash_pending"]["captioned"] is False and by_hash["hash_pending"]["caption"] is None
     assert by_hash["hash_pending"]["location_name"] is None and by_hash["hash_pending"]["gps_checked"] is False
     assert by_hash["hash_captioned"]["people"] is None, "Phase 3 placeholder must stay None"
-    print("  video excluded, captioned/pending/location fields all correct  OK")
+    assert by_hash["hash_video"]["is_video"] is True, "video row must be flagged is_video for the front end"
+    assert by_hash["hash_video"]["captioned"] is False and by_hash["hash_video"]["caption"] is None, \
+        "video never gets an automated caption -- the front end renders this as 'No caption', not 'Not yet captioned'"
+    assert by_hash["hash_video"]["location_name"] is None, "video GPS is genuinely unavailable -- correctly 'no location'"
+    print("  video included with is_video/caption/location fields all correct  OK")
 
-    # --- keyset pagination: page size 2 across 3 matching rows ---
+    # --- keyset pagination: page size 2 across all 4 matching rows ---
+    # Expected current_path order computed from the fixture itself (not
+    # hardcoded) so this doesn't silently assume a particular path-sort
+    # quirk (e.g. the "Video" subfolder sorting before lowercase filenames).
+    expected_order = [h for h, _ in sorted(
+        [("hash_captioned", str(photo_captioned)), ("hash_pending", str(photo_pending)),
+         ("hash_third", str(photo_other_folder)), ("hash_video", str(video_path))],
+        key=lambda t: t[1],
+    )]
     resp = client.get("/api/photos?limit=2")
     page1 = resp.get_json()
     assert len(page1["items"]) == 2 and page1["has_next"] is True and page1["has_prev"] is False
     resp = client.get(f"/api/photos?limit=2&after={page1['next_cursor']}")
     page2 = resp.get_json()
-    assert len(page2["items"]) == 1 and page2["has_next"] is False and page2["has_prev"] is True
-    seen = {i["file_hash"] for i in page1["items"]} | {i["file_hash"] for i in page2["items"]}
-    assert seen == {"hash_captioned", "hash_pending", "hash_third"}
+    assert len(page2["items"]) == 2 and page2["has_next"] is False and page2["has_prev"] is True
+    seen_order = [i["file_hash"] for i in page1["items"]] + [i["file_hash"] for i in page2["items"]]
+    assert seen_order == expected_order
     # paging back from page2 with `before` must reproduce page1 exactly
     resp = client.get(f"/api/photos?limit=2&before={page2['items'][0]['current_path']}")
     back = resp.get_json()
     assert [i["file_hash"] for i in back["items"]] == [i["file_hash"] for i in page1["items"]]
-    print("  keyset pagination forward/back across a page boundary  OK")
+    print("  keyset pagination forward/back across a page boundary (video included)  OK")
 
     # --- folder + date filters ---
     resp = client.get("/api/photos?folder=captioned.jpg")
@@ -244,25 +260,37 @@ def test_review_tool_api(tmp: Path) -> None:
     resp = client.get("/api/stats?folder=captioned.jpg")
     assert resp.get_json()["total_photos"] == 1, "/api/stats must apply the same filters as /api/photos"
     resp = client.get("/api/stats")
-    assert resp.get_json()["total_photos"] == 3
-    print("  /api/stats honors filters (regression check)  OK")
+    assert resp.get_json()["total_photos"] == 4, "/api/stats total must include video rows (Phase 2e)"
+    print("  /api/stats honors filters (regression check) and counts video  OK")
 
-    # --- /api/nav: cursor-based step navigation, including reaching the end ---
-    resp = client.get("/api/nav?dir=next")
-    first = resp.get_json()["item"]
-    assert first["file_hash"] == "hash_captioned"
-    resp = client.get(f"/api/nav?dir=next&cursor={first['current_path']}")
-    second = resp.get_json()["item"]
-    assert second["file_hash"] == "hash_pending"
-    resp = client.get(f"/api/nav?dir=prev&cursor={second['current_path']}")
-    assert resp.get_json()["item"]["file_hash"] == "hash_captioned"
-    # step past the last matching photo -> None, not an error
-    resp = client.get(f"/api/nav?dir=next&cursor={second['current_path']}")
-    third = resp.get_json()["item"]
-    assert third["file_hash"] == "hash_third"
-    resp = client.get(f"/api/nav?dir=next&cursor={third['current_path']}")
-    assert resp.get_json()["item"] is None, "stepping past the last photo must return item: null, not an error"
-    print("  /api/nav steps next/prev and returns null gracefully past the end  OK")
+    # --- /api/nav: cursor-based step navigation, including reaching the end
+    # (walks the full expected_order computed above, so video is exercised
+    # wherever it actually falls in current_path order, not assumed) ---
+    cursor = None
+    for expected_hash in expected_order:
+        params = f"?dir=next&cursor={cursor}" if cursor else "?dir=next"
+        resp = client.get(f"/api/nav{params}")
+        item = resp.get_json()["item"]
+        assert item["file_hash"] == expected_hash
+        cursor = item["current_path"]
+    # one prev step back from the last item must land on the second-to-last
+    resp = client.get(f"/api/nav?dir=prev&cursor={cursor}")
+    assert resp.get_json()["item"]["file_hash"] == expected_order[-2]
+    # step past the last matching item -> None, not an error
+    resp = client.get(f"/api/nav?dir=next&cursor={cursor}")
+    assert resp.get_json()["item"] is None, "stepping past the last item must return item: null, not an error"
+    print("  /api/nav steps next/prev across photos AND video, returns null gracefully past the end  OK")
+
+    # --- /video/<hash> streams the video file; 404s for a non-video hash ---
+    resp = client.get("/video/hash_video")
+    assert resp.status_code == 200
+    assert resp.data == b"FAKE-MP4-BYTES"
+    assert resp.headers.get("Content-Type", "").startswith("video/")
+    resp = client.get("/video/hash_captioned")
+    assert resp.status_code == 404, "/video/* must refuse a photo hash -- use /image/<hash> for those"
+    resp = client.get("/video/does-not-exist")
+    assert resp.status_code == 404
+    print("  /video/<hash> serves video bytes and rejects non-video hashes  OK")
 
     # --- captions cache picks up a newly-appended line without restarting ---
     with open(captions_path, "a", encoding="utf-8") as f:

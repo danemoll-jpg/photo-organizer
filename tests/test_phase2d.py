@@ -134,7 +134,12 @@ def test_login_flow_and_session_persistence(tmp: Path) -> None:
     # docstring / static/review.js's fetchJSON).
     resp = client.get("/api/photos")
     assert resp.status_code == 401 and resp.get_json() == {"error": "unauthorized"}
-    print("  unauthenticated page nav -> 302 to /login; unauthenticated /api/* -> 401 JSON  OK")
+    # Phase 2e: /video/* (the new video-streaming route) must get the same
+    # 401-not-redirect treatment as /image/* always has -- a <video> tag
+    # can't follow a login redirect any more usefully than fetch() can.
+    resp = client.get("/video/some-hash")
+    assert resp.status_code == 401 and resp.get_json() == {"error": "unauthorized"}
+    print("  unauthenticated page nav -> 302 to /login; unauthenticated /api/*, /video/* -> 401 JSON  OK")
 
     login_page = client.get("/login")
     csrf = _csrf_from_html(login_page.get_data(as_text=True))

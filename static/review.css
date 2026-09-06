@@ -183,6 +183,16 @@ body {
   overflow: hidden;
 }
 .card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Phase 2e: grid placeholder for video rows -- a generic play-icon tile,
+   not a real decoded frame (real thumbnail extraction is a nice-to-have,
+   not built -- see review_tool.py's module docstring). */
+.card .thumb-video-placeholder {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: #1b1b1b;
+  color: #fff;
+  font-size: 32px;
+}
 .card .card-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
 .card .card-path { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .card-date { font-size: 12px; color: var(--muted); }
@@ -234,6 +244,7 @@ body {
   min-height: 0;
 }
 #viewer-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+#viewer-video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .viewer-nomore {
   position: absolute; inset: auto 0 20px 0; text-align: center;
   color: #fff; font-size: 13px;

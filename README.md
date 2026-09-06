@@ -67,10 +67,13 @@ duplicate any scan/date-resolve/copy-verify-delete logic, it just calls into
   run's log live. Same log files the CLI writes — no separate GUI-only log.
 - **Remote Access** — Phase 2d follow-up. Start/Stop buttons for the
   Cloudflare Tunnel (see "Phase 2d — remote/shared access" below), plus a
-  status line for `review_tool.py` itself that specifically checks what's
-  bound to its configured port and warns clearly if more than one process
-  is involved — see this panel's docstring in `dashboard.py` for the real
-  incident that motivated the port check.
+  status line for `review_tool.py` itself that checks what's bound to its
+  configured port. A proper 3-state indicator (Phase 2e): green **Running**
+  (exactly one process), orange **Not Running** (nothing bound — the
+  at-a-glance signal that a remote 502 means "the tunnel's fine, the local
+  app just isn't running"), or red **Warning: multiple instances** (more
+  than one process — see this panel's docstring in `dashboard.py` for the
+  real incident that motivated that check).
 
 `main.py`'s CLI commands keep working exactly as before; the dashboard is an
 additional front end, not a replacement.
@@ -295,9 +298,16 @@ organize/caption/extract-gps itself.
   filters above, which read this same live cache rather than the DB's
   `caption`/`tags` columns (those only reflect the last `load-captions`
   run).
-- Video files are excluded from every view here — Phase 2 never captions
-  video by design, so showing them would mean a permanent, misleading
-  "not yet captioned" that will never resolve.
+- **Video (MP4/MOV/AVI)** appears in the grid, viewer, and stats right
+  alongside photos (Phase 2e) — grid thumbnails show a generic play-icon
+  placeholder (real frame-extraction thumbnails aren't built), and the
+  viewer plays the actual file via a `<video>` element in place of the
+  photo `<img>`. Since Phase 2 never captions video by design, an
+  uncaptioned video shows plainly as **"No caption"** — not "Not yet
+  captioned", which would wrongly imply a pending automated process.
+  Location always shows "no location" for video, which is correct — its
+  GPS is confirmed absent from the container metadata, not a bug.
+  Filters/random/slideshow all treat video rows the same as photos.
 
 ## Phase 2d — remote/shared access
 
@@ -515,13 +525,15 @@ venv\Scripts\python tests\test_phase2b.py
 Covers Phase 2b end to end against synthetic fixtures: GPS extraction +
 offline reverse geocoding (including resumability via `gps_checked`), and
 `review_tool.py`'s JSON API via Flask's test client — pagination across a
-page boundary in both directions, date/folder filters, video exclusion,
+page boundary in both directions, date/folder filters, video rows included
+alongside photos with correct `is_video`/caption/location fields (Phase
+2e), `/video/<hash>` serving video bytes and rejecting non-video hashes,
 `/api/stats` respecting the same filters as `/api/photos`, `/api/nav`
-stepping next/prev and returning `null` gracefully past the last photo (not
-an error), and the live `captions.jsonl` tail correctly picking up a
-newly-appended line — as well as tolerating a corrupt/incomplete trailing
-one — without restarting the tool. No Ollama/GPU dependency, unlike the
-Phase 2 pipeline test above.
+stepping next/prev across photos AND video and returning `null` gracefully
+past the last item (not an error), and the live `captions.jsonl` tail
+correctly picking up a newly-appended line — as well as tolerating a
+corrupt/incomplete trailing one — without restarting the tool. No
+Ollama/GPU dependency, unlike the Phase 2 pipeline test above.
 
 ```bash
 venv\Scripts\python tests\test_phase2c.py

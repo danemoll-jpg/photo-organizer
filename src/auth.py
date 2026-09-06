@@ -198,13 +198,16 @@ def register_auth(app, cfg, logger: logging.Logger | None = None,
             return None  # let unmatched routes 404 normally rather than masking as an auth redirect
         if session.get("user"):
             return None
-        if request.path.startswith("/api/") or request.path.startswith("/image/"):
-            # These are fetch()/<img> calls from review.js, not full page
-            # navigations — a redirect response wouldn't be followed the
-            # way a browser follows one for a normal link, and would just
-            # look like a broken/empty result. 401 lets the front end
-            # notice and bounce to /login itself (see fetchJSON in
-            # review.js).
+        if request.path.startswith("/api/") or request.path.startswith("/image/") \
+                or request.path.startswith("/video/"):
+            # These are fetch()/<img>/<video> calls from review.js, not full
+            # page navigations — a redirect response wouldn't be followed
+            # the way a browser follows one for a normal link, and would
+            # just look like a broken/empty result (a <video> element in
+            # particular would just fail to load with no obvious cause).
+            # 401 lets the front end notice and bounce to /login itself
+            # (see fetchJSON in review.js) — the same reasoning that already
+            # applied to /image/* now covers /video/* too (Phase 2e).
             return jsonify({"error": "unauthorized"}), 401
         return redirect(url_for("login", next=request.path))
 

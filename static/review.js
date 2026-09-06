@@ -20,6 +20,13 @@
  *     set without ever fetching/shuffling it client-side. A fresh seed is
  *     minted whenever order is switched to Random (or filters change while
  *     it's active), matching "fresh shuffle every time it starts".
+ *
+ * Phase 2e addition: video rows flow through the exact same grid/filter/
+ *   nav/random/slideshow code as photos (server no longer excludes them —
+ *   see review_tool.py) — the only branching here is display: grid cards
+ *   show a play-icon placeholder instead of a decoded thumbnail, and the
+ *   viewer swaps in a real <video> element (playing /video/<hash> — see
+ *   renderViewerItem) in place of the <img> used for photos.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -51,6 +58,7 @@
 
   const viewerEl = el("viewer");
   const viewerImg = el("viewer-img");
+  const viewerVideo = el("viewer-video");
   const viewerNoMore = el("viewer-nomore");
   const viewerPath = el("viewer-path");
   const viewerDate = el("viewer-date");
@@ -133,7 +141,13 @@
   }
 
   function captionHtml(item) {
-    if (!item.captioned) return `<span class="card-caption pending">Not yet captioned</span>`;
+    if (!item.captioned) {
+      // Video never gets an automated caption (Phase 2 doesn't caption
+      // video by design) -- "Not yet captioned" would wrongly imply a
+      // pending process that will eventually get to it.
+      const text = item.is_video ? "No caption" : "Not yet captioned";
+      return `<span class="card-caption pending">${text}</span>`;
+    }
     return `<span class="card-caption">${escapeHtml(item.caption || "")}</span>`;
   }
 
@@ -162,8 +176,14 @@
     for (const item of state.grid.items) {
       const card = document.createElement("div");
       card.className = "card";
+      const thumb = item.is_video
+        // Phase 2e: no real frame-extraction thumbnail yet -- a generic
+        // play-icon placeholder tile stands in for the grid (the full
+        // viewer plays the actual file, see openViewer/renderViewerItem).
+        ? `<div class="thumb-video-placeholder" title="Video">&#9654;</div>`
+        : `<img loading="lazy" src="/image/${item.file_hash}?max=400" alt="">`;
       card.innerHTML = `
-        <div class="thumb-wrap"><img loading="lazy" src="/image/${item.file_hash}?max=400" alt=""></div>
+        <div class="thumb-wrap">${thumb}</div>
         <div class="card-body">
           <div class="card-path" title="${escapeHtml(item.current_path)}">${escapeHtml(item.relative_path)}</div>
           <div class="card-date">${fmtDate(item.date_taken)}${item.date_source ? " · " + item.date_source : ""}</div>
@@ -250,14 +270,33 @@
     state.viewer.current = item;
     viewerNoMore.hidden = true;
     if (!item) return;
-    viewerImg.src = `/image/${item.file_hash}?max=1800`;
+    // Phase 2e: the viewer plays actual video via <video>, switching away
+    // from the <img> used for photos -- always pause+clear the video
+    // element when it's not the one showing, so a paused/still-loading
+    // video doesn't keep decoding/downloading in the background while a
+    // photo (or a different video) is on screen.
+    if (item.is_video) {
+      viewerImg.hidden = true;
+      viewerImg.removeAttribute("src");
+      viewerVideo.hidden = false;
+      viewerVideo.src = `/video/${item.file_hash}`;
+    } else {
+      viewerVideo.pause();
+      viewerVideo.removeAttribute("src");
+      viewerVideo.load();
+      viewerVideo.hidden = true;
+      viewerImg.hidden = false;
+      viewerImg.src = `/image/${item.file_hash}?max=1800`;
+    }
     viewerImg.alt = item.relative_path;
     viewerPath.textContent = item.relative_path;
     viewerPath.title = item.current_path;
     viewerDate.textContent = `${fmtDate(item.date_taken)}${item.date_source ? " (source: " + item.date_source + ")" : ""}`;
     viewerCaption.innerHTML = item.captioned
       ? escapeHtml(item.caption || "")
-      : `<span class="placeholder">Not yet captioned — the background Phase 2 run hasn't reached this photo yet.</span>`;
+      : (item.is_video
+          ? `<span class="placeholder">No caption</span>`
+          : `<span class="placeholder">Not yet captioned — the background Phase 2 run hasn't reached this photo yet.</span>`);
     viewerTags.innerHTML = (item.tags && item.tags.length)
       ? item.tags.map(t => `<span class="badge">${escapeHtml(t)}</span>`).join(" ")
       : `<span class="placeholder">—</span>`;
@@ -284,6 +323,9 @@
 
   function closeViewer() {
     stopSlideshow();
+    viewerVideo.pause();
+    viewerVideo.removeAttribute("src");
+    viewerVideo.load();
     state.viewer.open = false;
     viewerEl.hidden = true;
   }
