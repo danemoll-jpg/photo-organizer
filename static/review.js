@@ -51,13 +51,13 @@
  *
  * Grid filter improvements batch (this follow-up session):
  *   - Tag suggestions moved from a native <datalist> to a hand-built
- *     dropdown (see renderTagSuggestions/hideTagSuggestions below) --
- *     <datalist>'s suggestion popup never renders at all on WebKit/iOS (a
- *     real platform limitation: the exact-match filtering itself always
- *     worked fine there, only the suggestion UI was invisible). Built from
- *     plain DOM elements + our own JS filtering, so it works identically
- *     on every browser/platform rather than depending on any browser's
- *     native rendering of anything.
+ *     dropdown (see attachSuggestionDropdown below) -- <datalist>'s
+ *     suggestion popup never renders at all on WebKit/iOS (a real platform
+ *     limitation: the exact-match filtering itself always worked fine
+ *     there, only the suggestion UI was invisible). Built from plain DOM
+ *     elements + our own JS filtering, so it works identically on every
+ *     browser/platform rather than depending on any browser's native
+ *     rendering of anything.
  *   - A visible match-count ("N item(s) match your filters"), shown only
  *     while a filter is active -- reuses the /api/stats call refreshStats()
  *     already makes (no new network request).
@@ -103,6 +103,15 @@
  *     toggled by #viewer-info-toggle (setInfoExpanded below) -- purely a
  *     show/hide of .viewer-details via a class on .viewer-panel; nothing
  *     about editing itself changes once it's expanded.
+ *
+ * Real-user-feedback fix (this follow-up session): Part A's "Set location"
+ *   was a <select> restricted to /api/facets' existing distinct-location
+ *   list, so a genuinely new place (nothing yet reverse-geocoded there)
+ *   couldn't be entered at all. Now free-text + a suggestion dropdown --
+ *   see attachSuggestionDropdown, factored out of the Tag filter's own
+ *   fix above so this reuses that exact behavior rather than a second
+ *   copy-pasted implementation. Scoped to the bulk-edit UI only -- the
+ *   single-item viewer edit form's Location field was already free-text.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -152,7 +161,11 @@
   const bulkBarEl = el("bulk-bar");
   const bulkCountEl = el("bulk-count");
   const bulkResultEl = el("bulk-result");
-  const bulkLocationSelect = el("bulk-location");
+  // Real-user-feedback fix: free-text + suggestion dropdown, replacing the
+  // old closed <select> that couldn't accept a genuinely new place -- see
+  // attachSuggestionDropdown below.
+  const bulkLocationInput = el("bulk-location-input");
+  const bulkLocationSuggestionsEl = el("bulk-location-suggestions");
 
   const viewerEl = el("viewer");
   const viewerPanelEl = document.querySelector(".viewer-panel");
@@ -268,82 +281,95 @@
   // Facets (Location dropdown + Tag suggestion data)
   // ---------------------------------------------------------------------
   let allTags = []; // populated below, filtered client-side by the Tag suggestion dropdown
+  let allLocations = []; // ditto, for the bulk-edit Location suggestion dropdown below
 
   async function loadFacets() {
     try {
       const data = await fetchJSON("/api/facets");
       const locSel = el("f-location");
-      // Phase 2h Part A: the bulk-action bar's "Set location" dropdown uses
-      // this exact same distinct-location list (per spec: "same dropdown
-      // (existing distinct-location list) as the single-item edit UI" --
-      // this facets-backed list is the one already-existing source of
-      // truth for "known locations" in this tool, the same one the grid's
-      // own Location filter dropdown above already draws from).
       for (const name of data.locations || []) {
         const opt = document.createElement("option");
         opt.value = name;
         opt.textContent = name;
         locSel.appendChild(opt);
-        bulkLocationSelect.appendChild(opt.cloneNode(true));
       }
       allTags = data.tags || [];
+      // Real-user-feedback fix: the bulk-edit Location field used to clone
+      // these same <option>s into a second <select>, which meant it could
+      // only ever bulk-set a location some OTHER photo already had. It's
+      // now free-text (see attachSuggestionDropdown below) -- this list is
+      // just quick-pick suggestions, not a hard constraint on what can be
+      // typed/submitted.
+      allLocations = data.locations || [];
     } catch (e) {
       // Non-fatal: filters just show "Any"/no suggestions until reloaded.
     }
   }
 
   // ---------------------------------------------------------------------
-  // Tag filter suggestions (custom dropdown -- see module docstring for
-  // why this replaced <datalist>)
+  // Hand-built suggestion dropdown (custom, not <datalist> -- see module
+  // docstring: <datalist>'s popup never renders at all on WebKit/iOS).
+  // Originally built for the Tag filter only; factored out here so the
+  // bulk-edit Location field (real-user-feedback fix, below) can reuse the
+  // exact same behavior instead of a second copy-pasted implementation.
+  // `getItems()` returns the full current candidate list (already-loaded
+  // facet data) each time a suggestion list is rendered.
   // ---------------------------------------------------------------------
-  const MAX_TAG_SUGGESTIONS = 50; // plenty for a "did you mean" list; keeps a huge tag table cheap to render
-  const tagInput = el("f-tag");
-  const tagSuggestionsEl = el("f-tag-suggestions");
+  const MAX_SUGGESTIONS = 50; // plenty for a "did you mean" list; keeps a huge facet table cheap to render
 
-  function renderTagSuggestions() {
-    const q = tagInput.value.trim().toLowerCase();
-    const matches = (q ? allTags.filter((t) => t.toLowerCase().includes(q)) : allTags).slice(0, MAX_TAG_SUGGESTIONS);
-    if (!matches.length) {
-      hideTagSuggestions();
-      return;
+  function attachSuggestionDropdown(inputEl, listEl, getItems) {
+    function render() {
+      const q = inputEl.value.trim().toLowerCase();
+      const items = getItems();
+      const matches = (q ? items.filter((t) => t.toLowerCase().includes(q)) : items).slice(0, MAX_SUGGESTIONS);
+      if (!matches.length) {
+        hide();
+        return;
+      }
+      listEl.innerHTML = matches.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+      listEl.hidden = false;
     }
-    tagSuggestionsEl.innerHTML = matches.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
-    tagSuggestionsEl.hidden = false;
+    function hide() {
+      listEl.hidden = true;
+      listEl.innerHTML = "";
+    }
+    inputEl.addEventListener("input", render);
+    inputEl.addEventListener("focus", render);
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hide();
+    });
+    // mousedown (not click) so this fires BEFORE the input's blur handler
+    // below would otherwise hide the list first -- selecting a suggestion
+    // must land its value in the field, still free-text/editable afterward
+    // (same as picking a <datalist> option used to), not lock it in.
+    listEl.addEventListener("mousedown", (e) => {
+      const li = e.target.closest("li");
+      if (!li) return;
+      e.preventDefault(); // don't let the input lose focus over this
+      inputEl.value = li.textContent;
+      hide();
+    });
+    inputEl.addEventListener("blur", () => {
+      // Short delay so the mousedown handler above still gets to run first
+      // -- blur fires the instant focus leaves the input, which a
+      // mousedown on the suggestion list technically does before its own
+      // handler runs.
+      setTimeout(hide, 150);
+    });
+    // Clicking anywhere else on the page should close an open dropdown too
+    // (e.g. clicking straight into another field without going through
+    // blur-then-something-else first).
+    document.addEventListener("click", (e) => {
+      if (e.target !== inputEl && !listEl.contains(e.target)) hide();
+    });
+    return hide;
   }
 
-  function hideTagSuggestions() {
-    tagSuggestionsEl.hidden = true;
-    tagSuggestionsEl.innerHTML = "";
-  }
-
-  tagInput.addEventListener("input", renderTagSuggestions);
-  tagInput.addEventListener("focus", renderTagSuggestions);
-  tagInput.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") hideTagSuggestions();
-  });
-  // mousedown (not click) so this fires BEFORE the input's blur handler
-  // below would otherwise hide the list first -- selecting a suggestion
-  // must land its value in the field, still free-text/editable afterward
-  // (same as picking a <datalist> option used to), not lock it in.
-  tagSuggestionsEl.addEventListener("mousedown", (e) => {
-    const li = e.target.closest("li");
-    if (!li) return;
-    e.preventDefault(); // don't let the input lose focus over this
-    tagInput.value = li.textContent;
-    hideTagSuggestions();
-  });
-  tagInput.addEventListener("blur", () => {
-    // Short delay so the mousedown handler above still gets to run first
-    // -- blur fires the instant focus leaves the input, which a mousedown
-    // on the suggestion list technically does before its own handler runs.
-    setTimeout(hideTagSuggestions, 150);
-  });
-  // Clicking anywhere else on the page should close an open dropdown too
-  // (e.g. clicking straight into another filter field without going
-  // through blur-then-something-else first).
-  document.addEventListener("click", (e) => {
-    if (e.target !== tagInput && !tagSuggestionsEl.contains(e.target)) hideTagSuggestions();
-  });
+  const tagInput = el("f-tag");
+  const hideTagSuggestions = attachSuggestionDropdown(tagInput, el("f-tag-suggestions"), () => allTags);
+  // Real-user-feedback fix: bulk-edit Location, same pattern, suggestions
+  // drawn from allLocations instead of allTags.
+  attachSuggestionDropdown(bulkLocationInput, bulkLocationSuggestionsEl, () => allLocations);
 
   // ---------------------------------------------------------------------
   // Stats
@@ -543,11 +569,14 @@
   }
 
   el("bulk-location-apply").addEventListener("click", async () => {
-    const value = bulkLocationSelect.value;
-    if (!value) { alert("Choose a location first."); return; }
+    // Real-user-feedback fix: free-text now, so any typed value (not just
+    // one already in allLocations) is accepted and submitted.
+    const value = bulkLocationInput.value.trim();
+    if (!value) { alert("Type a location first."); return; }
     try {
       const data = await postBulkEdit("location", value, "set");
       showBulkResult(data, "Set location");
+      bulkLocationInput.value = "";
       await afterBulkAction();
     } catch (e) { alert(e.message); }
   });

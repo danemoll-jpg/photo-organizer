@@ -88,7 +88,20 @@
   <div class="bulk-bar-count"><strong id="bulk-count">0</strong> selected</div>
   <div class="bulk-actions">
     <label>Set location
-      <select id="bulk-location"><option value="">Choose…</option></select>
+      <!-- Real-user-feedback fix: this was a <select> restricted to
+           /api/facets' existing distinct-location list, so a genuinely new
+           place (e.g. Kiev, Ukraine -- no photo reverse-geocoded there yet)
+           couldn't be entered at all. Now the same free-text-input +
+           custom-suggestion-dropdown pattern as the Tag filter (see
+           static/review.js's attachSuggestionDropdown, factored out of that
+           filter's own iOS <datalist> fix) -- suggestions are drawn from
+           the same facets list for quick-pick convenience, but ANY typed
+           value is accepted and submitted. The single-item viewer edit
+           form's Location field was already free-text and is untouched. -->
+      <span class="tag-input-wrap">
+        <input type="text" id="bulk-location-input" placeholder="e.g. Kiev, Ukraine" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <ul id="bulk-location-suggestions" class="tag-suggestions" hidden></ul>
+      </span>
     </label>
     <button type="button" id="bulk-location-apply" class="secondary">Apply</button>
     <label>Add tag
