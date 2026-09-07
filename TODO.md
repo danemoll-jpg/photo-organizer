@@ -531,6 +531,16 @@ At real full-library scale (~155k photos), one cluster had 61,676 faces — the 
 
 **Testing**: dashboard.py syntax/import-checked; full existing face-related regression suite re-run and passing (`tests/test_phase3c.py`, `tests/test_phase3f.py` — now including the new SQL-variable-limit regression test, `tests/test_recluster_preserves_manual_labeling.py`, and `tests/test_face_clustering.py`'s 4 fast/synthetic tests — its real-`data/faces.jsonl` smoke test was not run, same pre-existing/unrelated slowness noted in prior sessions, now ~2.3GB); the ad hoc headless pagination check described above; the real reset+re-cluster run against the live production DB (with a safety backup taken first) described above; and the real-DB read-only investigation scripts used earlier in this section (none committed — scratch analysis only).
 
+## ACTIVE: Phase 3g — Multi-person filter in the grid ("photos with BOTH X and Y")
+See `photo-organizer-spec.md`'s "Phase 3g" section for full requirements. User wants to select multiple named people and see only photos containing ALL of them together (their example: Dan Moll + Juliana Moll → photos with both). Summary:
+- [ ] **AND semantics, not OR** — a matching photo must contain every selected person, not just one of them. This is the core point of the feature, don't build OR by mistake.
+- [ ] UI: multi-select chip/tag-style input (type, pick suggestion, becomes a removable chip, repeat) — reuses the existing suggestion/autocomplete mechanism for type-ahead, but the chip-list container is new UI, not a drop-in reuse of the existing single-value filter instances (tags, location, Phase 3d's single-person filter)
+- [ ] Backend: relational "contains ALL selected people" query (e.g. `GROUP BY file_hash HAVING COUNT(DISTINCT person_id) = N`), not a simple `IN (...)` which would wrongly produce OR semantics
+- [ ] Must compose correctly with all other existing filters (date, tags, location, media type)
+- [ ] Must apply to BOTH the grid and slideshow/viewer navigation, same principle as every other filter in this project
+- [ ] Per rule 11/12 as applicable
+- [ ] Out of scope: an "any of these people" OR mode — not requested
+
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
 - ~~Map file_hash/path → Plex library item ID~~

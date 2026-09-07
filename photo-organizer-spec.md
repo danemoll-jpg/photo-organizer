@@ -370,3 +370,18 @@
 
 **Explicitly out of scope:**
 - Any change to Split or Merge's existing behavior — this is a new, additional action alongside them, not a replacement.
+
+## Phase 3g — Multi-person filter in review_tool.py's grid ("photos with BOTH X and Y")
+
+**Context:** Phase 3d's people filter only supports selecting one person. The user wants to select multiple named people at once and see only photos where ALL of them appear together — their explicit example: select "Dan Moll" and "Juliana Moll" to find photos containing both, not either.
+
+**Requirements:**
+- **AND semantics, not OR** — a matching photo must contain a face for EVERY selected person, not just at least one. This is the whole point of the feature (per the user's explicit example) and must not be confused with a looser "any of these people" filter.
+- **UI: a multi-select chip/tag-style input**, not the existing single-value suggestion field. As the user types and picks a suggestion, that person becomes a removable "chip," and they can keep adding more people the same way. Reuse the existing suggestion/autocomplete mechanism (the same component already used for tags, location, and Phase 3d's single-person filter) for the underlying type-ahead behavior, but the surrounding "list of selected chips" container is new UI, not a drop-in reuse of the single-value instances.
+- **Backend query**: photos must be filtered to only those matching ALL selected people simultaneously — a relational "photo contains person A AND contains person B AND ..." query (e.g. `GROUP BY file_hash HAVING COUNT(DISTINCT person_id) = <number of selected people>`, or an equivalent intersection approach) — not a simple `IN (...)` which would incorrectly produce OR semantics.
+- **Must compose correctly with every other existing filter** (date, tags, location, media type) — combined filtering, same as every other filter combination already works in this tool.
+- **Must apply consistently to both the grid AND slideshow/viewer navigation** — same principle already established for every other filter in this project (Phase 2c's original filter work explicitly required this for tags/location/etc., and it should hold here too).
+- Per rule 11/12 as applicable (this touches `review_tool.py` directly).
+
+**Explicitly out of scope:**
+- An "any of these people" (OR) mode — not requested; if wanted later, that's a separate, explicit ask.
