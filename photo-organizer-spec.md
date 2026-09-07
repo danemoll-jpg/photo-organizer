@@ -286,3 +286,21 @@
 - Video — photos only, matching Phase 2's captioning scope decision.
 - Any face data surfaced in `review_tool.py` beyond what Phase 2c's already-built (but currently inert) people/faces filter placeholder expects — wiring that placeholder up to real data is a natural follow-up once Phase 3 has real results, but isn't automatically part of this build.
 - Automatic re-clustering triggered by new photos being added — a manual "re-cluster" action is enough for now.
+
+## Phase 3b — Resync folder placement to corrected dates
+
+**Context:** The Date Cluster Audit tool fixed 2,527 photos' stored `date_taken` values (via the `photo_edits` audit mechanism), but this was explicitly DB-metadata-only — it never moved the physical files. Those files still sit in their old, now-wrong `YYYY/YYYY-MM` folders, disagreeing with their own corrected date. The user wants this resolved — the mismatch would otherwise nag indefinitely.
+
+**Goal:** A general-purpose tool that finds any photo/video whose current physical location doesn't match where it *should* be based on its current `date_taken`, and safely relocates it — not narrowly hardcoded to just this one batch of 2,527, since any future date edit (via the viewer, bulk-edit, or a future audit fix) could create the same kind of mismatch.
+
+**Requirements:**
+- **Detection:** for each row, compute the "correct" destination path from its current `date_taken` (same convention as Phase 1: `<dest_root>/YYYY/YYYY-MM/` for photos, `<dest_root>/YYYY/YYYY-MM/Video/` for video), and compare against the file's actual current path. A mismatch is a candidate.
+- **Reuse Phase 1's existing copy-verify-delete/collision-handling logic — do not reimplement it.** Same safety model: copy to the new correct location, verify via hash comparison, delete from the old location only after verification succeeds. Never a raw move. Collision handling (hash-suffix on a naming conflict) identical to Phase 1's existing behavior.
+- **Dry-run preview required before any real move** — show old path → new path for every affected file, consistent with every other batch operation in this project.
+- **Update the DB's current path** for each successfully relocated file. This is a physical reorganization, not a metadata field edit — log it clearly (old path, new path, timestamp) but it doesn't need to go through the `photo_edits` field=value audit mechanism the way caption/tag/location/date edits do; a dedicated log is more appropriate here, matching Phase 1's own `logs/organize_*.log` pattern.
+- **Applies to both photos and video** — check whether any videos are also affected by a folder mismatch, don't assume it's photos-only just because the originating Date Cluster Audit investigation was framed around photos.
+- CLI command + dashboard panel, per rule 10.
+- Per rule 11/12 as applicable.
+
+**Explicitly out of scope:**
+- Re-running this automatically after every date edit — a manual trigger is enough for now, same posture as re-clustering in Phase 3.

@@ -405,6 +405,16 @@ User feedback after real use: the bulk-edit Location field was a `<select>` popu
 
 **Explicitly NOT done this session** (matches the scope in this section before it started, and the task's own explicit exclusion): no `review_tool.py` changes — Phase 2c's people/faces filter placeholder stays inert. Rule 11 N/A this session (review_tool.py untouched).
 
+## ACTIVE: Phase 3b — Resync folder placement to corrected dates
+See `photo-organizer-spec.md`'s "Phase 3b" section for full requirements. User confirmed this mismatch (2,527 photos with corrected DB dates but unmoved, wrong-folder files, from the earlier Date Cluster Audit) needs fixing — "this will drive me nuts if these are inaccurate." Summary:
+- [ ] General-purpose tool, not hardcoded to just this one batch — finds ANY row whose current physical path doesn't match where it should be per its current `date_taken`
+- [ ] Reuse Phase 1's existing copy-verify-delete/collision logic, don't reimplement (rule 7)
+- [ ] Dry-run preview required before any real move
+- [ ] Update DB's current path per successfully-relocated file; log old→new path (doesn't need the `photo_edits` mechanism — this is a physical move, not a field edit)
+- [ ] Check both photos AND video for folder mismatches, don't assume photos-only
+- [ ] CLI command + dashboard panel, per rule 10
+- [ ] Per rule 11/12 as applicable
+
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
 - ~~Map file_hash/path → Plex library item ID~~
