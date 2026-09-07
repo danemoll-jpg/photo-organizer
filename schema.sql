@@ -205,3 +205,38 @@ CREATE TABLE IF NOT EXISTS photo_edits (
 -- without a table scan, and _row_to_dict()'s "which fields on this one row
 -- were ever manually edited" lookup (both in review_tool.py/src/edits.py).
 CREATE INDEX IF NOT EXISTS idx_photo_edits_hash_field ON photo_edits(file_hash, field_name);
+
+-- Phase 3h: per-user favorites for review_tool.py. One row per (photo,
+-- user) who favorited it -- PK on (file_hash, username) is what makes
+-- favorites independent per invited person (Phase 2d: every review_user
+-- gets their own account) rather than one shared boolean: two different
+-- users can each favorite (or not) the same photo without touching each
+-- other's mark, and un-favoriting is a plain DELETE of just that one row
+-- (see src/favorites.py::set_favorite), never affecting anyone else's.
+-- A brand-new table, not a column added to an existing one, so this needs
+-- no ALTER TABLE in src/db.py::_migrate() -- CREATE TABLE IF NOT EXISTS
+-- here is already applied on every init_db() call, same as how
+-- photo_edits/faces/people were introduced.
+-- Deliberately NOT part of the photo_edits audit mechanism: that table
+-- protects a field from a future AUTOMATED overwrite (caption/tags/
+-- location/date_taken/excluded), and nothing in this project ever
+-- automates favoriting a photo, so there's nothing to protect against.
+CREATE TABLE IF NOT EXISTS favorites (
+    file_hash     TEXT NOT NULL REFERENCES photos(file_hash) ON DELETE CASCADE,
+    username      TEXT NOT NULL,   -- config.yaml review_users username, not a foreign key (users aren't a DB table -- see src/config.py)
+    favorited_at  TEXT NOT NULL,   -- ISO 8601 UTC timestamp
+    PRIMARY KEY (file_hash, username)
+);
+
+-- Supports both the "who favorited this specific photo" viewer lookup
+-- (src/favorites.py::favorites_for_hashes, batched one query per grid page
+-- -- see review_tool.py's _fetch_page) and the favorite_by grid/viewer
+-- filter's "does this file_hash have a favorites row [for this user]"
+-- subquery in _build_filters -- both are satisfied by the PK's own
+-- leading column, but an explicit index keeps that intent documented and
+-- costs nothing extra.
+CREATE INDEX IF NOT EXISTS idx_favorites_file_hash ON favorites(file_hash);
+-- Supports the favorite_by filter's per-username lookup (a specific named
+-- review_user, or "__me__" resolved server-side to the current session's
+-- username) without a table scan.
+CREATE INDEX IF NOT EXISTS idx_favorites_username ON favorites(username);

@@ -193,45 +193,52 @@ def test_people_batched_not_per_row(tmp: Path) -> None:
     # by counting only statements that are _people_for_hashes' own join
     # (identifiable by its distinctive "JOIN people p" clause), which must
     # appear exactly once per page fetch no matter how many rows are on it.
-    counts = {}
-    for limit in (10, 150):
+    # _row_to_dict also reads Flask's `session` as of Phase 3h (to compute
+    # favorited_by_me) -- in real use there's always an active request
+    # (every caller here is a route handler), but calling
+    # _build_filters/_fetch_page directly like this needs a request context
+    # pushed manually, same as any other Flask-internals test. An empty
+    # session (no "user") is fine -- this test doesn't touch favorites.
+    with _rt.app.test_request_context():
+        counts = {}
+        for limit in (10, 150):
+            conn = _rt.get_db()
+            statements = []
+            conn.set_trace_callback(statements.append)
+            try:
+                where, params = _rt._build_filters({"folder": "2022-01"})
+                items, _has_next, _has_prev = _rt._fetch_page(conn, where, params, limit=limit, after=None, before=None)
+                assert len(items) == min(limit, n), (limit, len(items))
+            finally:
+                conn.set_trace_callback(None)
+                conn.close()
+            people_join_count = sum(1 for s in statements if "JOIN people p" in s)
+            counts[limit] = people_join_count
+            print(f"  limit={limit}: {len(items)} rows fetched, {people_join_count} people-join SELECT(s) issued")
+
+        # The whole point of batching: one people-join query per PAGE, not one
+        # per ROW -- this must be exactly 1 whether the page has 10 rows or 150.
+        assert counts[10] == 1, counts
+        assert counts[150] == 1, counts
+        print(f"  people-join query count stays exactly 1 regardless of page size ({counts[10]} vs {counts[150]}) -- no N+1  OK")
+
+        # Also a real wall-clock number, not just a statement count, at a size in
+        # the ballpark of a real page load (default review_page_size well below
+        # this) -- per the session's own "verify, don't assume" instruction.
         conn = _rt.get_db()
-        statements = []
-        conn.set_trace_callback(statements.append)
         try:
             where, params = _rt._build_filters({"folder": "2022-01"})
-            items, _has_next, _has_prev = _rt._fetch_page(conn, where, params, limit=limit, after=None, before=None)
-            assert len(items) == min(limit, n), (limit, len(items))
+            t0 = time.time()
+            items, _has_next, _has_prev = _rt._fetch_page(conn, where, params, limit=150, after=None, before=None)
+            elapsed = time.time() - t0
         finally:
-            conn.set_trace_callback(None)
             conn.close()
-        people_join_count = sum(1 for s in statements if "JOIN people p" in s)
-        counts[limit] = people_join_count
-        print(f"  limit={limit}: {len(items)} rows fetched, {people_join_count} people-join SELECT(s) issued")
+        assert elapsed < 1.0, f"a 150-row page fetch (incl. the people join) took {elapsed:.3f}s -- unexpectedly slow"
+        print(f"  a 150-row page (incl. the people join) fetched in {elapsed*1000:.1f}ms  OK")
 
-    # The whole point of batching: one people-join query per PAGE, not one
-    # per ROW -- this must be exactly 1 whether the page has 10 rows or 150.
-    assert counts[10] == 1, counts
-    assert counts[150] == 1, counts
-    print(f"  people-join query count stays exactly 1 regardless of page size ({counts[10]} vs {counts[150]}) -- no N+1  OK")
-
-    # Also a real wall-clock number, not just a statement count, at a size in
-    # the ballpark of a real page load (default review_page_size well below
-    # this) -- per the session's own "verify, don't assume" instruction.
-    conn = _rt.get_db()
-    try:
-        where, params = _rt._build_filters({"folder": "2022-01"})
-        t0 = time.time()
-        items, _has_next, _has_prev = _rt._fetch_page(conn, where, params, limit=150, after=None, before=None)
-        elapsed = time.time() - t0
-    finally:
-        conn.close()
-    assert elapsed < 1.0, f"a 150-row page fetch (incl. the people join) took {elapsed:.3f}s -- unexpectedly slow"
-    print(f"  a 150-row page (incl. the people join) fetched in {elapsed*1000:.1f}ms  OK")
-
-    for item in items:
-        assert item["people"] == [{"cluster_id": 10, "name": "Alice"}], item["people"]
-    print("  every bulk row correctly carries its Alice face in `people`  OK")
+        for item in items:
+            assert item["people"] == [{"cluster_id": 10, "name": "Alice"}], item["people"]
+        print("  every bulk row correctly carries its Alice face in `people`  OK")
 
 
 def main() -> None:

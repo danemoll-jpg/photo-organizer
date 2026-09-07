@@ -51,6 +51,19 @@
       <option value="__no_location__">No location</option>
     </select>
   </label>
+  <label>Favorites
+    <!-- Phase 3h: a plain dropdown, not a multi-select like the People
+         filter (spec's own explicit "intentionally simpler" call) --
+         a single choice of WHOSE favorites to view. "Me"/"Anyone" are
+         sentinel values (__me__/__any__, resolved server-side -- see
+         review_tool.py's _build_filters); the rest are populated from
+         /api/facets' `review_users` list at load time. -->
+    <select id="f-favorite-by">
+      <option value="">Any</option>
+      <option value="__me__">Me</option>
+      <option value="__any__">Anyone</option>
+    </select>
+  </label>
   <label>Media type
     <!-- Grid filter improvements batch: same closed-<select> pattern as
          Location above, filtering on the is_video field every row already
@@ -207,6 +220,14 @@
            #viewer-info-toggle/setInfoExpanded already established above,
            rather than inventing a new collapse pattern. -->
       <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people"></span></div>
+      <!-- Phase 3h: per-user favorites. The button marks/unmarks the
+           favorite for the CURRENT logged-in user only (see review.js's
+           toggleFavorite) -- the "favorited by" list next to it shows
+           EVERYONE who has, per spec's "not just yes/no". -->
+      <div class="viewer-row favorite-row">
+        <button type="button" id="viewer-favorite-btn" class="favorite-btn"></button>
+        <span id="viewer-favorited-by" class="favorited-by"></span>
+      </div>
 
       <!-- Shared inline edit form -- one at a time, whichever edit-btn above
            was last clicked (see review.js's openEditForm/closeEditForm). -->
@@ -257,7 +278,8 @@
     pageSize: {{ page_size }},
     slideshowSeconds: {{ slideshow_seconds }},
     destRoot: {{ dest_root|tojson }},
-    csrfToken: {{ edit_csrf|tojson }}
+    csrfToken: {{ edit_csrf|tojson }},
+    currentUser: {{ current_user|tojson }}
   };
 </script>
 <script src="{{ url_for('static', filename='review.js') }}"></script>

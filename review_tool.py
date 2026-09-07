@@ -192,6 +192,30 @@ through src.edits.add_tag_bulk() instead — a union/append into each item's
 own existing tags, deliberately NOT apply_edit()'s full-replace, since
 different selected files likely have different tags a full replace would
 destroy. See BULK_SET_FIELDS below and api_bulk_edit()'s own docstring.
+
+Phase 3h added per-user favorites — a third write route, /api/favorite/
+<hash> (see src/favorites.py), same auth/CSRF posture as the other two
+write routes but deliberately NOT built on apply_edit()/EDITABLE_FIELDS:
+favorites are one row per (file_hash, username), not a single photos-table
+column, and are NOT part of the photo_edits audit mechanism (nothing ever
+automates favoriting a photo, so there's no future automated overwrite to
+protect against — see src/favorites.py's module docstring). Every
+authenticated user can favorite/unfavorite independently — marking or
+unmarking a favorite for the CURRENTLY LOGGED-IN user only ever touches
+that user's own row, never anyone else's. `_row_to_dict` gained
+`favorited_by` (a list of usernames, batched via
+src.favorites.favorites_for_hashes — same one-query-per-page discipline
+Phase 3e's `_people_for_hashes` established, see _fetch_page) and
+`favorited_by_me` (whether the CURRENT session's user is in that list).
+The grid shows a compact star badge for favorited-by-me only (per spec,
+"keep cards visually clean"); the full "who favorited this" list is a
+viewer-only detail, same compact-grid/full-viewer split Phase 3e already
+established for people. `_build_filters` gained `favorite_by`: `__me__`
+(resolved server-side to `session["user"]`, never trusted from the
+client), `__any__` (favorited by at least one user), or a literal
+username — a real DB table like `location`/`people`, so (like those) it
+needs no live-cache scanning fallback and every route that already calls
+`_build_filters` (grid, nav, random, stats) picks it up automatically.
 """
 from __future__ import annotations
 
@@ -214,6 +238,7 @@ from src.auth import register_auth
 from src.config import Config, load_config
 from src.db import init_db
 from src.edits import EDITABLE_FIELDS, MAX_BULK_ITEMS, add_tag_bulk, apply_edit, current_tags, manual_edit_fields
+from src.favorites import favorites_for_hashes, set_favorite
 from src.logging_setup import setup_logging
 from src.port_check import listening_pids
 from src.storage import PhotoStorage, get_storage
@@ -407,6 +432,23 @@ def _build_filters(args) -> tuple[str, list]:
     not an error; duplicate ids in the list are de-duped before building N,
     so `people=10,10` behaves identically to `people=10`.
 
+    `favorite_by` (Phase 3h): filters to photos favorited by a specific
+    user, or by anyone. Same reasoning as `location`/`media_type`/`people`
+    above -- a real, already-committed DB table (`favorites`), so it needs
+    no live-cache scanning fallback and every route that already calls
+    `_build_filters` picks it up automatically. Three shapes:
+      - `__me__`: resolved server-side to `session["user"]` (never trusted
+        from the client -- a request can't spoof "my" favorites as
+        someone else's by sending a literal username instead). If somehow
+        called with no session user (shouldn't happen -- every route here
+        is auth-gated), matches nothing rather than leaking anyone's data.
+      - `__any__`: favorited by at least one user, regardless of who.
+      - anything else: treated as a literal username (deliberately
+        permissive, same posture as `location`/`person` -- the front end
+        only ever offers real `review_users` entries to pick from via
+        /api/facets, but a hand-crafted URL naming an unknown username
+        still filters correctly, just to zero rows).
+
     `show_hidden` (Phase 2f "Hide from library"): by default every route
     that calls this excludes `excluded=1` rows entirely -- they're meant to
     have permanently disappeared from the tool, per spec. Passing
@@ -437,6 +479,7 @@ def _build_filters(args) -> tuple[str, list]:
     media_type = (args.get("media_type") or "").strip().lower()
     person = (args.get("person") or "").strip()  # legacy single-value alias, see docstring
     people_param = (args.get("people") or "").strip()  # Phase 3g: comma-separated cluster_ids, AND semantics
+    favorite_by = (args.get("favorite_by") or "").strip()  # Phase 3h: __me__ | __any__ | a literal username
     show_hidden = (args.get("show_hidden") or "").strip().lower() in ("1", "true", "yes")
     if date_from:
         clauses.append("date_taken >= ?")
@@ -501,6 +544,18 @@ def _build_filters(args) -> tuple[str, list]:
         )
         params.extend(person_ids)
         params.append(len(person_ids))
+    if favorite_by == "__me__":
+        current_user = session.get("user")
+        if current_user:
+            clauses.append("file_hash IN (SELECT file_hash FROM favorites WHERE username = ?)")
+            params.append(current_user)
+        else:
+            clauses.append("0")  # no session user (shouldn't happen -- see docstring) -- match nothing
+    elif favorite_by == "__any__":
+        clauses.append("file_hash IN (SELECT DISTINCT file_hash FROM favorites)")
+    elif favorite_by:
+        clauses.append("file_hash IN (SELECT file_hash FROM favorites WHERE username = ?)")
+        params.append(favorite_by)
     if not show_hidden:
         clauses.append("(excluded IS NULL OR excluded = 0)")
     sql = " AND ".join(clauses)
@@ -774,7 +829,8 @@ def _people_for_hashes(conn: sqlite3.Connection, file_hashes: list[str]) -> dict
     return result
 
 
-def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection, people: list[dict] | None = None) -> dict:
+def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection, people: list[dict] | None = None,
+                  favorited_by: list[str] | None = None) -> dict:
     """`conn` (Phase 2f) is needed to check whether this row's caption/tags
     have ever been manually edited -- see the branch below. Every call site
     already has a live connection open (the same one used to fetch `row`),
@@ -787,11 +843,19 @@ def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection, people: list[dict] 
     never issues a query per row. A single-row caller (nav/random/edit) can
     leave it as the default None, which does one _people_for_hashes lookup
     for just this file_hash -- same query shape either way, just batched vs.
-    not depending on how many rows are being converted at once."""
+    not depending on how many rows are being converted at once.
+
+    `favorited_by` (Phase 3h): same batching contract as `people` above, but
+    backed by src.favorites.favorites_for_hashes -- a caller with a whole
+    page's worth (see _fetch_page) passes the pre-fetched list for this row;
+    a single-row caller (nav/random/edit/favorite-toggle) leaves it as the
+    default None for one favorites_for_hashes([file_hash]) lookup."""
     d = dict(row)
     file_hash = d["file_hash"]
     if people is None:
         people = _people_for_hashes(conn, [file_hash]).get(file_hash, [])
+    if favorited_by is None:
+        favorited_by = favorites_for_hashes(conn, [file_hash]).get(file_hash, [])
     edited_fields = manual_edit_fields(conn, file_hash)
     current_path = d["current_path"] or ""
     dest_root = str(_cfg.dest_root_path)
@@ -856,6 +920,14 @@ def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection, people: list[dict] 
         # everything else in this response -- no editing surface here, that
         # stays in the Tkinter labeling window only.
         "people": people,
+        # Phase 3h: who has favorited this specific photo (usernames, sorted)
+        # and whether the CURRENTLY LOGGED-IN user is one of them -- see
+        # module docstring / src/favorites.py. Read via the request's own
+        # session, same as every other per-request value here; a route with
+        # no session user (shouldn't happen -- every route is auth-gated)
+        # just gets favorited_by_me=False rather than raising.
+        "favorited_by": favorited_by,
+        "favorited_by_me": session.get("user") in favorited_by,
     }
 
 
@@ -877,7 +949,11 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
     not one query per row — see that function's docstring for why this
     stays cheap at 100k+-row scale: results are already paginated (limit is
     capped at 200 by api_photos), so this join only ever runs against the
-    current page's rows, never the whole filtered set."""
+    current page's rows, never the whole filtered set.
+
+    Phase 3h: favorites data for the whole page is batched the exact same
+    way, via favorites_for_hashes — one more query per page, not one per
+    row, same discipline."""
     if extra_pred is not None:
         if before is not None:
             matches, _ = _scan_matches(conn, where, params, extra_pred, cursor=before, want=limit + 1, forward=False)
@@ -889,8 +965,14 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
             has_next = len(matches) > limit
             rows = matches[:limit]
             has_prev = after is not None
-        people_map = _people_for_hashes(conn, [r["file_hash"] for r in rows])
-        return [_row_to_dict(r, conn, people=people_map.get(r["file_hash"], [])) for r in rows], has_next, has_prev
+        hashes = [r["file_hash"] for r in rows]
+        people_map = _people_for_hashes(conn, hashes)
+        favorites_map = favorites_for_hashes(conn, hashes)
+        return [
+            _row_to_dict(r, conn, people=people_map.get(r["file_hash"], []),
+                         favorited_by=favorites_map.get(r["file_hash"], []))
+            for r in rows
+        ], has_next, has_prev
     if before is not None:
         sql = f"SELECT * FROM photos WHERE {where} AND current_path < ? ORDER BY current_path DESC LIMIT ?"
         rows = conn.execute(sql, params + [before, limit + 1]).fetchall()
@@ -908,8 +990,14 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
         has_next = len(rows) > limit
         rows = rows[:limit]
         has_prev = after is not None
-    people_map = _people_for_hashes(conn, [r["file_hash"] for r in rows])
-    return [_row_to_dict(r, conn, people=people_map.get(r["file_hash"], [])) for r in rows], has_next, has_prev
+    hashes = [r["file_hash"] for r in rows]
+    people_map = _people_for_hashes(conn, hashes)
+    favorites_map = favorites_for_hashes(conn, hashes)
+    return [
+        _row_to_dict(r, conn, people=people_map.get(r["file_hash"], []),
+                     favorited_by=favorites_map.get(r["file_hash"], []))
+        for r in rows
+    ], has_next, has_prev
 
 
 @app.route("/")
@@ -958,6 +1046,15 @@ def api_facets():
     `assigned_name` itself has no uniqueness constraint (two different real
     people could share a name) -- see static/review.js's loadFacets for how
     the front end disambiguates that rare case.
+
+    Phase 3h added `review_users`: every configured review_users username
+    (config.yaml, not a DB table -- see src/config.py), sorted, for the
+    Favorites filter dropdown's "each named review_user individually"
+    option per spec. Not filtered to "has favorited something" -- unlike
+    `locations`/`people`/`tags` above, the point here isn't "only offer
+    values that already mean something," it's "let the user pick who to
+    check," and a user who hasn't favorited anything YET is still a valid,
+    useful thing to pick (the result is just correctly empty).
     """
     conn = get_db()
     try:
@@ -975,7 +1072,11 @@ def api_facets():
         ).fetchall()]
     finally:
         conn.close()
-    return jsonify({"tags": tags, "locations": locations, "people": people})
+    review_users = sorted(
+        (u.get("username") for u in _cfg.review_users if u.get("username")),
+        key=str.lower,
+    )
+    return jsonify({"tags": tags, "locations": locations, "people": people, "review_users": review_users})
 
 
 @app.route("/api/stats")
@@ -1251,6 +1352,51 @@ def api_bulk_edit():
 
     _captions_cache.refresh()
     return jsonify({"updated": updated, "failed": failed, "total": len(file_hashes)})
+
+
+@app.route("/api/favorite/<file_hash>", methods=["POST"])
+def api_favorite(file_hash: str):
+    """Phase 3h: mark/unmark the photo as a favorite for the CURRENTLY
+    LOGGED-IN user only — never touches another user's favorite status on
+    this same photo (see src/favorites.py::set_favorite, one row per
+    (file_hash, username)). Same auth gate (before_request already covers
+    /api/*) and CSRF posture as /api/edit/<hash> and /api/bulk-edit above —
+    a per-session token compared against the request body, checked before
+    any write. Deliberately its own route/mechanism rather than another
+    EDITABLE_FIELDS entry: favorites aren't a single photos-table column,
+    and aren't part of the photo_edits audit trail (see src/favorites.py's
+    module docstring for why that mechanism doesn't apply here).
+
+    Body: {"favorited": true|false, "csrf_token": "..."}. Returns the
+    freshly-updated photo (same shape /api/photos/.../api/nav items already
+    have, now including favorited_by/favorited_by_me) so the front end can
+    re-render from the response, same convention as /api/edit/<hash>."""
+    data = request.get_json(silent=True) or {}
+    if data.get("csrf_token") != session.get("_csrf"):
+        return jsonify({"error": "Your session looks stale — reload the page and try again."}), 403
+    username = session.get("user")
+    if not username:
+        return jsonify({"error": "Not logged in."}), 401
+    favorited = bool(data.get("favorited"))
+
+    write_conn = get_db_write()
+    try:
+        try:
+            set_favorite(write_conn, file_hash, username, favorited)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+    finally:
+        write_conn.close()
+
+    read_conn = get_db()
+    try:
+        row = read_conn.execute("SELECT * FROM photos WHERE file_hash = ?", (file_hash,)).fetchone()
+        if row is None:
+            return jsonify({"error": "Photo not found."}), 404
+        item = _row_to_dict(row, read_conn)
+    finally:
+        read_conn.close()
+    return jsonify({"item": item})
 
 
 # Small bounded in-memory cache of already-downscaled JPEG bytes, keyed by

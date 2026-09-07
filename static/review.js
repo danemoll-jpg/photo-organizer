@@ -161,6 +161,26 @@
  *   query per grid page -- see _people_for_hashes) -- read-only display,
  *   same scope line Phase 3d drew for the filter (editing stays in the
  *   Tkinter labeling window only).
+ *
+ * Phase 3h (this session): per-user favorites.
+ *   - A star badge on the grid card for favorited-by-ME only (per spec,
+ *     "keep cards visually clean") -- see cardFavoriteBadge/renderGrid.
+ *     The full "who favorited this" list is a viewer-only detail, same
+ *     compact-grid/full-viewer split Phase 3e established for people.
+ *   - Viewer: #viewer-favorite-btn toggles the CURRENT user's own favorite
+ *     (toggleFavorite below, posting to /api/favorite/<hash> with the same
+ *     CSRF token every other write route already uses) -- never affects
+ *     another user's favorite mark on the same photo. #viewer-favorited-by
+ *     shows everyone who has (item.favorited_by, a plain username list),
+ *     not just yes/no.
+ *   - Filter: a plain <select> (#f-favorite-by), deliberately simpler than
+ *     the People filter's chip-list multi-select (spec's own explicit
+ *     call) -- "Any" / "Me" (__me__) / "Anyone" (__any__) / each real
+ *     review_user individually, the last populated from /api/facets'
+ *     new `review_users` list in loadFacets. Sent as one `favorite_by`
+ *     param, resolved entirely server-side (see review_tool.py's
+ *     _build_filters) -- this file never needs to know its own username
+ *     to filter "Me", it just sends the sentinel.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -173,7 +193,7 @@
   const state = {
     // Phase 3g: `person` (single cluster_id) -> `people` (array of
     // cluster_ids, AND semantics -- see module docstring).
-    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", people: [], show_hidden: false },
+    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", people: [], favorite_by: "", show_hidden: false },
     pageSize: cfg.pageSize,
     // Phase 2h Part A: file_hash values checked in the grid, independent of
     // which page is currently loaded -- see renderGrid/toggleSelect.
@@ -230,6 +250,8 @@
   const viewerTags = el("viewer-tags");
   const viewerLocation = el("viewer-location");
   const viewerPeople = el("viewer-people"); // Phase 3e
+  const viewerFavoriteBtn = el("viewer-favorite-btn"); // Phase 3h
+  const viewerFavoritedBy = el("viewer-favorited-by"); // Phase 3h
   const viewerPlayPause = el("viewer-playpause");
   const viewerInterval = el("viewer-interval");
   const viewerRandomBtn = el("viewer-random");
@@ -282,13 +304,14 @@
       has_location: state.filters.has_location,
       media_type: state.filters.media_type,
       people: state.filters.people.join(","),
+      favorite_by: state.filters.favorite_by,
       show_hidden: state.filters.show_hidden ? "1" : "",
     };
   }
 
   function hasActiveFilters() {
     const f = state.filters;
-    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type || f.people.length);
+    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type || f.people.length || f.favorite_by);
   }
 
   // Random 31-bit int as a string — used to seed a fresh random-order
@@ -432,6 +455,18 @@
         cluster_id: p.cluster_id,
         label: nameCounts[p.assigned_name] > 1 ? `${p.assigned_name} (#${p.cluster_id})` : p.assigned_name,
       }));
+      // Phase 3h: one <option> per real configured review_user, in addition
+      // to the "Me"/"Anyone" sentinels already in the markup (see
+      // templates/review.html) -- the option's own value IS the username
+      // (not a sentinel), since _build_filters treats anything that isn't
+      // __me__/__any__ as a literal username to match.
+      const favSel = el("f-favorite-by");
+      for (const username of data.review_users || []) {
+        const opt = document.createElement("option");
+        opt.value = username;
+        opt.textContent = username;
+        favSel.appendChild(opt);
+      }
     } catch (e) {
       // Non-fatal: filters just show "Any"/no suggestions until reloaded.
     }
@@ -625,6 +660,7 @@
           <label class="card-select" title="Select for bulk actions">
             <input type="checkbox" class="card-select-checkbox" ${isSelected ? "checked" : ""}>
           </label>
+          ${item.favorited_by_me ? `<div class="thumb-favorite-badge" title="You favorited this">&#9733;</div>` : ""}
         </div>
         <div class="card-body">
           <div class="card-path" title="${escapeHtml(item.current_path)}">${escapeHtml(item.relative_path)}</div>
@@ -833,6 +869,7 @@
     // "must exactly match a real known value, no silent partial match"
     // contract Tag already has for tags.
     state.filters.people = peopleChips.map((p) => p.cluster_id);
+    state.filters.favorite_by = el("f-favorite-by").value;
     state.filters.show_hidden = el("f-show-hidden").checked;
     hideTagSuggestions();
     hidePersonSuggestions();
@@ -862,6 +899,7 @@
     el("f-person").value = "";
     peopleChips = []; // Phase 3g
     renderPeopleChips();
+    el("f-favorite-by").value = "";
     el("f-show-hidden").checked = false;
     applyFilters();
   });
@@ -910,6 +948,13 @@
           ? `<span class="placeholder">No location available</span>`
           : `<span class="placeholder">Not yet checked for GPS data</span>`);
     viewerPeople.innerHTML = renderPeopleList(item.people);
+
+    // Phase 3h
+    viewerFavoriteBtn.textContent = item.favorited_by_me ? "★ Favorited" : "☆ Favorite";
+    viewerFavoriteBtn.classList.toggle("is-favorited", Boolean(item.favorited_by_me));
+    viewerFavoritedBy.textContent = (item.favorited_by && item.favorited_by.length)
+      ? `Favorited by: ${item.favorited_by.join(", ")}`
+      : "Not favorited by anyone yet.";
 
     // Phase 2f: an uncaptioned item (any not-yet-captioned photo, or ANY
     // video — which never gets an automated caption at all) shows "+ Add
@@ -1242,6 +1287,49 @@
     }
   }
   hideBtn.addEventListener("click", toggleHidden);
+
+  // ---------------------------------------------------------------------
+  // Phase 3h: per-user favorites
+  // ---------------------------------------------------------------------
+  async function postFavorite(fileHash, favorited) {
+    return fetch(`/api/favorite/${fileHash}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ favorited, csrf_token: cfg.csrfToken }),
+    });
+  }
+
+  async function toggleFavorite() {
+    if (!state.viewer.current) return;
+    const newVal = !state.viewer.current.favorited_by_me;
+    viewerFavoriteBtn.disabled = true;
+    try {
+      const res = await postFavorite(state.viewer.current.file_hash, newVal);
+      if (res.status === 401) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "Could not update — try again.");
+        return;
+      }
+      // Same "close back to the grid rather than keep showing an item that
+      // no longer matches" reasoning toggleHidden already applies for
+      // "Hide from library": un-favoriting while viewing "Me"'s own
+      // favorites means this item just fell out of the active filter.
+      if (!newVal && state.filters.favorite_by === "__me__") {
+        closeViewer();
+      } else {
+        renderViewerItem(data.item);
+      }
+      loadGridPage({ keepPageNum: true });
+      refreshStats();
+    } finally {
+      viewerFavoriteBtn.disabled = false;
+    }
+  }
+  viewerFavoriteBtn.addEventListener("click", toggleFavorite);
 
   // ---------------------------------------------------------------------
   // Init

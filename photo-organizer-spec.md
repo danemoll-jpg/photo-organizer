@@ -385,3 +385,19 @@
 
 **Explicitly out of scope:**
 - An "any of these people" (OR) mode — not requested; if wanted later, that's a separate, explicit ask.
+
+## Phase 3h — Favorites, per-user, with "who favorited this" visibility
+
+**Context:** Multiple people log into `review_tool.py` (Phase 2d). The user wants a favorites system where each person's favorite marks are independent and attributable to them — not a single shared boolean — with the ability to filter by "my favorites," "anyone's favorites," or a specific named person's favorites.
+
+**Requirements:**
+- **Schema**: a new `favorites` table (`file_hash`, `username`, `favorited_at`), primary key on `(file_hash, username)` — allows multiple different users to each independently favorite the same photo. Additive via `init_db()`/`_migrate()` per rule 12.
+- **Toggle action**: a star/heart button in the viewer marks/unmarks the photo as a favorite for the CURRENTLY LOGGED-IN user only — never affects another user's favorite status on the same photo. CSRF-protected, behind the existing auth gate, same "every authenticated user can act" posture as editing (no new permission tier).
+- **Display "favorited by" on the photo** — the viewer should show who has favorited it (a list of usernames), not just a yes/no. A simple star badge on grid cards (favorited-by-me only, to keep cards visually clean) is a reasonable default; the full "who favorited this" list belongs in the viewer, consistent with how other per-photo detail (people) already splits between compact-grid vs. full-viewer.
+- **Filter, as a dropdown/selector, not a single-select-list like Phase 3g's multi-person filter**: options are "Me" (current user), "Anyone" (favorited by at least one user, any user), and each real named `review_user` individually (so the user can specifically check "what did my wife/daughter favorite"). This is intentionally simpler than Phase 3g's AND-multi-select — a single choice of *whose* favorites to view, not a combination of several people's favorites at once.
+- **Must be batched, not per-row**, when fetching favorite status/who-favorited data for a grid page — same discipline Phase 3e's `_people_for_hashes()` established (one query per page regardless of page size, proven via a dedicated test, not assumed). Don't repeat the mistake that had to be caught elsewhere; build this batched from the start.
+- Must compose correctly with every other existing filter, and apply to both the grid and viewer/slideshow navigation, same as every other filter in this tool.
+- Per rule 11/12 as applicable.
+
+**Explicitly out of scope:**
+- Any notification/alerting when someone else favorites a photo — just visibility on the photo itself, nothing proactive.
