@@ -304,3 +304,35 @@
 
 **Explicitly out of scope:**
 - Re-running this automatically after every date edit — a manual trigger is enough for now, same posture as re-clustering in Phase 3.
+
+## Phase 3c — Face Labeling UI: filter out tiny/junk clusters, mark false detections
+
+**Context:** The labeling window already sorts by largest group first, so the most important people (family members appearing in hundreds of photos) surface quickly. But at full-library scale, a real risk is many small clusters (1-3 faces — blurry shots, strangers in the background, bad detections) burying the list in low-value entries the user has to click past. The small test sample already showed 71 unclustered faces out of 767 — this scales up meaningfully at full library size.
+
+**Requirements:**
+- **A minimum-cluster-size filter** in the `FaceLabelingWindow` — a simple numeric input ("Hide groups smaller than N faces," reasonable default like 3) that live-filters the left-side people list. Hidden clusters aren't deleted or altered in any way, just not shown while the filter is active — a toggle/reset to show everything again, nothing is ever lost.
+- The "(Unclustered)" bucket is a single fixed entry, not a growing list of clusters — this filter doesn't need to apply to it the same way; leave it always visible and accessible as-is.
+- **"Hide already-named people" toggle (promoted from optional to required)** — once you've labeled someone, they can drop off the visible list automatically so you're not re-scrolling past people you've already finished.
+- **"Mark as not a person" action (new — for false-positive detections, e.g. a pattern/object/pet misdetected as a face).** Consistent with this project's established non-destructive pattern (same philosophy as "Hide from library" for photos — a reversible flag, never a deletion): add a flag on the affected `faces` row marking it as a confirmed false positive. A flagged face is:
+  - Pulled out of whatever cluster it's currently in (same mechanical effect as a split, but tagged as "not a person" rather than moved to a new named person)
+  - Excluded from future clustering runs (a future `cluster-faces` re-run must not re-add it to any cluster)
+  - Hidden from the normal labeling view by default, but reachable via a "Show marked-as-not-a-person" toggle, with a way to un-mark it if it was flagged by mistake — fully reversible, same as every other flag in this project.
+- Both size/named-people filters are UI-only conveniences — they must never affect the underlying data, clustering, or which faces are assigned to which person, aside from the explicit "mark as not a person" action above, which is a real, intentional (but reversible) data change.
+
+**Explicitly out of scope:**
+- Anything involving `review_tool.py` — that's Phase 3d, a separate session (see below).
+
+## Phase 3d — Wire up the grid's people/faces filter to real data
+
+**Context:** Phase 2c built a people/faces filter control in `review_tool.py`'s grid page as a visible-but-inert placeholder, explicitly anticipating Phase 3 ("Phase 3 doesn't exist yet — show it, mark 'not available yet'"). Phase 3 now exists with real detected/clustered/named people — this session wires the existing placeholder up to that real data.
+
+**Requirements:**
+- Populate the filter with actual named people from the `people` table (only people with a real assigned name — unclustered or unnamed faces should not appear as a filterable option).
+- Filtering by a selected person narrows the grid to photos containing at least one face belonging to that person (a join between `photos`/`faces`/`people`).
+- Reuse the existing custom suggestion-dropdown component (built for the tag filter's iOS fix, already reused once for the bulk-edit location field) for this control — don't build a third copy of the same pattern, per rule 7.
+- This filter should compose correctly with the grid's other existing filters (date, tags, location, media type) — a person filter plus a date range, for example, should both apply together, same as every other filter combination already works.
+- Per rule 11: restart `review_tool.py` at session end, since this session touches it directly.
+- Per rule 12: `init_db()` still called as normal — no new schema expected here, `faces`/`people` already exist from Phase 3 Session 2.
+
+**Explicitly out of scope:**
+- Any editing of face/person data from `review_tool.py` — this is a filter/browse feature only, consistent with `review_tool.py`'s existing edit scope (captions/tags/location/date/hide) not being extended to faces in this pass unless separately requested.

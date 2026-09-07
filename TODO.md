@@ -434,6 +434,24 @@ This was explicitly flagged as untested during Phase 3 Session 1: "Whether face 
 - [x] **Resumability held up under the hard kill, confirmed directly, not assumed**: `captions.jsonl`/`faces_scanned.jsonl` were both left in their exact pre-test state (batched checkpoints not yet reached) — no corruption, safe to resume later. One minor, harmless side effect worth knowing: `data/faces.jsonl` itself (the per-face-detection output, flushed eagerly per line, unlike the batched `faces_scanned.jsonl` checkpoint) DOES already contain ~165 real entries for `E:\Pics\2020\2020-07` from the killed run — since the checkpoint file wasn't updated, a future real `detect-faces` run over that folder will re-scan those same ~165 photos and write duplicate (not conflicting, just extra) lines for them. Not fixed this session (out of scope, and harmless — `load_faces_from_jsonl`'s own UNIQUE index on `(file_hash, bbox_x, bbox_y, bbox_w, bbox_h)` means a later `cluster-faces` load will silently dedupe these anyway), just flagged so a future session isn't surprised by it.
 - [x] **Real finding, reported plainly, no workaround attempted per the task's own instruction**: these two should NOT be run concurrently on this hardware as-is. Recommend continuing to run them sequentially (which is already how every prior session in this project has done it) rather than attempting a real overlapping full pass of both. A future session could investigate mitigations (e.g., an explicit turn-taking scheduler, capping face-detection's request rate, `OLLAMA_SCHED_SPREAD`/priority tuning, or checking whether Windows' Hardware-accelerated GPU Scheduling setting changes this behavior) if the user ever wants concurrent throughput badly enough to justify the added complexity — not attempted this session since it wasn't asked for and the honest "don't run these together" answer is sufficient for now.
 
+## ACTIVE: Phase 3c — Face Labeling UI: filter out tiny/junk clusters, mark false detections
+See `photo-organizer-spec.md`'s "Phase 3c" section for full requirements. User concern: at full-library scale, many small/junk clusters (blurry shots, strangers, bad detections) could bury the important people-groups the user actually wants to label. Summary:
+- [ ] Minimum-cluster-size filter in `FaceLabelingWindow` — numeric input ("Hide groups smaller than N faces," default ~3), live-filters the people list, purely a display convenience — nothing hidden is ever deleted/altered, easy toggle to show everything again
+- [ ] "(Unclustered)" bucket stays always visible as-is — it's a fixed single entry, not a growing list this filter needs to touch
+- [ ] **"Hide already-named people" toggle (now required, not optional)** — labeled people drop off the visible list automatically
+- [ ] **NEW: "Mark as not a person" action** — reversible flag on the `faces` row (same non-destructive philosophy as "Hide from library" for photos), pulls the face out of its current cluster, excludes it from future `cluster-faces` re-runs, hidden from view by default but reachable via a "Show marked-as-not-a-person" toggle with an un-mark option
+- [ ] Explicitly does NOT touch `review_tool.py` — that's Phase 3d below, a separate session
+
+## ACTIVE: Phase 3d — Wire up the grid's people/faces filter to real data
+See `photo-organizer-spec.md`'s "Phase 3d" section for full requirements. Phase 2c built this filter as a visible-but-inert placeholder anticipating Phase 3 — Phase 3 now exists, this session connects it to real data. Summary:
+- [ ] Populate filter with named people only (from `people` table, real assigned names only)
+- [ ] Filtering narrows grid to photos containing at least one face belonging to that person (`photos`/`faces`/`people` join)
+- [ ] Reuse the existing custom suggestion-dropdown component (tag filter's iOS fix, already reused for bulk-edit location) — don't build a third copy, per rule 7
+- [ ] Must compose correctly with existing filters (date, tags, location, media type) — combined filtering, not exclusive
+- [ ] Per rule 11: restart `review_tool.py` at session end
+- [ ] Per rule 12: `init_db()` as normal, no new schema expected
+- [ ] Out of scope: any face/person editing from `review_tool.py` — filter/browse only
+
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
 - ~~Map file_hash/path → Plex library item ID~~
