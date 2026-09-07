@@ -336,10 +336,17 @@ photo's caption/tags/location/date and hide items from the library — see
   changing filters while it's selected) mints a fresh shuffle, so Play and
   manual Next/Prev step through a genuinely random, repeat-free sequence of
   the current filtered set rather than the same order every time.
-- **People/faces**: a reserved section (and matching filter control) is
-  always present, showing a "Phase 3 not built yet"/"Not available yet"
-  placeholder — so this tool won't need a UI rebuild once face detection
-  lands, only that field/filter needing to go live.
+- **People/faces**: real, live data now (Phase 3d wired up the Person
+  filter, Phase 3e wired up the actual display). The **Person** filter
+  narrows the grid/viewer to photos containing a face belonging to a
+  specific named person (suggestions from real, already-named `people`
+  rows — unclustered/unnamed faces are never offered). The viewer's
+  **People** row and each grid card both show the actual named people in
+  that specific photo — the viewer shows the first 4 names plus a "+N more"
+  toggle to expand the rest; the grid is more compact (first 2 names + a
+  "+N" badge you can hover for the full list). Both are read-only display —
+  naming/merging/splitting people happens in the dashboard's Face Labeling
+  window, not here.
 - **Live captions**: `captions.jsonl` is tailed incrementally on every
   request, so newly-captioned photos from the in-progress background run
   show up without restarting this tool — including for the tag/caption

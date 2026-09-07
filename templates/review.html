@@ -195,12 +195,14 @@
       <div class="viewer-row"><span class="label">Caption</span><span id="viewer-caption"></span><button type="button" class="edit-btn" data-field="caption" title="Edit caption">&#9998;</button></div>
       <div class="viewer-row"><span class="label">Tags</span><span id="viewer-tags"></span><button type="button" class="edit-btn" data-field="tags" title="Edit tags">&#9998;</button></div>
       <div class="viewer-row"><span class="label">Location</span><span id="viewer-location"></span><button type="button" class="edit-btn" data-field="location" title="Edit location">&#9998;</button></div>
-      <!-- Phase 3d wired up the grid's Person FILTER only (see the filters
-           section above) -- this per-photo "who's in this shot" display is
-           a separate, not-yet-requested piece of work, so the text below
-           is updated just enough to stop claiming Phase 3 itself doesn't
-           exist (it now does), without actually populating it. -->
-      <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people" class="placeholder">Not shown here yet — use the grid's Person filter to browse by who's in a photo.</span></div>
+      <!-- Phase 3e: real named-people display, populated by review.js's
+           renderViewerItem/renderPeopleList from item.people (see
+           review_tool.py's _row_to_dict). Collapses to a short list + a
+           "+N more" toggle when many people are in one photo, reusing the
+           same show/hide-a-block-via-a-toggle-button idiom the info panel's
+           #viewer-info-toggle/setInfoExpanded already established above,
+           rather than inventing a new collapse pattern. -->
+      <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people"></span></div>
 
       <!-- Shared inline edit form -- one at a time, whichever edit-btn above
            was last clicked (see review.js's openEditForm/closeEditForm). -->

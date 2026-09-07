@@ -341,6 +341,14 @@ body {
    which visible cards are the hidden ones in that mode. */
 .badge.hidden-flag { background: var(--danger); color: #fff; }
 .card.card-hidden { opacity: 0.55; }
+/* Phase 3e: named-people badges on a grid card -- a separate row from
+   card-tags (distinct icon/border rather than mixed in with tags/location)
+   so "who's in this photo" reads as its own thing at a glance, but still
+   compact like every other card-body element. */
+.card-people { display: flex; flex-wrap: wrap; gap: 4px; }
+.badge.person { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+.badge.person::before { content: "\1F464\FE0E "; } /* small "person" glyph, text-style variant selector so it renders flat, not as a colorful emoji */
+.badge.person-more { background: var(--badge-bg); font-weight: 600; cursor: default; }
 
 .empty-state { padding: 40px; text-align: center; color: var(--muted); }
 
@@ -396,6 +404,28 @@ body {
 .viewer-row { margin-bottom: 12px; font-size: 13px; line-height: 1.4; }
 .viewer-row .label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin-bottom: 2px; }
 .viewer-row .placeholder { color: var(--muted); font-style: italic; }
+
+/* Phase 3e: viewer "People" row -- badges same look as .badge.person on a
+   grid card (see above), plus the "+N more" collapse/expand toggle, styled
+   like a plain text link the same way .edit-btn below reads as a minimal
+   inline action rather than a boxed button. */
+.people-more-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 0 2px;
+}
+/* An explicit `display` here would otherwise silently defeat the [hidden]
+   attribute review.js toggles (see the Phase 2h bulk-bar bug this project
+   already hit once: an author stylesheet's own `display` always overrides
+   the browser's default `[hidden] { display: none }` UA rule, regardless of
+   selector specificity) -- the [hidden] override below is the fix, applied
+   proactively here rather than waiting to rediscover the same bug again. */
+.people-rest { display: inline; }
+.people-rest[hidden] { display: none; }
 
 /* Phase 2f: editable metadata -- the pencil/"+ Add caption" button next to
    a field, and the one shared inline edit form opened by whichever button

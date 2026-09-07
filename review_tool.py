@@ -56,26 +56,37 @@ viewer plays the actual file via a `<video>` element backed by the
 /video/<file_hash> route below, not the photo-only /image/<file_hash>
 route — real thumbnails only ever affect the grid.
 
-People/faces: Phase 3 doesn't exist yet. Every photo response carries a
-`people` field that is always `None` right now — the template renders a
-reserved section for it regardless, so this tool won't need a UI rebuild
-once Phase 3 lands, only that field needing to be populated for real.
+People/faces: originally a reserved-but-inert `people` field (always `None`,
+Phase 3 didn't exist yet) — see the Phase 3d/3e notes below for how it's
+now wired up for real: Phase 3d wired the grid's FILTER, Phase 3e wired the
+per-photo DISPLAY (viewer "People" row + grid card badges).
 
-Phase 3d (this session): the grid's people/faces FILTER (added inert in
-Phase 2c, disabled control, "Phase 3 doesn't exist yet") is now wired to
-real Phase 3 data — a `person` query param (a `people.cluster_id`) narrows
-every browsing route to photos with at least one face in that cluster, via
-a plain `faces`/`people` join folded straight into `_build_filters` (see
-its docstring): unlike tag/caption-keyword filtering, this needs no live-
-cache scanning path, it's a real committed DB table like `location`, so it
-stays on the cheap indexed SQL path and every route that already calls
-`_build_filters` (grid, nav, random, stats) picks it up automatically, no
-per-route changes needed. `/api/facets` gained a `people` list (real
-assigned names only, from the `people` table — unclustered/unnamed faces
-are never offered) for the front end's dropdown — see its docstring. The
-per-photo `people` field above is UNCHANGED and deliberately still always
-`None` — Phase 3d's scope is the filter/browse control only, not per-photo
-face display (that would need its own session, if ever wanted).
+Phase 3d: the grid's people/faces FILTER (added inert in Phase 2c, disabled
+control, "Phase 3 doesn't exist yet") was wired to real Phase 3 data — a
+`person` query param (a `people.cluster_id`) narrows every browsing route to
+photos with at least one face in that cluster, via a plain `faces`/`people`
+join folded straight into `_build_filters` (see its docstring): unlike
+tag/caption-keyword filtering, this needs no live-cache scanning path, it's
+a real committed DB table like `location`, so it stays on the cheap indexed
+SQL path and every route that already calls `_build_filters` (grid, nav,
+random, stats) picks it up automatically, no per-route changes needed.
+`/api/facets` gained a `people` list (real assigned names only, from the
+`people` table — unclustered/unnamed faces are never offered) for the front
+end's dropdown — see its docstring. Phase 3d deliberately left the
+per-photo `people` display field always `None` — filter/browse only, not
+per-photo face display.
+
+Phase 3e (this session): the per-photo `people` field Phase 3d left as
+`None` is now populated for real — see `_people_for_hashes`/`_row_to_dict`
+below. Every photo/video response carries the named people (from the
+`faces`/`people` join, `not_a_person=0`, assigned_name real — same
+named-only posture as Phase 3d's `/api/facets` list) actually appearing in
+THAT specific file, not just whether a filter matches. The grid's page
+fetch batches this into one query per page (`_fetch_page`) rather than one
+per row, so it stays cheap at 100k+-row scale — see `_people_for_hashes`'s
+docstring. Still read-only, still no editing surface here (that stays in
+the Tkinter `FaceLabelingWindow` only) — this is display only, same scope
+line Phase 3d drew for the filter.
 
 Phase 2c added: a Random button + random slideshow order in the viewer
 (/api/random, /api/nav?mode=random — see their docstrings), and new
@@ -655,14 +666,60 @@ def _random_order_for(conn, where, params, extra_pred, seed: str) -> list[str]:
     return paths
 
 
-def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+def _people_for_hashes(conn: sqlite3.Connection, file_hashes: list[str]) -> dict[str, list[dict]]:
+    """Phase 3e: batch lookup of named people appearing in each of the given
+    file_hashes, keyed by file_hash -> a list of {"cluster_id", "name"}
+    sorted by name. Named only -- same "only offer real, already-meaningful
+    values" posture as /api/facets' `people` list (Phase 3d) -- and excludes
+    faces flagged not_a_person (Phase 3c: a human-confirmed false-positive
+    detection isn't a person to display, same reasoning run_face_clustering()
+    already applies when deciding what's a real candidate).
+
+    Deliberately ONE query for however many file_hashes are passed, not one
+    query per row -- the grid's page fetch (_fetch_page below) calls this
+    once with every file_hash on the current page (at most `review_page_size`,
+    capped at 200 by api_photos), never per-row, so this stays a single
+    indexed IN(...) lookup against idx_faces_file_hash regardless of page
+    size. Single-row callers (the viewer's /api/nav, /api/random,
+    /api/edit/<hash>) just pass a one-element list -- same query shape, same
+    index, negligible cost either way. Returns {} for an empty input without
+    ever touching the DB (a page can't skip the query it's not on)."""
+    if not file_hashes:
+        return {}
+    placeholders = ",".join("?" * len(file_hashes))
+    sql = f"""
+        SELECT DISTINCT f.file_hash, p.cluster_id, p.assigned_name
+        FROM faces f
+        JOIN people p ON p.cluster_id = f.cluster_id
+        WHERE f.file_hash IN ({placeholders})
+          AND f.not_a_person = 0
+          AND p.assigned_name IS NOT NULL AND TRIM(p.assigned_name) != ''
+        ORDER BY p.assigned_name COLLATE NOCASE
+    """
+    result: dict[str, list[dict]] = {}
+    for r in conn.execute(sql, file_hashes).fetchall():
+        result.setdefault(r["file_hash"], []).append({"cluster_id": r["cluster_id"], "name": r["assigned_name"]})
+    return result
+
+
+def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection, people: list[dict] | None = None) -> dict:
     """`conn` (Phase 2f) is needed to check whether this row's caption/tags
     have ever been manually edited -- see the branch below. Every call site
     already has a live connection open (the same one used to fetch `row`),
     so this is never a new connection, just threading the existing one
-    through."""
+    through.
+
+    `people` (Phase 3e): pre-fetched named-people list for this exact row,
+    normally supplied by a caller that already batch-fetched a whole page's
+    worth via _people_for_hashes (see _fetch_page) so this function itself
+    never issues a query per row. A single-row caller (nav/random/edit) can
+    leave it as the default None, which does one _people_for_hashes lookup
+    for just this file_hash -- same query shape either way, just batched vs.
+    not depending on how many rows are being converted at once."""
     d = dict(row)
     file_hash = d["file_hash"]
+    if people is None:
+        people = _people_for_hashes(conn, [file_hash]).get(file_hash, [])
     edited_fields = manual_edit_fields(conn, file_hash)
     current_path = d["current_path"] or ""
     dest_root = str(_cfg.dest_root_path)
@@ -721,12 +778,12 @@ def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
         # -- not currently rendered distinctly by the front end, but harmless
         # to expose now rather than needing a new field later.
         "edited_fields": sorted(edited_fields),
-        # Still always None -- Phase 3d (see module docstring) wired up the
-        # grid's people/faces FILTER to real data, but deliberately left
-        # this per-photo display field alone; that's a separate, not-yet-
-        # requested piece of work, not folded into this filter/browse-only
-        # session.
-        "people": None,
+        # Phase 3e: named people appearing in this specific photo (see
+        # _people_for_hashes above) -- Phase 3d wired up the grid's people
+        # FILTER, this wires up actual per-photo DISPLAY. Read-only, same as
+        # everything else in this response -- no editing surface here, that
+        # stays in the Tkinter labeling window only.
+        "people": people,
     }
 
 
@@ -741,7 +798,14 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
 
     When a Phase 2c tag/caption filter is active (extra_pred not None),
     the same cursor semantics are preserved but satisfied via _scan_matches
-    instead of a single indexed query — see its docstring."""
+    instead of a single indexed query — see its docstring.
+
+    Phase 3e: named-people data for the whole page is fetched in exactly ONE
+    extra query (_people_for_hashes, keyed by every file_hash on this page),
+    not one query per row — see that function's docstring for why this
+    stays cheap at 100k+-row scale: results are already paginated (limit is
+    capped at 200 by api_photos), so this join only ever runs against the
+    current page's rows, never the whole filtered set."""
     if extra_pred is not None:
         if before is not None:
             matches, _ = _scan_matches(conn, where, params, extra_pred, cursor=before, want=limit + 1, forward=False)
@@ -753,7 +817,8 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
             has_next = len(matches) > limit
             rows = matches[:limit]
             has_prev = after is not None
-        return [_row_to_dict(r, conn) for r in rows], has_next, has_prev
+        people_map = _people_for_hashes(conn, [r["file_hash"] for r in rows])
+        return [_row_to_dict(r, conn, people=people_map.get(r["file_hash"], [])) for r in rows], has_next, has_prev
     if before is not None:
         sql = f"SELECT * FROM photos WHERE {where} AND current_path < ? ORDER BY current_path DESC LIMIT ?"
         rows = conn.execute(sql, params + [before, limit + 1]).fetchall()
@@ -771,7 +836,8 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
         has_next = len(rows) > limit
         rows = rows[:limit]
         has_prev = after is not None
-    return [_row_to_dict(r, conn) for r in rows], has_next, has_prev
+    people_map = _people_for_hashes(conn, [r["file_hash"] for r in rows])
+    return [_row_to_dict(r, conn, people=people_map.get(r["file_hash"], [])) for r in rows], has_next, has_prev
 
 
 @app.route("/")

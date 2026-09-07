@@ -217,7 +217,11 @@ def test_review_tool_api(tmp: Path) -> None:
     assert by_hash["hash_captioned"]["is_video"] is False
     assert by_hash["hash_pending"]["captioned"] is False and by_hash["hash_pending"]["caption"] is None
     assert by_hash["hash_pending"]["location_name"] is None and by_hash["hash_pending"]["gps_checked"] is False
-    assert by_hash["hash_captioned"]["people"] is None, "Phase 3 placeholder must stay None"
+    # Phase 3e: `people` is now real (named faces/people join), not a
+    # permanent None placeholder -- this fixture has no faces/people rows at
+    # all, so every item's `people` is correctly an empty list, not None or
+    # an error.
+    assert by_hash["hash_captioned"]["people"] == [], "Phase 3e: no faces in this fixture -- must be [], not None"
     assert by_hash["hash_video"]["is_video"] is True, "video row must be flagged is_video for the front end"
     assert by_hash["hash_video"]["captioned"] is False and by_hash["hash_video"]["caption"] is None, \
         "video never gets an automated caption -- the front end renders this as 'No caption', not 'Not yet captioned'"

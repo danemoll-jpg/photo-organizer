@@ -113,20 +113,39 @@
  *   copy-pasted implementation. Scoped to the bulk-edit UI only -- the
  *   single-item viewer edit form's Location field was already free-text.
  *
- * Phase 3d (this session): the grid's Person filter (added inert in
- *   Phase 2c -- disabled control, "Phase 3 doesn't exist yet") is wired to
- *   real Phase 3 data. Populated from /api/facets' new `people` list (real
- *   assigned names only), filtering via a new `person` param
- *   (review_tool.py's _build_filters resolves it to a cluster_id join --
- *   see its docstring). THIRD reuse of attachSuggestionDropdown (Tag
- *   filter, bulk-edit Location, now this) -- per rule 7, no third
- *   copy-pasted implementation. `assigned_name` has no uniqueness
- *   constraint (unlike tags.tag_name), so allPeople below disambiguates
- *   same-named entries by appending "(#cluster_id)" only to whichever
- *   ones actually collide, so the exact-typed-name-match resolution
- *   applyFilters() does (same "value must exactly match a real known
- *   value" contract as Tag) still lands on the right cluster_id even in
- *   that rare case.
+ * Phase 3d: the grid's Person filter (added inert in Phase 2c -- disabled
+ *   control, "Phase 3 doesn't exist yet") was wired to real Phase 3 data.
+ *   Populated from /api/facets' new `people` list (real assigned names
+ *   only), filtering via a new `person` param (review_tool.py's
+ *   _build_filters resolves it to a cluster_id join -- see its docstring).
+ *   THIRD reuse of attachSuggestionDropdown (Tag filter, bulk-edit
+ *   Location, now this) -- per rule 7, no third copy-pasted implementation.
+ *   `assigned_name` has no uniqueness constraint (unlike tags.tag_name), so
+ *   allPeople below disambiguates same-named entries by appending
+ *   "(#cluster_id)" only to whichever ones actually collide, so the
+ *   exact-typed-name-match resolution applyFilters() does (same "value must
+ *   exactly match a real known value" contract as Tag) still lands on the
+ *   right cluster_id even in that rare case.
+ *
+ * Phase 3e (this session): the per-photo DISPLAY Phase 3d deliberately left
+ *   alone (the viewer's "People" row was an inert placeholder) is now real,
+ *   in both places:
+ *   - Viewer: renderPeopleList(item.people) -- first VIEWER_PEOPLE_VISIBLE
+ *     names, folding the rest behind a "+N more" toggle that reuses the
+ *     exact same show/hide-a-block-and-swap-my-own-text idiom
+ *     #viewer-info-toggle/setInfoExpanded already established, rather than
+ *     inventing a second collapse pattern on the same page.
+ *   - Grid: peopleHtml(item) -- more aggressive collapsing (first
+ *     GRID_PEOPLE_VISIBLE names + one "+N" badge whose title attribute
+ *     lists everyone), reusing the same .badge look tags/location already
+ *     use on a card. No new click handling needed for "click through to see
+ *     everyone" -- the card's existing click-opens-viewer handler already
+ *     covers these badges since they don't stop propagation.
+ *   Both read item.people, a list of {cluster_id, name} review_tool.py's
+ *   _row_to_dict now populates per photo (named people only, batched one
+ *   query per grid page -- see _people_for_hashes) -- read-only display,
+ *   same scope line Phase 3d drew for the filter (editing stays in the
+ *   Tkinter labeling window only).
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -193,6 +212,7 @@
   const viewerCaption = el("viewer-caption");
   const viewerTags = el("viewer-tags");
   const viewerLocation = el("viewer-location");
+  const viewerPeople = el("viewer-people"); // Phase 3e
   const viewerPlayPause = el("viewer-playpause");
   const viewerInterval = el("viewer-interval");
   const viewerRandomBtn = el("viewer-random");
@@ -293,6 +313,66 @@
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 3e: named-people display (viewer "People" row + grid card badges)
+  // ---------------------------------------------------------------------
+  // Viewer: show the first VIEWER_PEOPLE_VISIBLE names, fold the rest behind
+  // a "+N more" toggle -- reuses the exact same idiom #viewer-info-toggle/
+  // setInfoExpanded already established (a button that toggles a hidden
+  // block and swaps its own text), rather than inventing a second collapse
+  // pattern in the same page.
+  const VIEWER_PEOPLE_VISIBLE = 4;
+
+  function renderPeopleList(people) {
+    if (!people || !people.length) {
+      return `<span class="placeholder">No named people identified in this photo yet.</span>`;
+    }
+    const shown = people.slice(0, VIEWER_PEOPLE_VISIBLE);
+    const rest = people.slice(VIEWER_PEOPLE_VISIBLE);
+    let html = shown.map(p => `<span class="badge person">${escapeHtml(p.name)}</span>`).join(" ");
+    if (rest.length) {
+      const restHtml = rest.map(p => `<span class="badge person">${escapeHtml(p.name)}</span>`).join(" ");
+      html += ` <button type="button" class="people-more-toggle" data-count="${rest.length}">+${rest.length} more</button>` +
+        `<span class="people-rest" hidden> ${restHtml}</span>`;
+    }
+    return html;
+  }
+
+  // Delegated (not re-bound on every render, since #viewer-people's own
+  // innerHTML is replaced wholesale every time renderViewerItem runs) --
+  // same reasoning review.js already uses elsewhere for content that's
+  // rebuilt from scratch per item.
+  viewerPeople.addEventListener("click", (e) => {
+    const btn = e.target.closest(".people-more-toggle");
+    if (!btn) return;
+    const restEl = viewerPeople.querySelector(".people-rest");
+    if (!restEl) return;
+    restEl.hidden = !restEl.hidden;
+    btn.textContent = restEl.hidden ? `+${btn.dataset.count} more` : "Show fewer";
+  });
+
+  // Grid: much more compact than the viewer (small cards, per spec) -- only
+  // the first GRID_PEOPLE_VISIBLE names get their own badge, the rest fold
+  // into one "+N" badge whose title (native browser tooltip) lists everyone,
+  // so hovering still surfaces the full list without a click. The card's own
+  // click-to-open-viewer handler already covers every element inside it
+  // (these badges aren't given their own stopPropagation), so clicking
+  // through to the full, expandable viewer list also just works for free.
+  const GRID_PEOPLE_VISIBLE = 2;
+
+  function peopleHtml(item) {
+    const people = item.people || [];
+    if (!people.length) return "";
+    const shown = people.slice(0, GRID_PEOPLE_VISIBLE);
+    const rest = people.slice(GRID_PEOPLE_VISIBLE);
+    let html = shown.map(p => `<span class="badge person">${escapeHtml(p.name)}</span>`).join("");
+    if (rest.length) {
+      const allNames = people.map(p => p.name).join(", ");
+      html += `<span class="badge person-more" title="${escapeHtml(allNames)}">+${rest.length}</span>`;
+    }
+    return `<div class="card-people">${html}</div>`;
   }
 
   // ---------------------------------------------------------------------
@@ -482,6 +562,7 @@
             ${(item.tags || []).slice(0, 6).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join("")}
             ${item.location_name ? `<span class="badge location">📍 ${escapeHtml(item.location_name)}</span>` : ""}
           </div>
+          ${peopleHtml(item)}
         </div>`;
       card.addEventListener("click", () => openViewer(item));
       // Phase 2h Part A: the checkbox (and its wrapping label, so tapping
@@ -756,6 +837,7 @@
       : (item.gps_checked
           ? `<span class="placeholder">No location available</span>`
           : `<span class="placeholder">Not yet checked for GPS data</span>`);
+    viewerPeople.innerHTML = renderPeopleList(item.people);
 
     // Phase 2f: an uncaptioned item (any not-yet-captioned photo, or ANY
     // video — which never gets an automated caption at all) shows "+ Add
