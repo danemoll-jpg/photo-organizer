@@ -502,6 +502,34 @@ def create_person_from_faces(
     return new_cid
 
 
+def remove_faces_from_cluster(conn: sqlite3.Connection, face_ids: list[int]) -> None:
+    """Phase 3f's "Remove Selected from Cluster" action -- functionally
+    "half of Split" (create_person_from_faces above): pulls the given faces
+    out of whatever cluster(s) they're currently in and sends them back to
+    "(Unclustered)" (cluster_id NULL), WITHOUT creating a new person the
+    way create_person_from_faces does. Deliberately does NOT touch
+    not_a_person -- these are real, valid faces that were just grouped
+    with the wrong person, not Phase 3c's false-positive case (see
+    mark_faces_not_a_person for that). Reuses the exact same
+    centroid-recompute mechanism as Split/mark-not-a-person:
+    _recompute_person_centroid on every source cluster affected, which
+    also handles the source cluster ending up empty (deletes the orphaned
+    `people` row) the same way a Split or merge already does. Removed
+    faces are picked up again by the next `cluster-faces` run just like
+    any other unclustered face, or can be manually re-labeled/split right
+    away from the "(Unclustered)" bucket."""
+    if not face_ids:
+        return
+    source_clusters = _source_clusters_of(conn, face_ids)
+    conn.executemany(
+        "UPDATE faces SET cluster_id = NULL WHERE face_id = ?",
+        [(fid,) for fid in face_ids],
+    )
+    for cid in source_clusters:
+        _recompute_person_centroid(conn, cid)
+    conn.commit()
+
+
 def move_faces_to_person(conn: sqlite3.Connection, face_ids: list[int], dest_cluster_id: int) -> None:
     """Moves faces into an ALREADY-EXISTING person -- e.g. "these clearly
     belong with person X" without merging two whole clusters at once.

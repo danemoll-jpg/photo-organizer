@@ -324,6 +324,7 @@ from src.face_clustering import (
     mark_faces_not_a_person,
     merge_people,
     move_faces_to_person,
+    remove_faces_from_cluster,
     set_person_name,
     unmark_faces_not_a_person,
 )
@@ -3266,6 +3267,13 @@ class FaceLabelingWindow(tk.Toplevel):
         ttk.Button(action_bar1, text="Un-mark Selected", command=self._on_unmark_not_a_person).pack(
             side="left", padx=(6, 0)
         )
+        # Phase 3f: the lighter-weight sibling of Split -- sends outliers
+        # back to "(Unclustered)" without creating a new person. See
+        # _on_remove_from_cluster's own docstring and
+        # src/face_clustering.py::remove_faces_from_cluster().
+        ttk.Button(
+            action_bar1, text="Remove Selected from Cluster", command=self._on_remove_from_cluster
+        ).pack(side="right", padx=(0, 6))
         ttk.Button(action_bar1, text="Split Selected Into New Person...", command=self._on_split).pack(
             side="right"
         )
@@ -3515,6 +3523,41 @@ class FaceLabelingWindow(tk.Toplevel):
         new_cid = create_person_from_faces(self.conn, sorted(self._selected_face_ids), name=(name.strip() or None))
         messagebox.showinfo(
             "Face Labeling", f"Created a new person (cluster {new_cid}) with {len(self._selected_face_ids)} face(s)."
+        )
+        self.reload()
+
+    def _on_remove_from_cluster(self) -> None:
+        """Phase 3f: "half of Split" -- sends the selected faces back to
+        "(Unclustered)" WITHOUT creating a new person, unlike _on_split
+        above. The right tool for a handful of miscellaneous outliers
+        wrongly grouped into an otherwise-correct cluster (real example: a
+        408-face cluster that was almost entirely one person, with a few
+        genuinely misclustered faces mixed in) -- Split would create an
+        unnecessary new person for a grab-bag of unrelated wrong matches,
+        and selecting the hundreds of CORRECT faces to Move instead would
+        be far more clicking than selecting the few wrong ones. Does NOT
+        touch not_a_person -- these are still real, valid faces, just
+        wrongly grouped (not Phase 3c's false-positive case)."""
+        if not self._selected_face_ids:
+            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            return
+        if self._current_view == "not_a_person":
+            messagebox.showerror(
+                "Face Labeling",
+                'These faces are flagged as not a person. Click "Un-mark Selected" first, then split/move '
+                "them normally.",
+            )
+            return
+        summary = self._current_summary()
+        if summary is not None and summary.cluster_id is None:
+            messagebox.showinfo(
+                "Face Labeling", 'These faces are already in "(Unclustered)" -- nothing to remove them from.'
+            )
+            return
+        count = len(self._selected_face_ids)
+        remove_faces_from_cluster(self.conn, sorted(self._selected_face_ids))
+        messagebox.showinfo(
+            "Face Labeling", f'Removed {count} face(s) from this cluster -- sent back to "(Unclustered)".'
         )
         self.reload()
 
