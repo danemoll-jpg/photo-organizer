@@ -682,6 +682,66 @@ labeling is a genuinely different, interactive task:
 surfaced in `review_tool.py` — Phase 2c's people/faces filter placeholder
 stays inert until a future session wires it up to this real data.
 
+## Phase 3b — resync folder placement with date_taken
+
+A tool for a real gap the Date Cluster Audit (above) left open: correcting
+`date_taken` in the database (via `photo_edits`) never moves the actual
+file — a photo fixed from a wrong 2023-10-29 to its real 2020-02 date still
+sits physically in `E:\Pics\2023\2023-10\`, disagreeing with its own
+corrected record. This tool finds and fixes that mismatch. It's
+general-purpose, not scoped to any one prior audit's output: **any** row
+whose current folder disagrees with what Phase 1's own convention computes
+from its *current* `date_taken` is a candidate, whatever put it there
+(a Date Cluster Audit fix, a manual edit in `review_tool.py`'s viewer, a
+future bulk-edit) — and it checks photos and video alike.
+
+Detection (`src/relocate.py::find_relocation_candidates`) is pure DB +
+path arithmetic, no file I/O: for every row with a non-`NULL` `date_taken`,
+it computes `<dest_root>\YYYY\YYYY-MM\` (plus a `Video` subfolder for a
+video file) from that row's own `date_taken_year`/`date_taken_month` —
+Phase 1's exact convention, reused, not re-derived — and compares it
+against `current_path`'s actual folder. A row with no resolved date at all
+(still genuinely unsorted) is never a candidate; there's no "correct"
+folder to compare against.
+
+Relocating reuses Phase 1's own copy-verify-delete + collision-handling
+primitive (`src/organize.py::copy_verify_delete`/`pick_available_name`),
+factored out specifically so this module could call it instead of
+reimplementing it. Same safety model: copy to the corrected folder, verify
+via hash comparison, delete the old copy only once verified — never a raw
+move, and a naming collision at the destination gets the identical
+hash-suffix treatment Phase 1 already uses, never an overwrite. Before
+touching anything, each candidate is also re-hashed live and checked
+against its own recorded `file_hash` — a mismatch (the file's content has
+changed since it was last recorded) is skipped as an error, not silently
+relocated under a now-stale identity.
+
+This is a **physical reorganization, not a metadata edit** — it does NOT
+go through Phase 2f's `photo_edits` audit mechanism (that's for
+caption/tags/location/date_taken *field values*). Instead it logs through
+the normal `logs/organize_*.log` mechanism, same as Phase 1 itself, and
+updates only `photos.current_path`/`filename`/`file_size`/`file_mtime` —
+`original_path`/`date_taken`/`date_source`/`status` are left untouched.
+
+Usage — dry-run preview first, always:
+
+```
+venv\Scripts\python main.py relocate-files preview
+venv\Scripts\python main.py relocate-files apply           # asks to confirm
+venv\Scripts\python main.py relocate-files apply --yes      # skip the prompt
+```
+
+Or the dashboard's **Phase 3b — Relocate Files** panel (collapsed by
+default, after Face Clustering): Preview is a fast synchronous query (no
+worker thread needed); Apply does real per-file copy-verify-delete, so it
+gets its own progress bar, Cancel button, and live log tail like every
+other batch panel. Apply is disabled until a preview has actually been run
+in that session, and is disabled again after an apply completes (its
+cached preview is now stale) — re-run Preview to check for anything left.
+
+Not built: automatically re-running this after every future date edit — a
+manual trigger is enough for now, same posture as Phase 3's re-clustering.
+
 ## Viewing the database
 
 `data/photo_organizer.db` is a plain SQLite file — no server, no login.

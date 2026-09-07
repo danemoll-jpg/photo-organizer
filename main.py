@@ -26,6 +26,8 @@
     venv\\Scripts\\python main.py audit-dates apply-fix                    # Step 2: apply via photo_edits audit trail
     venv\\Scripts\\python main.py audit-dates interpolate-preview --target-prefix "E:\\katya 2024" --reference-prefix "E:\\Pics\\2020\\2020-02" --img-max 7093
     venv\\Scripts\\python main.py audit-dates interpolate-apply --target-prefix "E:\\katya 2024" --reference-prefix "E:\\Pics\\2020\\2020-02" --img-max 7093
+    venv\\Scripts\\python main.py relocate-files preview          # Phase 3b: dry-run, show which files' folders disagree with their current date_taken
+    venv\\Scripts\\python main.py relocate-files apply             # Phase 3b: copy-verify-delete each into its correct YYYY/YYYY-MM folder
 """
 from __future__ import annotations
 
@@ -57,6 +59,7 @@ from src.load_captions import load_captions
 from src.logging_setup import setup_logging
 from src.organize import run_phase1
 from src.port_check import restart_review_tool
+from src.relocate import apply_relocations, find_relocation_candidates, format_relocation_preview
 from src.thumbnail_backfill import run_thumbnail_extraction
 
 
@@ -570,6 +573,71 @@ def cmd_audit_dates_interpolate_apply(args) -> None:
     print(apply_stats.summary())
 
 
+def cmd_relocate_preview(args) -> None:
+    """Phase 3b, step 1 (dry run): shows every photo/video whose current
+    folder disagrees with what Phase 1's own convention would compute from
+    its CURRENT date_taken — general-purpose, not scoped to any one prior
+    audit's output. Makes no changes."""
+    cfg = load_config()
+    init_db(cfg.db_path_abs, logger=None)  # safe/idempotent (rule 12)
+    conn = connect(cfg.db_path_abs)
+    try:
+        preview = find_relocation_candidates(conn, cfg)
+    finally:
+        conn.close()
+    print(format_relocation_preview(preview))
+    if preview.candidates:
+        print("\nThis was a DRY RUN — nothing was moved. Review the list above, then run:")
+        print("  main.py relocate-files apply")
+
+
+def cmd_relocate_apply(args) -> None:
+    """Phase 3b, step 2 (apply): relocates each candidate via
+    src.relocate.apply_relocations, which reuses Phase 1's actual
+    copy-verify-delete + collision-handling primitive (src/organize.py) —
+    copy to the correct YYYY/YYYY-MM folder, verify via hash comparison,
+    delete the old copy only once verified. Updates the DB's current_path
+    per successfully-relocated file and logs old path -> new path through
+    the normal logs/organize_*.log mechanism (not the photo_edits
+    mechanism — this is a physical move, not a field edit)."""
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs, logger_name="photo_organizer.relocate")
+    init_db(cfg.db_path_abs, logger=logger)
+    conn = connect(cfg.db_path_abs)
+    pbar: tqdm | None = None
+    try:
+        preview = find_relocation_candidates(conn, cfg)
+        if not preview.candidates:
+            print("Nothing to relocate — no candidates found. Run 'relocate-files preview' for details.")
+            return
+
+        print(format_relocation_preview(preview))
+        if not args.yes:
+            answer = input(
+                f"\nType 'yes' to relocate {len(preview.candidates)} file(s) "
+                "(copy-verify-delete into their correct folder, per CLAUDE.md rule 2): "
+            ).strip().lower()
+            if answer != "yes":
+                print("Aborted. No files were touched.")
+                return
+
+        def _progress_cb(done: int, total: int) -> None:
+            nonlocal pbar
+            if pbar is None:
+                pbar = tqdm(total=total, desc="Relocate", unit="file")
+            pbar.n = done
+            pbar.refresh()
+
+        stats = apply_relocations(conn, preview.candidates, cfg, logger, progress_cb=_progress_cb)
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(stats.summary())
+
+
 def cmd_load_captions(args) -> None:
     cfg = load_config()
     logger, _log_path = setup_logging(cfg.log_dir_abs)
@@ -680,6 +748,22 @@ def main() -> None:
     _add_interpolation_args(interp_apply)
     interp_apply.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     interp_apply.set_defaults(func=cmd_audit_dates_interpolate_apply)
+
+    relocate_parser = sub.add_parser(
+        "relocate-files",
+        help="Phase 3b: resync folder placement with each file's current date_taken (reuses Phase 1's copy-verify-delete)",
+    )
+    relocate_sub = relocate_parser.add_subparsers(dest="relocate_command", required=True)
+
+    relocate_sub.add_parser(
+        "preview", help="Dry run: list every photo/video whose folder disagrees with its current date_taken"
+    ).set_defaults(func=cmd_relocate_preview)
+
+    relocate_apply = relocate_sub.add_parser(
+        "apply", help="Relocate every candidate via copy-verify-delete; updates current_path in the DB"
+    )
+    relocate_apply.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    relocate_apply.set_defaults(func=cmd_relocate_apply)
 
     ru_parser = sub.add_parser("review-user", help="Phase 2d: manage review_tool.py login credentials (config.yaml's review_users)")
     ru_sub = ru_parser.add_subparsers(dest="review_user_command", required=True)

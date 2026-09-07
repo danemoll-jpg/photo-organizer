@@ -171,6 +171,25 @@ def find_by_path(conn: sqlite3.Connection, path: str) -> dict | None:
     return {"file_hash": row[0], "file_size": row[1], "file_mtime": row[2]}
 
 
+def update_relocated_path(conn: sqlite3.Connection, file_hash: str, new_current_path: str,
+                           new_filename: str, new_size: int, new_mtime: float) -> None:
+    """Phase 3b: records a physical relocation (folder resync after a
+    date_taken correction) — updates ONLY current_path/filename/file_size/
+    file_mtime, the fields that actually changed on disk. Deliberately
+    leaves original_path untouched (same convention as upsert_photo's own
+    ON CONFLICT clause: original_path is where a file was FIRST seen, never
+    rewritten by a later operation) and leaves date_taken/date_source/
+    status/processed_at/phase1_verified untouched too — this is a physical
+    move, not a re-run of date resolution or a metadata edit, so nothing
+    about the photo's identity or resolved date should change here. See
+    src/relocate.py for the caller."""
+    conn.execute(
+        "UPDATE photos SET current_path = ?, filename = ?, file_size = ?, file_mtime = ? WHERE file_hash = ?",
+        (new_current_path, new_filename, new_size, new_mtime, file_hash),
+    )
+    conn.commit()
+
+
 def upsert_photo(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         """

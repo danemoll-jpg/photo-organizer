@@ -21,6 +21,12 @@ chain instead of resolve_date's EXIF-first chain, and (2) a dated video's
 destination gets an extra 'Video' subfolder within its YYYY-MM month
 folder, so photos and videos never share a directory. See
 video_date_resolver.py.
+
+Phase 3b: the actual copy-verify-delete + collision-handling mechanism
+below (pick_available_name / copy_verify_delete) is factored out into
+standalone, importable functions specifically so src/relocate.py (folder
+resync after a date correction) can reuse it as-is rather than
+reimplementing it — see that module's docstring.
 """
 from __future__ import annotations
 
@@ -103,6 +109,81 @@ def _cleanup_partial(tmp_path: Path, logger: logging.Logger) -> None:
             tmp_path.unlink()
     except OSError as e:
         logger.error(f"Could not clean up leftover partial file {tmp_path}: {e}")
+
+
+class CopyVerifyDeleteError(Exception):
+    """Raised by copy_verify_delete() when any step fails. The message
+    describes exactly what happened and is meant to be logged as-is by the
+    caller — the source file is always left untouched (any partial temp
+    file is cleaned up first), consistent with CLAUDE.md rule 2."""
+
+
+def pick_available_name(dest_dir: Path, wanted_name: str, file_hash: str,
+                         cache: dict[Path, set[str]], suffix_len: int) -> str:
+    """Collision handling: if wanted_name isn't already claimed in dest_dir
+    (by an earlier file this same run, or a file already on disk), use it
+    as-is; otherwise append a hash-suffix (never overwrites an existing,
+    different file). Shared by Phase 1 (organize.py) and Phase 3b
+    (relocate.py) — the exact same rule for both, per CLAUDE.md rule 7."""
+    return _pick_available_name(dest_dir, wanted_name, file_hash, cache, suffix_len)
+
+
+def copy_verify_delete(src_path: Path, dest_path: Path, file_hash: str,
+                        cfg: Config, logger: logging.Logger) -> Path:
+    """The actual safety-critical primitive behind CLAUDE.md rule 2 — copy
+    src_path to dest_path (via a same-directory .partial temp name, so a
+    reader never sees a half-written file), verify the copy's hash matches
+    file_hash, atomically finalize it into place, then delete src_path —
+    only once verification has actually succeeded. dest_path's parent is
+    created if needed; collision-safe naming (never overwriting a
+    different existing file) is the caller's job via pick_available_name()
+    above, applied BEFORE calling this.
+
+    Raises CopyVerifyDeleteError on any copy/verify/finalize failure
+    (source untouched, any partial temp file cleaned up) — callers should
+    treat this the same way Phase 1's own _process_one does: log it, count
+    it as an error, and keep going with the next file, never let it crash
+    the whole run.
+
+    A failure to delete the now-redundant source (copy verified, just
+    couldn't unlink) is logged as a warning here, not raised — the actual
+    safety guarantee (nothing lost) already holds at that point.
+
+    Returns the final dest_path on success. Shared by Phase 1 (organize.py)
+    and Phase 3b (relocate.py) — the exact same copy-verify-delete
+    mechanism for both, per CLAUDE.md rule 7 and Phase 3b's own explicit
+    "reuse, don't reimplement" requirement."""
+    dest_dir = dest_path.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest_dir / (dest_path.name + ".partial")
+
+    try:
+        shutil.copy2(src_path, tmp_path)
+    except OSError as e:
+        raise CopyVerifyDeleteError(f"COPY FAILED {src_path} -> {tmp_path}: {e} (source untouched)") from e
+
+    try:
+        copy_hash = hash_file(tmp_path, cfg.hash_algorithm)
+    except OSError as e:
+        _cleanup_partial(tmp_path, logger)
+        raise CopyVerifyDeleteError(f"VERIFY ERROR hashing {tmp_path}: {e} (source untouched)") from e
+
+    if copy_hash != file_hash:
+        _cleanup_partial(tmp_path, logger)
+        raise CopyVerifyDeleteError(f"VERIFY FAILED {src_path} -> {tmp_path}: hash mismatch, source untouched")
+
+    try:
+        os.replace(tmp_path, dest_path)
+    except OSError as e:
+        _cleanup_partial(tmp_path, logger)
+        raise CopyVerifyDeleteError(f"FINALIZE FAILED {tmp_path} -> {dest_path}: {e} (source untouched)") from e
+
+    try:
+        src_path.unlink()
+    except OSError as e:
+        logger.warning(f"Copied+verified but could not delete source {src_path}: {e} (dest is safe at {dest_path})")
+
+    return dest_path
 
 
 def _process_one(path: Path, cfg: Config, conn, logger: logging.Logger,
@@ -189,42 +270,12 @@ def _process_one(path: Path, cfg: Config, conn, logger: logging.Logger,
         logger.info(f"[DRY RUN] would {action}: {path} -> {dest_path} (date_source={source})")
         return
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest_dir / (dest_name + ".partial")
-
     try:
-        shutil.copy2(path, tmp_path)
-    except OSError as e:
+        dest_path = copy_verify_delete(path, dest_path, file_hash, cfg, logger)
+    except CopyVerifyDeleteError as e:
         stats.errors += 1
-        logger.error(f"COPY FAILED {path} -> {tmp_path}: {e} (source untouched)")
+        logger.error(str(e))
         return
-
-    try:
-        copy_hash = hash_file(tmp_path, cfg.hash_algorithm)
-    except OSError as e:
-        stats.errors += 1
-        logger.error(f"VERIFY ERROR hashing {tmp_path}: {e} (source untouched)")
-        _cleanup_partial(tmp_path, logger)
-        return
-
-    if copy_hash != file_hash:
-        stats.errors += 1
-        logger.error(f"VERIFY FAILED {path} -> {tmp_path}: hash mismatch, source untouched")
-        _cleanup_partial(tmp_path, logger)
-        return
-
-    try:
-        os.replace(tmp_path, dest_path)
-    except OSError as e:
-        stats.errors += 1
-        logger.error(f"FINALIZE FAILED {tmp_path} -> {dest_path}: {e} (source untouched)")
-        _cleanup_partial(tmp_path, logger)
-        return
-
-    try:
-        path.unlink()
-    except OSError as e:
-        logger.warning(f"Copied+verified but could not delete source {path}: {e} (dest is safe at {dest_path})")
 
     status = "unsorted" if source == "unsorted" else "sorted"
     if status == "sorted":

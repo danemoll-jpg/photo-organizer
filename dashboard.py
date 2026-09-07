@@ -329,6 +329,13 @@ from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
 from src.pick_sources import merge_and_save, pick_sources_interactive
 from src.port_check import RestartResult, listening_pids, restart_review_tool
+from src.relocate import (
+    RelocateStats,
+    RelocationPreview,
+    apply_relocations,
+    find_relocation_candidates,
+    format_relocation_preview,
+)
 from src.thumbnail_backfill import ThumbStats, run_thumbnail_extraction
 
 
@@ -400,6 +407,26 @@ class DashboardApp:
         self._cluster_log_path: Path | None = None
         self._cluster_log_read_pos = 0
         self.face_labeling_window: "FaceLabelingWindow | None" = None
+
+        # Phase 3b — Relocate Files panel: Preview is a fast synchronous
+        # query (pure DB + path arithmetic, no file I/O -- see
+        # src/relocate.py's module docstring), same reasoning as Date
+        # Cluster Audit's own Preview above, but Apply does real per-file
+        # copy-verify-delete so it gets the same "own worker thread +
+        # progress bar + log tail" treatment as every other batch-writing
+        # panel. _relocate_preview caches the last RelocationPreview
+        # computed in THIS session so Apply always acts on exactly what was
+        # shown, never a fresh (possibly different) query the user never
+        # looked at -- Apply is disabled until a preview exists, and
+        # cleared again after every Apply (its own re-check at apply time
+        # already re-derives fresh state per candidate — see
+        # apply_relocations — but the cached preview object itself is
+        # stale the moment anything has actually moved).
+        self.relocate_worker: threading.Thread | None = None
+        self.relocate_stop_requested = False
+        self._relocate_log_path: Path | None = None
+        self._relocate_log_read_pos = 0
+        self._relocate_preview: RelocationPreview | None = None
 
         # Remote Access panel (Phase 2d follow-up): the cloudflared
         # subprocess this dashboard itself spawned, if any. None whenever
@@ -957,6 +984,63 @@ class DashboardApp:
         cluster_log_scroll.pack(side="right", fill="y")
         self.cluster_log_text.configure(yscrollcommand=cluster_log_scroll.set)
 
+        # --- Phase 3b: Relocate Files panel ---
+        relocate_frame = self._make_collapsible(
+            "Phase 3b — Relocate Files (resync folder placement with date_taken)", start_expanded=False
+        )
+
+        ttk.Label(
+            relocate_frame, wraplength=740, justify="left",
+            text=(
+                "Finds any photo/video whose current folder disagrees with what Phase 1's own "
+                "convention would compute from its CURRENT date_taken (e.g. after a Date Cluster Audit "
+                "fix corrected the date but never moved the file — that tool is DB-only by design). "
+                "General-purpose, not scoped to any one prior fix; checks photos and video alike. "
+                "Relocating reuses Phase 1's own copy-verify-delete + collision handling exactly — "
+                "never a raw move, never an overwrite. Preview shows every old path -> new path before "
+                "anything moves; Apply only becomes available after you've looked at a preview."
+            ),
+        ).pack(anchor="w", padx=6, pady=(6, 6))
+
+        relocate_btn_row = ttk.Frame(relocate_frame)
+        relocate_btn_row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(relocate_btn_row, text="Preview (Dry Run)", command=self._on_relocate_preview).pack(side="left")
+        self.relocate_apply_btn = ttk.Button(
+            relocate_btn_row, text="Apply", command=self._on_relocate_apply, state="disabled"
+        )
+        self.relocate_apply_btn.pack(side="left", padx=(6, 0))
+        self.relocate_cancel_btn = ttk.Button(
+            relocate_btn_row, text="Cancel", command=self._on_relocate_cancel, state="disabled"
+        )
+        self.relocate_cancel_btn.pack(side="left", padx=(6, 0))
+
+        relocate_prog_row = ttk.Frame(relocate_frame)
+        relocate_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.relocate_progress = ttk.Progressbar(relocate_prog_row, mode="determinate")
+        self.relocate_progress.pack(fill="x", side="left", expand=True)
+        self.relocate_status_label = ttk.Label(relocate_prog_row, text="Idle", width=28, anchor="e")
+        self.relocate_status_label.pack(side="right", padx=(6, 0))
+
+        ttk.Label(relocate_frame, text="Preview / result output:").pack(anchor="w", padx=6)
+        relocate_results_body = ttk.Frame(relocate_frame)
+        relocate_results_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.relocate_results_text = tk.Text(relocate_results_body, height=10, state="disabled", wrap="word")
+        self.relocate_results_text.pack(side="left", fill="both", expand=True)
+        relocate_results_scroll = ttk.Scrollbar(
+            relocate_results_body, orient="vertical", command=self.relocate_results_text.yview
+        )
+        relocate_results_scroll.pack(side="right", fill="y")
+        self.relocate_results_text.configure(yscrollcommand=relocate_results_scroll.set)
+
+        ttk.Label(relocate_frame, text="Live relocation log:").pack(anchor="w", padx=6)
+        relocate_log_body = ttk.Frame(relocate_frame)
+        relocate_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.relocate_log_text = tk.Text(relocate_log_body, height=6, state="disabled", wrap="none")
+        self.relocate_log_text.pack(side="left", fill="both", expand=True)
+        relocate_log_scroll = ttk.Scrollbar(relocate_log_body, orient="vertical", command=self.relocate_log_text.yview)
+        relocate_log_scroll.pack(side="right", fill="y")
+        self.relocate_log_text.configure(yscrollcommand=relocate_log_scroll.set)
+
         # --- Review Users panel (Phase 2d follow-up) ---
         ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
 
@@ -1395,6 +1479,19 @@ class DashboardApp:
                     elif kind == "date_audit_error":
                         _, err = msg
                         self._on_date_audit_error(err)
+                    elif kind == "relocate_log_started":
+                        log_path = msg[1]
+                        self._start_relocate_log_tail(log_path)
+                    elif kind == "relocate_progress":
+                        _, done, total = msg
+                        self.relocate_progress.configure(maximum=max(total, 1), value=done)
+                        self.relocate_status_label.configure(text=f"{done:,} / {total:,} relocated")
+                    elif kind == "relocate_done":
+                        _, stats, was_stopped = msg
+                        self._on_relocate_done(stats, was_stopped)
+                    elif kind == "relocate_error":
+                        _, err = msg
+                        self._on_relocate_error(err)
                 except Exception:
                     pass  # see docstring above -- never let one bad message stop future polling
         except queue.Empty:
@@ -2436,6 +2533,159 @@ class DashboardApp:
         self.date_audit_log_text.see("end")
         self.date_audit_log_text.configure(state="disabled")
 
+    # ------------------------------------------ Phase 3b: relocate files
+    def _set_relocate_results_text(self, text: str) -> None:
+        self.relocate_results_text.configure(state="normal")
+        self.relocate_results_text.delete("1.0", "end")
+        self.relocate_results_text.insert("1.0", text)
+        self.relocate_results_text.configure(state="disabled")
+        # Same auto-scroll-into-view fix as Date Cluster Audit's own results
+        # box (_set_date_audit_results_text) — every panel that lives this
+        # far down the scrollable page needs it, not just that one.
+        self._scroll_widget_into_view(self.relocate_results_text)
+
+    def _on_relocate_preview(self) -> None:
+        # Fast, synchronous, read-only query -- pure DB + path arithmetic,
+        # no file I/O (see src/relocate.py's module docstring) -- no worker
+        # thread needed, same reasoning as Date Cluster Audit's own Preview
+        # buttons above.
+        try:
+            cfg = load_config()
+            init_db(cfg.db_path_abs, logger=None)  # safe/idempotent (rule 12)
+            conn = connect(cfg.db_path_abs)
+            try:
+                preview = find_relocation_candidates(conn, cfg)
+            finally:
+                conn.close()
+        except Exception as e:
+            messagebox.showerror("Photo Organizer", f"Preview failed: {e}")
+            return
+
+        self._relocate_preview = preview
+        self._set_relocate_results_text(format_relocation_preview(preview))
+        self.relocate_apply_btn.configure(state="normal" if preview.candidates else "disabled")
+
+    def _relocate_busy(self) -> bool:
+        return self.relocate_worker is not None and self.relocate_worker.is_alive()
+
+    def _on_relocate_apply(self) -> None:
+        # Deliberately requires a preview to have been run in THIS session
+        # (see _on_date_audit_apply_fix's identical reasoning) rather than
+        # silently re-querying -- forces the user to have actually looked
+        # at the list of moves before anything is touched, and guarantees
+        # Apply only ever acts on exactly what was shown.
+        preview = self._relocate_preview
+        if preview is None or not preview.candidates:
+            messagebox.showinfo("Photo Organizer", "Run Preview first, and confirm it found something to relocate.")
+            return
+        if self._relocate_busy():
+            return
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            f"About to relocate {len(preview.candidates)} photo(s)/video(s) into the folder that "
+            "matches their current date_taken — see the preview text above for the exact list.\n\n"
+            "Each file is copied to its correct location, verified via hash comparison, and only "
+            "then deleted from its old location — never a raw move, and a naming collision at the "
+            "destination is renamed, never overwritten (the identical copy-verify-delete safety "
+            "Phase 1 itself uses). This is a physical file move, not a database-only edit.\n\n"
+            "Proceed?",
+        ):
+            return
+
+        self.relocate_stop_requested = False
+        self.relocate_progress.configure(value=0, maximum=max(len(preview.candidates), 1))
+        self.relocate_status_label.configure(text="Starting...")
+        self._set_relocate_results_text("Relocating...")
+        self.relocate_apply_btn.configure(state="disabled")
+        self.relocate_cancel_btn.configure(state="normal")
+
+        self.relocate_worker = threading.Thread(
+            target=self._relocate_worker, args=(preview.candidates,), daemon=True
+        )
+        self.relocate_worker.start()
+
+    def _on_relocate_cancel(self) -> None:
+        self.relocate_stop_requested = True
+        self.relocate_status_label.configure(text="Stopping...")
+
+    def _relocate_worker(self, candidates: list) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push messages through self.msg_queue, same shape as every other
+        # worker in this file.
+        try:
+            cfg = load_config()
+            # Distinct logger_name, same reasoning as every other worker
+            # here — see setup_logging()'s docstring / the GPS-logging bug
+            # that pattern exists to prevent.
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.relocate"
+            )
+            self.msg_queue.put(("relocate_log_started", log_path))
+            init_db(cfg.db_path_abs, logger=logger)  # rule 12: every entry point that opens the DB calls this first
+            conn = connect(cfg.db_path_abs)
+            try:
+                stats = apply_relocations(
+                    conn, candidates, cfg, logger,
+                    progress_cb=lambda done, total: self.msg_queue.put(("relocate_progress", done, total)),
+                    stop_check=lambda: self.relocate_stop_requested,
+                )
+            finally:
+                conn.close()
+            self.msg_queue.put(("relocate_done", stats, self.relocate_stop_requested))
+        except Exception as e:
+            self.msg_queue.put(("relocate_error", str(e)))
+
+    def _on_relocate_done(self, stats: RelocateStats, was_stopped: bool) -> None:
+        self.relocate_cancel_btn.configure(state="disabled")
+        self.relocate_status_label.configure(text="Stopped early" if was_stopped else "Done")
+        # The preview this Apply acted on is now stale (whatever it touched
+        # has moved) -- clear it so Apply requires a fresh Preview before
+        # it can be clicked again, same "never act on a query the user
+        # hasn't actually seen" contract as _on_relocate_apply's own check.
+        self._relocate_preview = None
+        self.relocate_apply_btn.configure(state="disabled")
+        lines = [f"Relocated: {stats.relocated:,}" + ("  (stopped early by user)" if was_stopped else "")]
+        if stats.skipped_already_correct:
+            lines.append(f"Already correct (fixed by something else since the preview): {stats.skipped_already_correct:,}")
+        if stats.skipped_missing_file:
+            lines.append(f"Skipped, source file missing: {stats.skipped_missing_file:,}")
+        if stats.skipped_hash_mismatch:
+            lines.append(f"Skipped, live file content no longer matches its recorded identity: {stats.skipped_hash_mismatch:,}")
+        lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
+        lines.append("\nRun Preview again to check for anything left (or newly created since).")
+        self._set_relocate_results_text("\n".join(lines))
+
+    def _on_relocate_error(self, err: str) -> None:
+        self.relocate_apply_btn.configure(state="normal" if self._relocate_preview else "disabled")
+        self.relocate_cancel_btn.configure(state="disabled")
+        self.relocate_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"Relocation failed: {err}")
+
+    def _start_relocate_log_tail(self, log_path: Path) -> None:
+        self._relocate_log_path = log_path
+        self._relocate_log_read_pos = 0
+        self.relocate_log_text.configure(state="normal")
+        self.relocate_log_text.delete("1.0", "end")
+        self.relocate_log_text.configure(state="disabled")
+        self._append_new_relocate_log_lines()
+
+    def _append_new_relocate_log_lines(self) -> None:
+        if self._relocate_log_path is None or not self._relocate_log_path.exists():
+            return
+        try:
+            with open(self._relocate_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._relocate_log_read_pos)
+                new_text = f.read()
+                self._relocate_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.relocate_log_text.configure(state="normal")
+        self.relocate_log_text.insert("end", new_text)
+        self.relocate_log_text.see("end")
+        self.relocate_log_text.configure(state="disabled")
+
     # --------------------------------------------- Phase 2d: review users
     def _refresh_review_users(self) -> None:
         self.review_user_listbox.delete(0, "end")
@@ -2790,6 +3040,10 @@ class DashboardApp:
             pass
         try:
             self._append_new_cluster_log_lines()  # Face clustering's own view, same reasoning
+        except Exception:
+            pass
+        try:
+            self._append_new_relocate_log_lines()  # Phase 3b relocation's own view, same reasoning
         except Exception:
             pass
         self.root.after(500, self._tail_tick)
