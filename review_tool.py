@@ -76,6 +76,29 @@ end's dropdown — see its docstring. Phase 3d deliberately left the
 per-photo `people` display field always `None` — filter/browse only, not
 per-photo face display.
 
+Phase 3g: Phase 3d's single-person filter is generalized to a multi-person
+filter with AND semantics — select several named people and see only
+photos containing every one of them (the user's own example: Dan Moll +
+Juliana Moll -> photos with both, not either). New `people` query param
+(comma-separated cluster_ids) alongside the still-supported single-value
+`person` (kept as a legacy alias so nothing that already used it breaks —
+see `_build_filters`' docstring for exactly how the two combine into one
+code path). The query is a real relational intersection (`GROUP BY
+file_hash HAVING COUNT(DISTINCT cluster_id) = N`), not an `IN (...)` — the
+latter would silently produce OR semantics, matching a photo with just one
+of the selected people, which is explicitly NOT what was asked for. Same
+free ride as Phase 3d: this lives entirely in `_build_filters`, so every
+route that already calls it (grid, nav, random, stats) enforces the AND
+semantics automatically with zero per-route changes, and it composes with
+every other filter (date/tag/location/media_type) exactly like `person`
+already did. Front end: `static/review.js`'s Person filter is now a
+chip-list (type a name, pick a suggestion, it becomes a removable chip,
+repeat) built around the same `attachSuggestionDropdown` type-ahead
+component Tag/bulk-edit-Location/Phase 3d's Person already used — the chip
+LIST container itself is new UI, not a fourth drop-in reuse of a
+single-value instance. No "any of these people" (OR) mode was requested or
+built — see photo-organizer-spec.md's Phase 3g section.
+
 Phase 3e (this session): the per-photo `people` field Phase 3d left as
 `None` is now populated for real — see `_people_for_hashes`/`_row_to_dict`
 below. Every photo/video response carries the named people (from the
@@ -337,22 +360,52 @@ def _build_filters(args) -> tuple[str, list]:
     path rather than forcing every query through the batched-scan path
     tag/caption-keyword filtering needs.
 
-    `person` (Phase 3d: the grid's people/faces filter, wired to real data
-    for the first time -- see module docstring) is a `people.cluster_id`,
-    matched via `file_hash IN (SELECT file_hash FROM faces WHERE
-    cluster_id = ?)`. Same reasoning as `location`/`media_type` above: a
-    real, already-committed DB table (Phase 3's `faces`/`people`), not the
-    live captions cache, so it belongs here rather than in
-    _build_extra_predicate and needs no scanning fallback. Deliberately
-    permissive like `location` -- this only matches against whatever
-    cluster_id the client sends, it does not itself check that cluster_id
-    resolves to a NAMED person; that restriction lives one layer up, in
-    which cluster_ids /api/facets' `people` list offers the front end to
-    pick from (see its docstring) -- a hand-crafted URL naming an
-    unclustered/unnamed cluster_id still filters correctly (just to
-    whatever faces share that id), it's simply never offered as a choice
-    in the UI. A non-integer value is silently ignored (same posture as an
-    unrecognized `media_type`), not an error.
+    `person` / `people` (Phase 3d added the single-value `person` param;
+    Phase 3g generalizes it to `people`, a comma-separated list of
+    `people.cluster_id` values, with AND semantics -- a matching photo must
+    have a face in EVERY listed cluster_id, not just one, per the user's
+    explicit "Dan Moll + Juliana Moll -> photos with both" example). Both
+    params funnel into one code path: `person_ids` is built from `people`
+    (split on comma) with `person` folded in as a single-value legacy alias
+    if `people` wasn't given -- so old links/tests using `person=<id>` keep
+    working unchanged, and the AND-query below degenerates correctly to a
+    plain single-person match when there's only one id (COUNT(DISTINCT
+    cluster_id) = 1 is trivially satisfied by one id, no special-casing
+    needed).
+
+    The actual query is the relational "contains ALL of these people"
+    intersection the spec asks for, not a plain `IN (...)` (which would
+    wrongly produce OR semantics -- e.g. person A OR person B, not both):
+
+        file_hash IN (
+            SELECT file_hash FROM faces WHERE cluster_id IN (?, ?, ...)
+            GROUP BY file_hash HAVING COUNT(DISTINCT cluster_id) = <N>
+        )
+
+    Grouping by file_hash and requiring exactly N distinct cluster_ids
+    matched (N = the number of ids requested) means a photo only qualifies
+    if every requested person has at least one face in it -- a photo with
+    faces for only some of the requested people, or with duplicate faces
+    for the same requested person, is still correctly excluded/not
+    double-counted (COUNT(DISTINCT ...), not COUNT(...)).
+
+    Same reasoning as `location`/`media_type` above for why this belongs
+    here rather than in _build_extra_predicate: a real, already-committed
+    DB table (Phase 3's `faces`/`people`), not the live captions cache, so
+    it needs no scanning fallback and every route that already calls
+    `_build_filters` (grid, nav, random, stats) picks up the AND semantics
+    automatically, no per-route changes needed -- same free ride Phase 3d's
+    single-person version already got. Deliberately permissive like
+    `location` -- this only matches against whatever cluster_ids the client
+    sends, it does not itself check that they resolve to NAMED people; that
+    restriction lives one layer up, in which cluster_ids /api/facets'
+    `people` list offers the front end to pick from (see its docstring) --
+    a hand-crafted URL naming an unclustered/unnamed cluster_id still
+    filters correctly (just to whatever faces share that id), it's simply
+    never offered as a choice in the UI. A non-integer entry is silently
+    dropped from the list (same posture as an unrecognized `media_type`),
+    not an error; duplicate ids in the list are de-duped before building N,
+    so `people=10,10` behaves identically to `people=10`.
 
     `show_hidden` (Phase 2f "Hide from library"): by default every route
     that calls this excludes `excluded=1` rows entirely -- they're meant to
@@ -382,7 +435,8 @@ def _build_filters(args) -> tuple[str, list]:
     location = (args.get("location") or "").strip()
     has_location = (args.get("has_location") or "").strip().lower()
     media_type = (args.get("media_type") or "").strip().lower()
-    person = (args.get("person") or "").strip()
+    person = (args.get("person") or "").strip()  # legacy single-value alias, see docstring
+    people_param = (args.get("people") or "").strip()  # Phase 3g: comma-separated cluster_ids, AND semantics
     show_hidden = (args.get("show_hidden") or "").strip().lower() in ("1", "true", "yes")
     if date_from:
         clauses.append("date_taken >= ?")
@@ -421,14 +475,32 @@ def _build_filters(args) -> tuple[str, list]:
             like_params = []
         clauses.append(video_clause if media_type == "video" else f"NOT {video_clause}")
         params.extend(like_params)
-    if person:
+    # Phase 3g: `people` (comma-separated, AND semantics) generalizes
+    # Phase 3d's single-value `person` -- see docstring above. Build one
+    # de-duped list of int cluster_ids from whichever the caller provided,
+    # preferring `people` when both happen to be present.
+    person_ids: list[int] = []
+    seen_ids: set[int] = set()
+    raw_ids = people_param.split(",") if people_param else ([person] if person else [])
+    for raw in raw_ids:
+        raw = raw.strip()
+        if not raw:
+            continue
         try:
-            person_id = int(person)
+            pid = int(raw)
         except ValueError:
-            person_id = None
-        if person_id is not None:
-            clauses.append("file_hash IN (SELECT file_hash FROM faces WHERE cluster_id = ?)")
-            params.append(person_id)
+            continue  # silently dropped, same posture as an unrecognized media_type
+        if pid not in seen_ids:
+            seen_ids.add(pid)
+            person_ids.append(pid)
+    if person_ids:
+        placeholders = ", ".join(["?"] * len(person_ids))
+        clauses.append(
+            f"file_hash IN (SELECT file_hash FROM faces WHERE cluster_id IN ({placeholders}) "
+            f"GROUP BY file_hash HAVING COUNT(DISTINCT cluster_id) = ?)"
+        )
+        params.extend(person_ids)
+        params.append(len(person_ids))
     if not show_hidden:
         clauses.append("(excluded IS NULL OR excluded = 0)")
     sql = " AND ".join(clauses)

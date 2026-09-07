@@ -61,18 +61,22 @@
       <option value="video">Videos only</option>
     </select>
   </label>
-  <label>Person
-    <!-- Phase 3d: wired up to real Phase 3 people/faces data (was a
-         disabled placeholder, "Phase 3 doesn't exist yet"). Reuses the
-         exact same custom suggestion-dropdown component as the Tag filter
-         above and the bulk-edit Location field below (attachSuggestionDropdown
-         in static/review.js) rather than a third copy of the same pattern,
-         per rule 7 -- free-text like those, populated from /api/facets'
-         new `people` list (real assigned names only; unclustered/unnamed
-         faces are never offered). An unrecognized/partial name just means
-         no person filter is applied, same "typed value must exactly match
-         a real known value" contract the Tag filter already has. -->
-    <span class="tag-input-wrap">
+  <label>People (must all appear together)
+    <!-- Phase 3g: generalizes Phase 3d's single-value Person filter into a
+         multi-select chip list with AND semantics (select several named
+         people, see only photos containing every one of them). The
+         type-ahead itself still reuses the same custom suggestion-dropdown
+         component as the Tag filter above and the bulk-edit Location field
+         below (attachSuggestionDropdown in static/review.js, fourth reuse
+         per rule 7) -- but the chip-list container (#f-people-chips) that
+         wraps it is new UI, not a drop-in reuse of a single-value
+         instance. Picking a suggestion adds a removable chip and clears
+         the input so the next name can be typed immediately; an
+         unrecognized/partial name that's never turned into a chip applies
+         no filter for it, same "typed value must exactly match a real
+         known value" contract the Tag filter already has. -->
+    <span class="tag-input-wrap chip-input-wrap">
+      <div id="f-people-chips" class="chip-list"></div>
       <input type="text" id="f-person" placeholder="Start typing a named person…" autocomplete="off" autocapitalize="none" spellcheck="false">
       <ul id="f-person-suggestions" class="tag-suggestions" hidden></ul>
     </span>

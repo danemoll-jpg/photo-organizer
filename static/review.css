@@ -183,6 +183,37 @@ body {
   background: var(--badge-bg);
 }
 
+/* Phase 3g: the People filter's chip list, sitting above its type-ahead
+   input inside the same .tag-input-wrap positioning context (the input
+   itself keeps that class -- .chip-input-wrap adds no positioning rules of
+   its own, it's just a marker for readability). An empty list (no people
+   picked yet) renders as literally nothing, so the filter looks identical
+   to before this feature existed until a chip is actually added. */
+.chip-list { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.chip-list:empty { display: none; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--badge-bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 10px;
+  padding: 1px 4px 1px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chip-remove {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.chip-remove:hover { opacity: 0.7; }
+
 /* Phase 2h Part A: bulk selection/editing bar -- sits between the filters
    and the grid pager, visible only once 1+ items are checked (see
    review.js's updateBulkBar). */

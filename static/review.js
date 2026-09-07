@@ -127,6 +127,21 @@
  *   exactly match a real known value" contract as Tag) still lands on the
  *   right cluster_id even in that rare case.
  *
+ * Phase 3g (this follow-up session): the Person filter (Phase 3d, below) is
+ *   generalized from a single value to a chip-list multi-select with AND
+ *   semantics -- select several named people, see only photos containing
+ *   every one of them (the user's own example: Dan Moll + Juliana Moll ->
+ *   photos with both). state.filters.person (a single cluster_id) becomes
+ *   state.filters.people (an array of cluster_ids, sent as one
+ *   comma-separated `people` param -- see review_tool.py's _build_filters
+ *   for the AND-query itself, which lives entirely server-side so grid/
+ *   nav/random/stats all enforce it automatically same as every other
+ *   filter). `peopleChips` (below) holds the currently-picked
+ *   {cluster_id, label} chips; attachSuggestionDropdown gained an optional
+ *   `onSelect` callback (4th param) so picking a suggestion here adds a
+ *   chip instead of filling the input's own value, the way Tag/bulk-edit-
+ *   Location's calls (which omit it, unchanged) still do.
+ *
  * Phase 3e (this session): the per-photo DISPLAY Phase 3d deliberately left
  *   alone (the viewer's "People" row was an inert placeholder) is now real,
  *   in both places:
@@ -156,7 +171,9 @@
   const NO_LOCATION_VALUE = "__no_location__";
 
   const state = {
-    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", person: "", show_hidden: false },
+    // Phase 3g: `person` (single cluster_id) -> `people` (array of
+    // cluster_ids, AND semantics -- see module docstring).
+    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", people: [], show_hidden: false },
     pageSize: cfg.pageSize,
     // Phase 2h Part A: file_hash values checked in the grid, independent of
     // which page is currently loaded -- see renderGrid/toggleSelect.
@@ -251,10 +268,11 @@
 
   function currentFilterParams() {
     // Note: no "folder" param — that filter was removed from the UI.
-    // Phase 3d: "person" is a people.cluster_id (see applyFilters' exact-
-    // label lookup against allPeople), not a raw typed name — so the
+    // Phase 3g: "people" is a comma-separated list of people.cluster_id
+    // values (see applyFilters/peopleChips), not raw typed names — so the
     // same-name-different-person edge case (see loadFacets) is never
-    // ambiguous server-side either.
+    // ambiguous server-side either. An empty array joins to "", which qs()
+    // already omits, same as any other blank filter.
     return {
       date_from: state.filters.date_from,
       date_to: state.filters.date_to,
@@ -263,14 +281,14 @@
       location: state.filters.location,
       has_location: state.filters.has_location,
       media_type: state.filters.media_type,
-      person: state.filters.person,
+      people: state.filters.people.join(","),
       show_hidden: state.filters.show_hidden ? "1" : "",
     };
   }
 
   function hasActiveFilters() {
     const f = state.filters;
-    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type || f.person);
+    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type || f.people.length);
   }
 
   // Random 31-bit int as a string — used to seed a fresh random-order
@@ -427,10 +445,17 @@
   // exact same behavior instead of a second copy-pasted implementation.
   // `getItems()` returns the full current candidate list (already-loaded
   // facet data) each time a suggestion list is rendered.
+  //
+  // Phase 3g: optional 4th param `onSelect(text)` -- when given, picking a
+  // suggestion calls it and clears the input instead of filling the
+  // input's own value with the picked text. This is what lets the People
+  // filter turn a pick into a removable chip (see addPersonChip below)
+  // while Tag/bulk-edit-Location's existing calls (which don't pass it)
+  // keep their original "fill the field" behavior unchanged.
   // ---------------------------------------------------------------------
   const MAX_SUGGESTIONS = 50; // plenty for a "did you mean" list; keeps a huge facet table cheap to render
 
-  function attachSuggestionDropdown(inputEl, listEl, getItems) {
+  function attachSuggestionDropdown(inputEl, listEl, getItems, onSelect) {
     function render() {
       const q = inputEl.value.trim().toLowerCase();
       const items = getItems();
@@ -459,7 +484,12 @@
       const li = e.target.closest("li");
       if (!li) return;
       e.preventDefault(); // don't let the input lose focus over this
-      inputEl.value = li.textContent;
+      if (onSelect) {
+        onSelect(li.textContent);
+        inputEl.value = ""; // cleared, ready to type the next one (Phase 3g)
+      } else {
+        inputEl.value = li.textContent;
+      }
       hide();
     });
     inputEl.addEventListener("blur", () => {
@@ -483,12 +513,55 @@
   // Real-user-feedback fix: bulk-edit Location, same pattern, suggestions
   // drawn from allLocations instead of allTags.
   attachSuggestionDropdown(bulkLocationInput, bulkLocationSuggestionsEl, () => allLocations);
-  // Phase 3d: grid Person filter, third reuse of the same component -- see
-  // module docstring. Suggestions are display labels (allPeople's
-  // disambiguated `label`, not raw assigned_name) so a picked suggestion's
-  // text is exactly what applyFilters' exact-match lookup below expects.
+  // Phase 3d/3g: grid People filter, fourth reuse of the same type-ahead
+  // component -- see module docstring. Suggestions are display labels
+  // (allPeople's disambiguated `label`, not raw assigned_name); picking one
+  // resolves it back to a cluster_id and adds a chip (Phase 3g), rather
+  // than filling the input's own value the way Tag/bulk-edit-Location do.
   const personInput = el("f-person");
-  const hidePersonSuggestions = attachSuggestionDropdown(personInput, el("f-person-suggestions"), () => allPeople.map((p) => p.label));
+  const peopleChipsEl = el("f-people-chips");
+  let peopleChips = []; // [{cluster_id, label}], the currently-selected chips
+
+  function renderPeopleChips() {
+    peopleChipsEl.innerHTML = peopleChips.map((p) =>
+      `<span class="chip" data-cluster-id="${p.cluster_id}">${escapeHtml(p.label)}<button type="button" class="chip-remove" aria-label="Remove ${escapeHtml(p.label)}">&times;</button></span>`
+    ).join("");
+  }
+  peopleChipsEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".chip-remove");
+    if (!btn) return;
+    const clusterId = Number(btn.closest(".chip").dataset.clusterId);
+    peopleChips = peopleChips.filter((p) => p.cluster_id !== clusterId);
+    renderPeopleChips();
+  });
+
+  // Resolves typed/picked text to a real allPeople entry (same "must
+  // exactly match a real known value" contract Tag already has) and adds
+  // it as a chip, ignoring anything that doesn't match and any person
+  // already picked (no duplicate chips for the same cluster_id).
+  function addPersonChip(label) {
+    const match = allPeople.find((p) => p.label.toLowerCase() === label.toLowerCase());
+    if (!match) return;
+    if (peopleChips.some((p) => p.cluster_id === match.cluster_id)) return;
+    peopleChips.push({ cluster_id: match.cluster_id, label: match.label });
+    renderPeopleChips();
+  }
+
+  const hidePersonSuggestions = attachSuggestionDropdown(
+    personInput, el("f-person-suggestions"), () => allPeople.map((p) => p.label), addPersonChip
+  );
+  // Enter also commits the currently-typed name as a chip (if it matches a
+  // real suggestion) rather than triggering Apply directly -- unlike Tag/
+  // Caption's Enter bindings below, since here the point is usually to add
+  // several names in a row before applying, not search on the first one.
+  personInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addPersonChip(personInput.value.trim());
+      personInput.value = "";
+      hidePersonSuggestions();
+    }
+  });
 
   // ---------------------------------------------------------------------
   // Stats
@@ -754,18 +827,12 @@
       state.filters.has_location = "";
     }
     state.filters.media_type = el("f-media-type").value;
-    // Phase 3d: Person is free-text like Tag, but must resolve to a real
-    // cluster_id, not a raw name string, before it's sent anywhere -- an
-    // exact (case-insensitive) match against allPeople's disambiguated
-    // `label` (see loadFacets), same "typed value must exactly match a
-    // real known value" contract Tag already has for tags. No match (typo,
-    // partial text, or just left blank) means no person filter, not an
-    // error.
-    const personText = el("f-person").value.trim();
-    const personMatch = personText
-      ? allPeople.find((p) => p.label.toLowerCase() === personText.toLowerCase())
-      : null;
-    state.filters.person = personMatch ? personMatch.cluster_id : "";
+    // Phase 3g: the committed filter value is whatever chips have already
+    // been added (see addPersonChip) -- text still sitting in the input
+    // but never turned into a chip is deliberately NOT included, same
+    // "must exactly match a real known value, no silent partial match"
+    // contract Tag already has for tags.
+    state.filters.people = peopleChips.map((p) => p.cluster_id);
     state.filters.show_hidden = el("f-show-hidden").checked;
     hideTagSuggestions();
     hidePersonSuggestions();
@@ -779,7 +846,10 @@
     else { state.viewer.randomSeed = null; state.viewer.randomIdx = 0; }
   }
   el("f-apply").addEventListener("click", applyFilters);
-  for (const id of ["f-tag", "f-caption-kw", "f-person"]) {
+  // Note: "f-person" is deliberately NOT in this list -- its own keydown
+  // handler above (addPersonChip) handles Enter, since here Enter commits
+  // a chip rather than applying the filters directly.
+  for (const id of ["f-tag", "f-caption-kw"]) {
     el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
   }
   el("f-reset").addEventListener("click", () => {
@@ -790,6 +860,8 @@
     el("f-location").value = "";
     el("f-media-type").value = "";
     el("f-person").value = "";
+    peopleChips = []; // Phase 3g
+    renderPeopleChips();
     el("f-show-hidden").checked = false;
     applyFilters();
   });
