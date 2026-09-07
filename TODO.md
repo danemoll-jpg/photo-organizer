@@ -420,6 +420,14 @@ See `photo-organizer-spec.md`'s "Phase 3b" section for full requirements. User c
 
 **Not run for real this session** — same "don't run a real full pass without the user's say-so" posture as every prior batch-writing tool in this project (Date Cluster Audit's apply-fix, GPS/thumbnail/face-detection full runs). The user's own 2,527-file batch (and anything else this tool finds) is a `relocate-files preview` + `relocate-files apply` away, or via the dashboard panel.
 
+## ACTIVE: Test whether face detection and captioning can safely run concurrently on the GPU
+This was explicitly flagged as untested during Phase 3 Session 1: "Whether face detection can safely run CONCURRENTLY with a live captioning run was deliberately left untested (unlike GPS/thumbnail extraction, which were confirmed to have zero GPU contention)." Unlike GPS/thumbnails (CPU-only, trivially safe alongside anything), both face detection (`onnxruntime-gpu`) and captioning (Ollama/`llama-server.exe`) actually compete for the SAME limited 6GB VRAM — and captioning alone was already observed using ~5.7 of 6.1GB. This is a real risk of an outright failure (not enough VRAM headroom for both models to even load), not just a "might be slower" question.
+- [ ] **Run a small, controlled concurrent test — NOT two full multi-hour production runs at once.** Start a small batch of captioning (e.g. a few dozen files) and a small batch of face detection (similarly small) at the same time, monitor actual VRAM usage via `nvidia-smi` (or equivalent) throughout, and observe: does it work at all (no OOM/crash), or does one or both fail?
+- [ ] If it works: measure the real throughput impact on each compared to running alone (how much slower is each, not just "it still runs").
+- [ ] If it fails (OOM or crash): report that plainly — don't try to force it to work via workarounds unless asked; the honest answer "these can't safely run at the same time on this hardware" is a perfectly good, useful finding.
+- [ ] Design the test defensively given the tight VRAM margin — start small, watch for failure, stop cleanly rather than letting a crash cascade or destabilize anything else running.
+- [ ] Report the real finding either way (safe/unsafe, and if safe, the throughput cost) — this directly informs whether the user should ever run a real full pass of both at once, or must do them sequentially.
+
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
 - ~~Map file_hash/path → Plex library item ID~~
