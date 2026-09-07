@@ -468,13 +468,34 @@ def set_person_name(conn: sqlite3.Connection, cluster_id: int, name: str | None,
     conn.commit()
 
 
+_SQL_VARIABLE_CHUNK = 500  # see comment below
+
+
 def _source_clusters_of(conn: sqlite3.Connection, face_ids: list[int]) -> set[int]:
+    """URGENT fix (real 61,676-face cluster at full-library scale): SQLite
+    caps the number of bound parameters in one query (SQLITE_MAX_VARIABLE_
+    NUMBER -- 999 on older builds, up to 32766 on newer ones) -- a single
+    `face_id IN (...)` query with tens of thousands of placeholders raises
+    `OperationalError: too many SQL variables`. Hit for real trying to
+    reset cluster_id=81 to Unclustered via this exact function (called by
+    remove_faces_from_cluster/create_person_from_faces/
+    mark_faces_not_a_person) -- and since the labeling window's own Select
+    All can now select an ENTIRE oversized cluster at once (see the
+    pagination fix), a human clicking "Remove Selected from Cluster" on a
+    huge group would hit this exact crash too, not just a batch script.
+    Fixed by chunking into _SQL_VARIABLE_CHUNK-sized queries (comfortably
+    under even the older 999 limit) and unioning the results -- correct
+    for any face_ids list size, not hardcoded to this one cluster."""
     if not face_ids:
         return set()
-    rows = conn.execute(
-        f"SELECT DISTINCT cluster_id FROM faces WHERE face_id IN ({_in_clause(len(face_ids))})", face_ids
-    ).fetchall()
-    return {r[0] for r in rows if r[0] is not None}
+    clusters: set[int] = set()
+    for i in range(0, len(face_ids), _SQL_VARIABLE_CHUNK):
+        chunk = face_ids[i : i + _SQL_VARIABLE_CHUNK]
+        rows = conn.execute(
+            f"SELECT DISTINCT cluster_id FROM faces WHERE face_id IN ({_in_clause(len(chunk))})", chunk
+        ).fetchall()
+        clusters.update(r[0] for r in rows if r[0] is not None)
+    return clusters
 
 
 def create_person_from_faces(

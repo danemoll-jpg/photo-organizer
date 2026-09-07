@@ -265,6 +265,46 @@ def test_noop_safety(tmp: Path) -> None:
     conn.close()
 
 
+def test_remove_handles_a_batch_larger_than_sqlites_variable_limit(tmp: Path) -> None:
+    """URGENT follow-up session: a real 61,676-face cluster at full-library
+    scale exposed a real bug -- _source_clusters_of() (which
+    remove_faces_from_cluster/create_person_from_faces/
+    mark_faces_not_a_person all call) built one `face_id IN (...)` query
+    with as many placeholders as face_ids passed in, and SQLite caps the
+    number of bound parameters per query (SQLITE_MAX_VARIABLE_NUMBER --
+    999 on older builds). Since the labeling window's Select All can now
+    select an ENTIRE oversized cluster at once (the pagination fix, same
+    session), a human clicking "Remove Selected from Cluster" on a huge
+    real group would hit this exact crash, not just a batch script
+    resetting a cluster programmatically. Fixed by chunking the query
+    (_SQL_VARIABLE_CHUNK) -- this test proves it with a batch well past the
+    old limit, cheap enough to run every time (no faiss/DBSCAN involved,
+    just the SQL chunking itself)."""
+    print("\n=== A batch of face_ids well past SQLite's per-query variable limit doesn't crash ===")
+    dbp, conn = _fresh_db(tmp, "large_batch.db")
+    N = 5000  # comfortably over the historical ~999 limit
+    conn.execute(
+        "INSERT INTO people (cluster_id, assigned_name, notes, representative_embedding, face_count, updated_at) "
+        "VALUES (500, NULL, NULL, NULL, 0, '2026-01-01T00:00:00')"
+    )
+    rng = np.random.default_rng(1)
+    face_ids = []
+    for i in range(N):
+        fh = f"large{i:06d}"
+        _insert_photo(conn, fh, f"E:\\Pics\\{fh}.jpg")
+        emb = _rand_unit(rng, np.eye(EMBEDDING_DIM, dtype=np.float32)[0], noise=0.2)
+        face_ids.append(_insert_face(conn, fh, emb, cluster_id=500))
+    conn.execute("UPDATE people SET face_count = ? WHERE cluster_id = 500", (N,))
+    conn.commit()
+
+    remove_faces_from_cluster(conn, face_ids)  # used to raise "too many SQL variables" here
+    assert list_faces_in_cluster(conn, 500) == []
+    assert len(list_faces_in_cluster(conn, None)) == N
+    assert conn.execute("SELECT 1 FROM people WHERE cluster_id = 500").fetchone() is None
+    print(f"  removed {N} face_ids in one call, no SQL-variable-limit crash, orphan cleanup correct  OK")
+    conn.close()
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="photo_organizer_phase3f_"))
     print(f"Working in {tmp}")
@@ -274,6 +314,7 @@ def main() -> None:
         test_removed_face_is_a_real_reclustering_candidate(tmp)
         test_bulk_removal_across_two_clusters(tmp)
         test_noop_safety(tmp)
+        test_remove_handles_a_batch_larger_than_sqlites_variable_limit(tmp)
         print("\nALL PHASE 3F TESTS PASSED")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
