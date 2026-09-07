@@ -250,3 +250,39 @@
 **Explicitly out of scope for this phase:**
 - "Select all matching the current filter" (beyond what's visibly paged through) for bulk selection — not requested.
 - Any change to desktop/tablet viewer layout.
+
+## Phase 3 — Face Detection & Clustering (real design, replacing the original rough sketch)
+
+**Context:** This phase sat as a rough one-paragraph sketch since early in the project (insightface, faiss, DBSCAN/HDBSCAN, a labeling UI, a `people` table). Before building, real current research was done given how fast ML tooling moves and this machine's specific constraints (GTX 1660 Ti 6GB VRAM, Python 3.14).
+
+**Key finding requiring a real decision:** official `insightface` has no official Python 3.14 wheels — only an unofficial, unbenchmarked community build exists. Given this tool now holds real production trust (167k+ real family photos, remote multi-user access), the user chose NOT to depend on that unofficial wheel.
+
+**Resulting architecture decision — a second, separate Python environment:**
+- Set up a second Python installation (3.11–3.13, whichever has the most stable current `insightface` + `onnxruntime-gpu` wheel support at the time this is built — verify at build time, don't assume a specific patch version) in its own venv, used ONLY to run the face-detection/embedding script.
+- This is still fully custom code within this project — NOT the separate InsightFace desktop app/GUI (that was explicitly considered and rejected, since it would store results in its own separate database, breaking this project's "everything unified in one tool" design). Only the officially-supported library, called from a script this project owns.
+- The detection script reads the list of photo paths (photos only — video is explicitly excluded from Phase 3, same posture as Phase 2's captioning) from the main SQLite DB (read-only access is enough for this step) and writes results to a JSONL file (same pattern as `captions.jsonl`): one line per DETECTED FACE (not per photo — a photo can have 0, 1, or many faces), containing `file_hash`, `path`, `bbox`, `embedding` (512-dim ArcFace vector via the `buffalo_l` model pack), `detected_at`.
+- The main Python 3.14 environment (everything else in this project) reads that JSONL for the clustering step and beyond — it never needs `insightface` itself installed in the 3.14 environment.
+
+**Detection step requirements:**
+- Resumable by `file_hash`, same pattern as captioning/GPS extraction — skip already-processed photos on a re-run.
+- Checkpoint/flush periodically, don't hold results in memory until the end.
+- **Benchmark real throughput against a real sample of this library before committing to a full run** — same discipline already applied to captioning (multi-day estimate before running) and video thumbnails (measured, not assumed). GPU face detection throughput needs to be measured on this actual GTX 1660 Ti, not assumed from generic benchmarks.
+- CLI command in the SEPARATE venv (this is inherently a different environment from the rest of the CLI/dashboard, so it can't be a `main.py` subcommand in the usual sense — a standalone script, clearly documented in README.md for how to invoke it given the two-environment setup).
+
+**Clustering step requirements (in the main 3.14 environment — pure numerical work, no `insightface` dependency needed here):**
+- Read the face-embeddings JSONL, cluster via DBSCAN or HDBSCAN on embedding similarity (cosine distance is standard for ArcFace embeddings).
+- **Verify `faiss`'s own Python 3.14 wheel situation before committing to it** — same caution as everything else in this project; if it has the same kind of gap `insightface` did, a pure `scikit-learn`/`scipy` DBSCAN approach (no `faiss` needed) is an acceptable fallback given this library's realistic face-count scale, don't force `faiss` in if it's not cleanly available.
+- New schema: a `faces` table (file_hash, path, bbox, embedding, cluster_id, detected_at) and a `people` table (cluster_id/person_id, name, notes) — additive via `init_db()`/`_migrate()` per rule 12, never destructive.
+- Re-clustering should be re-runnable (e.g. after adding more photos later) without destroying existing person-name assignments already made — cluster IDs and name assignments need to survive a re-cluster somehow (e.g. keyed by a stable representative embedding or a merge/reconcile step) — a real design detail to work out carefully when this step is actually built, don't hand-wave it.
+
+**Labeling UI — lives in the Tkinter dashboard (user's explicit choice), not `review_tool.py`:**
+- A dedicated window/panel showing cropped face thumbnails (crop each photo to its detected bbox, resize, display via PIL/ImageTk) grouped by cluster.
+- Assign a name to a whole cluster at once.
+- Merge two clusters together (when the same person got split into two groups).
+- Split incorrect faces out of a cluster (when two different people got merged into one group).
+- This is a genuinely different UI paradigm from the existing batch-operation panels (progress bar + log tail) — it's interactive browsing/labeling, not a start/stop job. Build accordingly, don't force it into the existing panel template if it doesn't fit.
+
+**Explicitly out of scope for Phase 3:**
+- Video — photos only, matching Phase 2's captioning scope decision.
+- Any face data surfaced in `review_tool.py` beyond what Phase 2c's already-built (but currently inert) people/faces filter placeholder expects — wiring that placeholder up to real data is a natural follow-up once Phase 3 has real results, but isn't automatically part of this build.
+- Automatic re-clustering triggered by new photos being added — a manual "re-cluster" action is enough for now.

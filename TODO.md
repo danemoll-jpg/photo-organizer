@@ -375,12 +375,25 @@ User feedback after real use: the bulk-edit Location field was a `<select>` popu
 - [x] **Tested explicitly, for real, in both directions, against the live throwaway instance:** (1) pre-fix repro as above; (2) post-fix, the identical dispatch against the identical open-edit-form state left the Play button at "Play" (`defaultPrevented=false`) — confirmed fixed; (3) `ArrowRight` dispatched the same way while editing did NOT navigate the viewer away from the open photo either (confirms the fix isn't Space-specific); (4) regression check — the same Space keydown with `e.target = document.body` (i.e. NOT an editable element) still correctly toggled the slideshow, confirming the fix didn't break the legitimate shortcut, only gated it on where the keystroke landed. Also typed "New York" (via the browser's own key-by-key input) into the Location field post-fix and confirmed the space character now inserts normally and the Play button never changes. New automated regression test `tests/test_viewer_edit_keydown_guard.py` (a source-text presence/shape check confirming the guard exists and precedes all four shortcut branches — see its docstring for why that's the right kind of automated check for a pure front-end behavior change in this project, matching `test_phase2h.py` Part B's precedent). Full existing regression suite re-run and passing (`test_phase2b/c/d/f/g/h.py`, `test_urgent_empty_grid.py`, `test_orientation_fix.py`, `test_port_check.py`, `test_logging_setup.py`, `test_date_audit.py`).
 - [x] Per rule 11: `review_tool.py` restarted at session end (see Project state).
 
-## LOCKED — Phase 3: Face Detection & Clustering
-Do not start. Reference only.
-- insightface (GPU) for detection + embedding, output JSONL (file_hash, path, bbox, embedding, detected_at)
-- faiss ANN index + DBSCAN/HDBSCAN clustering
-- Cluster-labeling review mechanism + merge/split tool
-- Separate `people` table
+## ACTIVE: Phase 3 — Face Detection & Clustering (real design now locked in, see photo-organizer-spec.md's "Phase 3" section)
+**Real research done before starting** (ML tooling moves fast, this sat as a rough sketch since early in the project): official `insightface` has NO official Python 3.14 wheels, only an unofficial/unbenchmarked community build. Given this tool's real production trust at this point (167k+ real photos, remote multi-user access), user chose NOT to depend on that unofficial wheel. **Resulting architecture: a second, separate Python 3.11-3.13 environment/venv, used ONLY for the face-detection script** — still fully custom code owned by this project (NOT the separate InsightFace desktop app/GUI, which was explicitly considered and rejected since it'd break the "everything unified in one tool" design). Photos only, no video (same as Phase 2's captioning scope). Labeling UI lives in the Tkinter dashboard, not `review_tool.py` (user's explicit choice, different from where other visual review work has lived).
+
+**This is scoped as a multi-session phase, same discipline as Phase 2's captioning rollout — the FIRST session below is the actual current scope. Do not build clustering or the labeling UI until detection is working and benchmarked for real.**
+
+### Session 1 (ACTIVE NOW) — Environment setup + detection + benchmarking
+- [ ] Set up a second Python 3.11-3.13 installation + dedicated venv, install `insightface` + `onnxruntime-gpu` with officially-supported wheels — verify at build time which specific Python 3.11/3.12/3.13 has the most stable current wheel support, don't assume a specific version blindly
+- [ ] Verify GPU is actually being used by `onnxruntime-gpu` on this machine's GTX 1660 Ti (not silently falling back to CPU) — confirm explicitly, don't assume
+- [ ] Build the detection script (in the new venv): reads photo paths from the main SQLite DB (read-only), runs `insightface`'s `FaceAnalysis` (buffalo_l model pack — RetinaFace detection + 512-dim ArcFace embeddings), writes one JSONL line per DETECTED FACE (file_hash, path, bbox, embedding, detected_at) — a photo can have 0/1/many faces, not one line per photo
+- [ ] Resumable by `file_hash`, checkpoint/flush periodically — same pattern as captioning/GPS
+- [ ] **Benchmark real throughput against a real sample of the library before committing to a full run** — same discipline as captioning (multi-day estimate) and thumbnails (measured, not assumed). Report the real number, let the user decide on the full run themselves, same posture as every prior batch operation in this project
+- [ ] Document clearly in README.md how to invoke this (it lives in a different Python environment than everything else — make the two-environment setup unambiguous)
+- [ ] Do NOT build clustering, the `people`/`faces` tables, or any labeling UI this session — that's Session 2+, after real detection data exists to design against
+
+### Session 2+ (NOT ACTIVE YET — reference only, don't start)
+- Clustering (main 3.14 environment, pure numerical — verify `faiss`'s own Python 3.14 wheel situation before committing to it; fall back to plain `scikit-learn`/`scipy` DBSCAN if `faiss` has the same kind of gap `insightface` did)
+- New schema: `faces` table (file_hash, path, bbox, embedding, cluster_id, detected_at), `people` table (cluster_id/person_id, name, notes) — additive via `init_db()`/`_migrate()` per rule 12
+- Re-clustering must not destroy existing name assignments already made — a real design detail to work out carefully when this is actually built
+- Tkinter dashboard labeling UI: cropped face thumbnails grouped by cluster, assign name to a cluster, merge two clusters, split incorrect faces out of a cluster — a genuinely different UI paradigm from the existing batch-job panels (progress bar + log), build accordingly rather than forcing it into that template
 
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
