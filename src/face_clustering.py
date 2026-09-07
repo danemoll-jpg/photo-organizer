@@ -597,6 +597,165 @@ def merge_people(conn: sqlite3.Connection, keep_cluster_id: int, other_cluster_i
     conn.commit()
 
 
+# --------------------------------------------------- labeling UI: undo ---
+# URGENT follow-up session: a real incident (the user meant to act on one
+# visible page of an oversized cluster, but "Select All" -- whole cluster,
+# not just the page -- was still selected from a moment earlier, so a Move
+# silently reassigned all 17,764 faces, ~17,738 of which the user had never
+# actually looked at) motivated two things: a confirmation before any bulk
+# action whose selection reaches beyond the current page (see
+# FaceLabelingWindow._confirm_if_selection_spans_pages in dashboard.py),
+# and this real "Undo Last Action" mechanism, not just better warnings.
+# `dashboard.py`'s FaceLabelingWindow owns the actual undo STACK (session-
+# only UI state, cleared when the window closes -- not persisted, since
+# every mutation is already logged structurally via the `photo_edits`-style
+# philosophy elsewhere in this project, but a fast, no-questions-asked
+# single-click reversal is what a live mistake actually needs); these
+# functions are the reusable, tested DB-mutation half, per rule 7 (the GUI
+# is a wrapper, not a parallel implementation).
+
+def snapshot_face_states(conn: sqlite3.Connection, face_ids: list[int]) -> list[tuple[int, int | None, int]]:
+    """Returns (face_id, cluster_id, not_a_person) for each given face_id.
+    A low-level building block -- see snapshot_faces_for_undo() below for
+    the version the labeling UI's Undo actually needs, which also captures
+    enough to recreate a cluster this action might empty entirely. Chunked
+    per _SQL_VARIABLE_CHUNK (same reasoning as _source_clusters_of): must
+    handle a selection as large as any real Select-All-on-an-oversized-
+    cluster case, not just a handful of faces."""
+    if not face_ids:
+        return []
+    out: list[tuple[int, int | None, int]] = []
+    for i in range(0, len(face_ids), _SQL_VARIABLE_CHUNK):
+        chunk = face_ids[i : i + _SQL_VARIABLE_CHUNK]
+        rows = conn.execute(
+            f"SELECT face_id, cluster_id, not_a_person FROM faces WHERE face_id IN ({_in_clause(len(chunk))})", chunk
+        ).fetchall()
+        out.extend(rows)
+    return out
+
+
+def snapshot_faces_for_undo(conn: sqlite3.Connection, face_ids: list[int]) -> dict:
+    """The actual snapshot the labeling UI's Undo takes BEFORE any mutation
+    that reassigns cluster_id/not_a_person (Split/Move/Remove from
+    Cluster/Mark/Un-mark) -- pass the result to restore_faces_from_undo()
+    to reverse it later.
+
+    Beyond snapshot_face_states()'s bare (face_id, cluster_id,
+    not_a_person) tuples, this ALSO captures each affected face's CURRENT
+    cluster's (assigned_name, notes) -- a real bug found while testing
+    this feature: if a mutation moves EVERY face out of a cluster (e.g. a
+    "Select All" on the whole group, exactly the real incident that
+    motivated Undo in the first place), _recompute_person_centroid's own
+    orphan-cleanup deletes that cluster's `people` row outright. Undoing
+    such an action must recreate that row (with its real name/notes, not
+    a blank one) BEFORE reassigning faces back to it, or the restore fails
+    outright (faces.cluster_id has an FK to people.cluster_id) -- or
+    silently loses the cluster's name if the FK issue is fixed some other
+    way without also restoring the metadata."""
+    face_states = snapshot_face_states(conn, face_ids)
+    cluster_ids = {s[1] for s in face_states if s[1] is not None}
+    cluster_rows: dict[int, tuple] = {}
+    for cid in cluster_ids:
+        row = conn.execute("SELECT assigned_name, notes FROM people WHERE cluster_id = ?", (cid,)).fetchone()
+        if row is not None:
+            cluster_rows[cid] = row
+    return {"face_states": face_states, "cluster_rows": cluster_rows}
+
+
+def restore_faces_from_undo(conn: sqlite3.Connection, snapshot: dict) -> None:
+    """Undo counterpart to snapshot_faces_for_undo(). Recreates any source
+    cluster the mutation being undone emptied entirely (using the
+    snapshotted name/notes, not a blank row) before reassigning faces back
+    to it, restores each face's cluster_id/not_a_person to its snapshotted
+    value, then recomputes the centroid of every person affected -- both
+    whatever cluster(s) the faces are CURRENTLY in (about to lose them)
+    and whatever cluster(s) they're being restored to (about to regain
+    them) -- cleaning up a now-empty orphaned person (e.g. a Split's
+    brand-new person, once every face is undone back out of it) the same
+    way every other mutation here already does."""
+    face_states = snapshot["face_states"]
+    if not face_states:
+        return
+    face_ids = [s[0] for s in face_states]
+    current = {r[0]: r[1] for r in snapshot_face_states(conn, face_ids)}
+    affected = {cid for cid in current.values() if cid is not None} | {
+        s[1] for s in face_states if s[1] is not None
+    }
+    for cid, (name, notes) in snapshot["cluster_rows"].items():
+        if conn.execute("SELECT 1 FROM people WHERE cluster_id = ?", (cid,)).fetchone() is None:
+            conn.execute(
+                "INSERT INTO people (cluster_id, assigned_name, notes, representative_embedding, face_count, updated_at) "
+                "VALUES (?, ?, ?, NULL, 0, ?)",
+                (cid, name, notes, _now_iso()),
+            )
+    for face_id, old_cluster_id, old_not_a_person in face_states:
+        conn.execute(
+            "UPDATE faces SET cluster_id = ?, not_a_person = ? WHERE face_id = ?",
+            (old_cluster_id, old_not_a_person, face_id),
+        )
+    for cid in affected:
+        _recompute_person_centroid(conn, cid)
+    conn.commit()
+
+
+@dataclass
+class MergeSnapshot:
+    """Everything needed to reverse one merge_people() call -- capture via
+    snapshot_before_merge() BEFORE calling merge_people(), since that
+    function deletes `other`'s `people` row outright and may overwrite
+    `keep`'s name/notes (see merge_people's own docstring)."""
+    other_cluster_id: int
+    other_name: str | None
+    other_notes: str | None
+    other_face_ids: list[int]
+    keep_cluster_id: int
+    keep_name: str | None
+    keep_notes: str | None
+
+
+def snapshot_before_merge(conn: sqlite3.Connection, keep_cluster_id: int, other_cluster_id: int) -> MergeSnapshot:
+    keep_row = conn.execute(
+        "SELECT assigned_name, notes FROM people WHERE cluster_id = ?", (keep_cluster_id,)
+    ).fetchone()
+    other_row = conn.execute(
+        "SELECT assigned_name, notes FROM people WHERE cluster_id = ?", (other_cluster_id,)
+    ).fetchone()
+    if keep_row is None or other_row is None:
+        raise ValueError("both cluster_id values must already exist in people")
+    other_face_ids = [
+        r[0] for r in conn.execute("SELECT face_id FROM faces WHERE cluster_id = ?", (other_cluster_id,)).fetchall()
+    ]
+    return MergeSnapshot(
+        other_cluster_id=other_cluster_id, other_name=other_row[0], other_notes=other_row[1],
+        other_face_ids=other_face_ids, keep_cluster_id=keep_cluster_id,
+        keep_name=keep_row[0], keep_notes=keep_row[1],
+    )
+
+
+def undo_merge(conn: sqlite3.Connection, snapshot: MergeSnapshot) -> None:
+    """Reverses merge_people(): recreates the deleted `other` people row
+    with its pre-merge name/notes, moves its faces back (INSERT the row
+    FIRST -- faces.cluster_id has an FK to people.cluster_id), restores
+    `keep`'s pre-merge name/notes (merge_people may have adopted `other`'s
+    name if `keep` had none), and recomputes both centroids."""
+    conn.execute(
+        "INSERT INTO people (cluster_id, assigned_name, notes, representative_embedding, face_count, updated_at) "
+        "VALUES (?, ?, ?, NULL, 0, ?)",
+        (snapshot.other_cluster_id, snapshot.other_name, snapshot.other_notes, _now_iso()),
+    )
+    conn.executemany(
+        "UPDATE faces SET cluster_id = ? WHERE face_id = ?",
+        [(snapshot.other_cluster_id, fid) for fid in snapshot.other_face_ids],
+    )
+    _recompute_person_centroid(conn, snapshot.other_cluster_id)
+    conn.execute(
+        "UPDATE people SET assigned_name = ?, notes = ? WHERE cluster_id = ?",
+        (snapshot.keep_name, snapshot.keep_notes, snapshot.keep_cluster_id),
+    )
+    _recompute_person_centroid(conn, snapshot.keep_cluster_id)
+    conn.commit()
+
+
 # ------------------------------------------------------- labeling UI reads
 
 @dataclass

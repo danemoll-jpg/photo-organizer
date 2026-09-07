@@ -732,6 +732,24 @@ labeling is a genuinely different, interactive task:
   chunk becomes page 1 the moment the window reloads — repeat page by
   page rather than ever having to vouch for hundreds or thousands of
   unseen faces at once.
+- **Confirmation before an off-page bulk action, and a real "Undo Last
+  Action" button — added after a real incident** (a "Select All" left
+  over from a moment earlier was mistaken for a page-scoped selection, so
+  a Move silently reassigned 17,764 faces — most never actually looked
+  at — into an already-good, already-named person's cluster). Now:
+  clicking Split/Move/Remove from Cluster/Mark-as-not-a-person/Un-mark
+  while the selection includes any face NOT on the currently-visible page
+  shows a plain-language warning naming the real counts ("that's 500
+  face(s) total, but only 200 are on the page you're looking at...")
+  before proceeding — a page-scoped selection (via "Select This Page")
+  never triggers it. **"Undo Last Action"** (top-right of the window,
+  next to Save Name) reverses the single most recent mutating action —
+  Save Name, Split, Move, Remove from Cluster, Mark/Un-mark, or Merge —
+  including recreating a cluster that got fully emptied and auto-deleted
+  by the action being undone, with its real name/notes intact. It's a
+  simple session-only stack (up to 20 steps, most-recent-first, no redo),
+  not a persisted audit log — reversing a genuine mistake right now is
+  the point, not a durable history.
 
 ### Phase 3c — filtering junk clusters and marking false detections
 

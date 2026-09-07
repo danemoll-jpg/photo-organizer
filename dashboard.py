@@ -325,7 +325,11 @@ from src.face_clustering import (
     merge_people,
     move_faces_to_person,
     remove_faces_from_cluster,
+    restore_faces_from_undo,
     set_person_name,
+    snapshot_before_merge,
+    snapshot_faces_for_undo,
+    undo_merge,
     unmark_faces_not_a_person,
 )
 from src.face_detection import FaceDetectionStats, run_face_detection
@@ -3134,6 +3138,18 @@ class FaceLabelingWindow(tk.Toplevel):
     # forth, and Select All/Clear operate on the WHOLE cluster (not just the
     # visible page) for the same reason -- see _on_select_all/_on_clear_selection.
     FACES_PER_PAGE = 200
+    # URGENT follow-up session: a real incident (an off-page selection --
+    # "Select All" left over from a moment earlier, mistaken for the
+    # current page -- caused a Move to silently reassign 17,764 faces, most
+    # never actually looked at) motivated two safety additions: a
+    # confirmation before any bulk action whose selection reaches beyond
+    # the current page (_confirm_if_selection_spans_pages), and a real,
+    # session-only "Undo Last Action" stack (self._undo_stack) capped at
+    # MAX_UNDO entries -- not persisted across window/dashboard restarts
+    # (a live mistake needs a fast, no-questions-asked reversal right now,
+    # not a durable audit trail; every mutation this window makes is a
+    # plain DB write same as always, nothing new added there).
+    MAX_UNDO = 20
 
     def __init__(self, master: tk.Misc, cfg: Config):
         super().__init__(master)
@@ -3165,6 +3181,7 @@ class FaceLabelingWindow(tk.Toplevel):
         self._selected_index: int | None = None
         self._current_faces: list = []  # list[FaceRecord] -- the WHOLE cluster, not just the visible page
         self._face_page: int = 0  # URGENT fix: which FACES_PER_PAGE-sized slice of _current_faces is rendered
+        self._undo_stack: list[dict] = []  # see MAX_UNDO comment above and _on_undo()
         self._selected_face_ids: set[int] = set()
         self._face_check_vars: dict[int, tk.BooleanVar] = {}
         self._merge_target_ids: list[int] = []
@@ -3243,6 +3260,15 @@ class FaceLabelingWindow(tk.Toplevel):
         self.name_var = tk.StringVar()
         ttk.Entry(header, textvariable=self.name_var, width=30).pack(side="left", padx=(6, 6))
         ttk.Button(header, text="Save Name", command=self._on_save_name).pack(side="left")
+        # URGENT follow-up session: kept in the always-visible header (not
+        # tucked into action_bar1 below) so it's reachable regardless of
+        # which cluster/view is currently loaded -- the whole point is
+        # "I just made a mistake, let me fix it immediately," not something
+        # to go hunting for.
+        self.undo_btn = ttk.Button(header, text="Undo Last Action", command=self._on_undo, state="disabled")
+        self.undo_btn.pack(side="right")
+        self.undo_label = ttk.Label(header, text="Nothing to undo yet.", foreground="#666666")
+        self.undo_label.pack(side="right", padx=(0, 10))
 
         thumb_outer = ttk.Frame(right)
         thumb_outer.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -3587,6 +3613,89 @@ class FaceLabelingWindow(tk.Toplevel):
         kind, payload = self._display[idx]
         return payload if kind == "cluster" else None
 
+    # -------------------------------------------------- safety + undo
+    def _confirm_if_selection_spans_pages(self, action_desc: str) -> bool:
+        """Returns True if the caller should proceed, False if the user
+        backed out of a warning. URGENT follow-up session, directly from a
+        real incident: the selection can include face_ids that aren't on
+        the CURRENTLY RENDERED page (most commonly because "Select All" --
+        whole cluster -- was clicked, but also possible via manually
+        checking faces across more than one page without ever clearing the
+        selection in between) -- acting on those without a beat to
+        reconsider is exactly what silently reassigned 17,764 faces,
+        ~17,738 of them never actually looked at, in the incident that
+        motivated this. The check is deliberately about what's VISIBLE
+        right now, not about which button produced the selection -- that's
+        the actual risk, regardless of how the selection came to be."""
+        visible = set(self._face_check_vars.keys())
+        off_page = self._selected_face_ids - visible
+        if not off_page:
+            return True
+        total = len(self._selected_face_ids)
+        visible_selected = total - len(off_page)
+        return messagebox.askyesno(
+            "Face Labeling — confirm bulk action",
+            f"You're about to {action_desc}.\n\n"
+            f"That's {total} face(s) total, but only {visible_selected} are on "
+            f"the page you're currently looking at — the other {len(off_page)} "
+            f"are on other pages, not necessarily reviewed just now.\n\n"
+            f'If this isn\'t what you meant, click "No" and use "Select This '
+            f'Page" instead of "Select All." This can also be reversed '
+            f'afterward with "Undo Last Action" if needed.\n\n'
+            f"Continue with all {total} selected face(s)?",
+            icon="warning",
+        )
+
+    def _push_faces_undo(self, label: str, face_ids: list[int]) -> None:
+        """Snapshots the CURRENT (pre-mutation) cluster_id/not_a_person of
+        each given face_id and pushes an undo entry — call this
+        immediately BEFORE a mutation that reassigns cluster_id/
+        not_a_person for these faces (Split/Move/Remove from Cluster/Mark/
+        Un-mark). See restore_face_states() in src/face_clustering.py for
+        the actual reversal logic."""
+        if not face_ids:
+            return
+        snapshot = snapshot_faces_for_undo(self.conn, face_ids)
+        self._undo_stack.append({"kind": "faces", "label": label, "snapshot": snapshot})
+        if len(self._undo_stack) > self.MAX_UNDO:
+            self._undo_stack.pop(0)
+        self._refresh_undo_button()
+
+    def _push_undo(self, entry: dict) -> None:
+        """Generic push for non-"faces"-kind undo entries (name/merge) --
+        _push_faces_undo above stays the dedicated helper for the common
+        case since it also does the snapshot query itself."""
+        self._undo_stack.append(entry)
+        if len(self._undo_stack) > self.MAX_UNDO:
+            self._undo_stack.pop(0)
+        self._refresh_undo_button()
+
+    def _refresh_undo_button(self) -> None:
+        if self._undo_stack:
+            self.undo_btn.configure(state="normal")
+            self.undo_label.configure(text=f"Undo available: {self._undo_stack[-1]['label']}")
+        else:
+            self.undo_btn.configure(state="disabled")
+            self.undo_label.configure(text="Nothing to undo yet.")
+
+    def _on_undo(self) -> None:
+        """Reverses the single most recent undoable action in this window
+        (a plain stack, not a redo-capable history) — see MAX_UNDO's
+        comment for why this is session-only, not a persisted log."""
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+        kind = entry["kind"]
+        if kind == "faces":
+            restore_faces_from_undo(self.conn, entry["snapshot"])
+        elif kind == "merge":
+            undo_merge(self.conn, entry["snapshot"])
+        elif kind == "name":
+            set_person_name(self.conn, entry["cluster_id"], entry["old_name"], entry["old_notes"])
+        self._refresh_undo_button()
+        messagebox.showinfo("Face Labeling", f"Undid: {entry['label']}")
+        self.reload()
+
     def _on_save_name(self) -> None:
         if self._current_view == "not_a_person":
             messagebox.showerror(
@@ -3607,6 +3716,13 @@ class FaceLabelingWindow(tk.Toplevel):
             )
             return
         name = self.name_var.get().strip() or None
+        self._push_undo({
+            "kind": "name",
+            "label": f"Rename \"{summary.assigned_name or '(unnamed)'}\" back",
+            "cluster_id": summary.cluster_id,
+            "old_name": summary.assigned_name,
+            "old_notes": summary.notes,
+        })
         set_person_name(self.conn, summary.cluster_id, name, summary.notes)
         self.reload()
 
@@ -3621,6 +3737,8 @@ class FaceLabelingWindow(tk.Toplevel):
                 "them normally.",
             )
             return
+        if not self._confirm_if_selection_spans_pages("split the selected faces into a new person"):
+            return
         from tkinter import simpledialog
         name = simpledialog.askstring(
             "New Person", "Name for the new person (optional -- you can name it later):", parent=self
@@ -3629,9 +3747,11 @@ class FaceLabelingWindow(tk.Toplevel):
         # the field but clicked OK) is a valid "leave unnamed for now".
         if name is None:
             return
-        new_cid = create_person_from_faces(self.conn, sorted(self._selected_face_ids), name=(name.strip() or None))
+        face_ids = sorted(self._selected_face_ids)
+        self._push_faces_undo(f"Split {len(face_ids)} face(s) into a new person", face_ids)
+        new_cid = create_person_from_faces(self.conn, face_ids, name=(name.strip() or None))
         messagebox.showinfo(
-            "Face Labeling", f"Created a new person (cluster {new_cid}) with {len(self._selected_face_ids)} face(s)."
+            "Face Labeling", f"Created a new person (cluster {new_cid}) with {len(face_ids)} face(s)."
         )
         self.reload()
 
@@ -3663,10 +3783,13 @@ class FaceLabelingWindow(tk.Toplevel):
                 "Face Labeling", 'These faces are already in "(Unclustered)" -- nothing to remove them from.'
             )
             return
-        count = len(self._selected_face_ids)
-        remove_faces_from_cluster(self.conn, sorted(self._selected_face_ids))
+        if not self._confirm_if_selection_spans_pages("remove the selected faces from this cluster"):
+            return
+        face_ids = sorted(self._selected_face_ids)
+        self._push_faces_undo(f'Remove {len(face_ids)} face(s) from this cluster', face_ids)
+        remove_faces_from_cluster(self.conn, face_ids)
         messagebox.showinfo(
-            "Face Labeling", f'Removed {count} face(s) from this cluster -- sent back to "(Unclustered)".'
+            "Face Labeling", f'Removed {len(face_ids)} face(s) from this cluster -- sent back to "(Unclustered)".'
         )
         self.reload()
 
@@ -3686,7 +3809,12 @@ class FaceLabelingWindow(tk.Toplevel):
             messagebox.showinfo("Face Labeling", "Choose a target person first.")
             return
         dest_cid = self._merge_target_ids[sel]
-        move_faces_to_person(self.conn, sorted(self._selected_face_ids), dest_cid)
+        dest_label = self.target_combo.get()
+        if not self._confirm_if_selection_spans_pages(f'move the selected faces to "{dest_label}"'):
+            return
+        face_ids = sorted(self._selected_face_ids)
+        self._push_faces_undo(f'Move {len(face_ids)} face(s) to "{dest_label}"', face_ids)
+        move_faces_to_person(self.conn, face_ids, dest_cid)
         self.reload()
 
     def _on_merge(self) -> None:
@@ -3711,13 +3839,20 @@ class FaceLabelingWindow(tk.Toplevel):
             messagebox.showinfo("Face Labeling", "Choose a target person first.")
             return
         target_cid = self._merge_target_ids[sel]
+        target_label = self.target_combo.get()
         if not messagebox.askyesno(
             "Face Labeling",
             f"Merge this whole group ({summary.face_count} face(s)) into the selected person?\n\n"
             "Every face currently in this group moves to the target person, and this group's own "
-            "entry is removed.",
+            'entry is removed. This can be reversed afterward with "Undo Last Action" if needed.',
         ):
             return
+        snapshot = snapshot_before_merge(self.conn, keep_cluster_id=target_cid, other_cluster_id=summary.cluster_id)
+        self._push_undo({
+            "kind": "merge",
+            "label": f'Un-merge "{summary.assigned_name or "(unnamed)"}" back out of "{target_label}"',
+            "snapshot": snapshot,
+        })
         merge_people(self.conn, keep_cluster_id=target_cid, other_cluster_id=summary.cluster_id)
         self.reload()
 
@@ -3733,7 +3868,11 @@ class FaceLabelingWindow(tk.Toplevel):
         if self._current_view == "not_a_person":
             messagebox.showinfo("Face Labeling", "These faces are already marked as not a person.")
             return
-        mark_faces_not_a_person(self.conn, sorted(self._selected_face_ids))
+        if not self._confirm_if_selection_spans_pages("mark the selected faces as not a person"):
+            return
+        face_ids = sorted(self._selected_face_ids)
+        self._push_faces_undo(f"Mark {len(face_ids)} face(s) as not a person", face_ids)
+        mark_faces_not_a_person(self.conn, face_ids)
         self.reload()
 
     def _on_unmark_not_a_person(self) -> None:
@@ -3751,7 +3890,11 @@ class FaceLabelingWindow(tk.Toplevel):
                 "the left) to un-mark faces.",
             )
             return
-        unmark_faces_not_a_person(self.conn, sorted(self._selected_face_ids))
+        if not self._confirm_if_selection_spans_pages("un-mark the selected faces"):
+            return
+        face_ids = sorted(self._selected_face_ids)
+        self._push_faces_undo(f"Un-mark {len(face_ids)} face(s)", face_ids)
+        unmark_faces_not_a_person(self.conn, face_ids)
         self.reload()
 
     def _on_close(self) -> None:
