@@ -158,9 +158,8 @@ faces_scanned_path: "data/faces_scanned.jsonl"
 face_model_pack: "buffalo_l"
 
 # --- Phase 3 Session 2: face clustering (src/face_clustering.py, CLI:
-# `main.py cluster-faces`) --- Judgment-call defaults, not yet tuned
-# against labeled ground truth (this library has none) -- retune after
-# reviewing real cluster quality in the dashboard's Face Labeling window.
+# `main.py cluster-faces`) --- retune after reviewing real cluster quality
+# in the dashboard's Face Labeling window.
 # face_min_det_score: a face below this RetinaFace confidence never gets
 #   clustered (stays in the "Unclustered" bucket for manual handling).
 # face_cluster_similarity_threshold: cosine similarity above which two
@@ -168,8 +167,20 @@ face_model_pack: "buffalo_l"
 #   face against an existing person's centroid and as DBSCAN's neighbor
 #   radius when forming brand new clusters.
 # face_cluster_min_samples: DBSCAN's min_samples -- a person seen in only 1
-#   photo won't form a cluster alone until a 2nd matching face appears (or
-#   the user manually creates a person from it in the labeling UI).
+#   photo won't form a cluster alone until min_samples matching faces appear
+#   (or the user manually creates a person from it in the labeling UI).
+#
+# URGENT-fix follow-up session: 0.45/2 (this project's own earlier
+# small-sample tuning, 39 groups from 767 faces) was verified NOT to
+# generalize to real full-library scale -- a real 61,676-face "cluster"
+# (confirmed a chained mass of unrelated people, not one person) formed
+# against the real ~155k-photo production DB. Raising the threshold did
+# almost all the real work in testing (min_samples 2->8 alone only shrank
+# the runaway cluster ~8%); 0.65/4 meaningfully reduces (does not claim to
+# eliminate) chaining risk while trying not to gut match recall for
+# already-named people, especially a child whose face changes a lot over
+# many years. See src/config.py's Config.face_cluster_similarity_threshold
+# comment and CLAUDE.md/TODO.md for the full real-data-backed writeup.
 face_min_det_score: 0.5
-face_cluster_similarity_threshold: 0.45
-face_cluster_min_samples: 2
+face_cluster_similarity_threshold: 0.65
+face_cluster_min_samples: 4

@@ -3119,6 +3119,21 @@ class FaceLabelingWindow(tk.Toplevel):
 
     THUMB_SIZE = 110
     THUMB_COLS = 6
+    # URGENT fix (real 61,676-face cluster found at full-library scale): the
+    # window used to render every face in a cluster as its own Tkinter
+    # Checkbutton + PhotoImage in one shot -- fine at the sizes this was
+    # designed/tested against (hundreds at most, e.g. the real 408-face
+    # cluster Phase 3f's own writeup mentions), but tens of thousands of
+    # live Tk widgets/decoded thumbnails at once is a hard crash (memory
+    # exhaustion long before Tk itself would object), not just "slow." Fixed
+    # by paginating the thumbnail grid (_render_face_page) rather than
+    # rendering self._current_faces in full -- deliberately NOT hardcoded to
+    # this one 61k case, so any future cluster of any size stays viewable.
+    # Selection (self._selected_face_ids) is tracked by face_id regardless
+    # of which page is currently rendered, so it survives paging back and
+    # forth, and Select All/Clear operate on the WHOLE cluster (not just the
+    # visible page) for the same reason -- see _on_select_all/_on_clear_selection.
+    FACES_PER_PAGE = 200
 
     def __init__(self, master: tk.Misc, cfg: Config):
         super().__init__(master)
@@ -3148,7 +3163,8 @@ class FaceLabelingWindow(tk.Toplevel):
         self._not_a_person_count: int = 0
         self._current_view: str | None = None  # "cluster" | "not_a_person" | None (nothing selected)
         self._selected_index: int | None = None
-        self._current_faces: list = []  # list[FaceRecord]
+        self._current_faces: list = []  # list[FaceRecord] -- the WHOLE cluster, not just the visible page
+        self._face_page: int = 0  # URGENT fix: which FACES_PER_PAGE-sized slice of _current_faces is rendered
         self._selected_face_ids: set[int] = set()
         self._face_check_vars: dict[int, tk.BooleanVar] = {}
         self._merge_target_ids: list[int] = []
@@ -3246,6 +3262,19 @@ class FaceLabelingWindow(tk.Toplevel):
         self.thumb_canvas.bind(
             "<MouseWheel>", lambda e: self.thumb_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
         )
+
+        # URGENT fix: pagination controls for _render_face_page() -- see the
+        # class docstring/FACES_PER_PAGE comment above. Sits between the
+        # thumbnail grid and the action buttons so it reads as "which slice
+        # of this group am I looking at," not a global control.
+        page_row = ttk.Frame(right)
+        page_row.pack(fill="x", padx=6, pady=(0, 4))
+        self.prev_page_btn = ttk.Button(page_row, text="◀ Prev page", command=self._on_prev_page)
+        self.prev_page_btn.pack(side="left")
+        self.page_label = ttk.Label(page_row, text="No faces.")
+        self.page_label.pack(side="left", padx=(10, 10))
+        self.next_page_btn = ttk.Button(page_row, text="Next page ▶", command=self._on_next_page)
+        self.next_page_btn.pack(side="left")
 
         action_bar1 = ttk.Frame(right)
         action_bar1.pack(fill="x", padx=6, pady=(0, 4))
@@ -3383,12 +3412,12 @@ class FaceLabelingWindow(tk.Toplevel):
         self._load_selected_cluster()
 
     def _load_selected_cluster(self) -> None:
-        for widget in self.thumb_frame.winfo_children():
-            widget.destroy()
-        self._photo_refs.clear()
-        self._face_check_vars.clear()
+        """Fetches the WHOLE cluster's face list (a plain DB query -- cheap
+        even at 61k+ rows, no image I/O here) and resets to page 0.
+        Rendering itself is _render_face_page()'s job -- see the
+        FACES_PER_PAGE comment on the class docstring for why this is split
+        out rather than looping over every face here like it used to."""
         self._selected_face_ids.clear()
-        self._update_selection_count()
 
         idx = self._selected_index
         if idx is None or idx >= len(self._display):
@@ -3397,6 +3426,8 @@ class FaceLabelingWindow(tk.Toplevel):
             self.name_var.set("")
             self.target_combo["values"] = []
             self._merge_target_ids = []
+            self._face_page = 0
+            self._render_face_page()
             return
 
         kind, payload = self._display[idx]
@@ -3422,7 +3453,30 @@ class FaceLabelingWindow(tk.Toplevel):
             if targets:
                 self.target_combo.current(0)
 
-        for i, face in enumerate(self._current_faces):
+        self._face_page = 0
+        self._render_face_page()
+
+    def _render_face_page(self) -> None:
+        """Renders only the current FACES_PER_PAGE-sized slice of
+        self._current_faces -- the actual fix for the 61k-face crash (see
+        FACES_PER_PAGE's comment). Only this slice gets its face cropped
+        from disk/turned into a PhotoImage/given a Tkinter widget; the rest
+        of the cluster sits as plain FaceRecord data (cheap) until paged
+        to. Checkbox state is seeded from self._selected_face_ids (which
+        persists across pages), so a selection made on one page is still
+        reflected if you page away and back."""
+        for widget in self.thumb_frame.winfo_children():
+            widget.destroy()
+        self._photo_refs.clear()
+        self._face_check_vars.clear()
+
+        total = len(self._current_faces)
+        page_count = max(1, (total + self.FACES_PER_PAGE - 1) // self.FACES_PER_PAGE)
+        self._face_page = max(0, min(self._face_page, page_count - 1))
+        start = self._face_page * self.FACES_PER_PAGE
+        end = min(start + self.FACES_PER_PAGE, total)
+
+        for i, face in enumerate(self._current_faces[start:end]):
             try:
                 crop = crop_face_thumbnail(face.current_path, face.bbox, size=self.THUMB_SIZE)
             except Exception:
@@ -3432,7 +3486,7 @@ class FaceLabelingWindow(tk.Toplevel):
                 crop = Image.new("RGB", (self.THUMB_SIZE, self.THUMB_SIZE), (160, 160, 160))
             photo = ImageTk.PhotoImage(crop)
             self._photo_refs.append(photo)
-            var = tk.BooleanVar(value=False)
+            var = tk.BooleanVar(value=face.face_id in self._selected_face_ids)
             self._face_check_vars[face.face_id] = var
             cb = tk.Checkbutton(
                 self.thumb_frame, image=photo, variable=var, indicatoron=False,
@@ -3440,6 +3494,25 @@ class FaceLabelingWindow(tk.Toplevel):
                 command=lambda fid=face.face_id, v=var: self._on_face_toggle(fid, v),
             )
             cb.grid(row=i // self.THUMB_COLS, column=i % self.THUMB_COLS, padx=3, pady=3)
+
+        if total == 0:
+            self.page_label.configure(text="No faces.")
+        else:
+            self.page_label.configure(
+                text=f"Showing {start + 1}-{end} of {total} face(s) — page {self._face_page + 1}/{page_count}"
+            )
+        self.prev_page_btn.configure(state="normal" if self._face_page > 0 else "disabled")
+        self.next_page_btn.configure(state="normal" if self._face_page < page_count - 1 else "disabled")
+        self._update_selection_count()
+
+    def _on_prev_page(self) -> None:
+        if self._face_page > 0:
+            self._face_page -= 1
+            self._render_face_page()
+
+    def _on_next_page(self) -> None:
+        self._face_page += 1
+        self._render_face_page()
 
     # ------------------------------------------------------------- actions
     def _update_selection_count(self) -> None:
@@ -3453,15 +3526,21 @@ class FaceLabelingWindow(tk.Toplevel):
         self._update_selection_count()
 
     def _on_select_all(self) -> None:
+        """Selects every face in the WHOLE current cluster, not just the
+        ones on the currently-rendered page -- important now that a cluster
+        can be far bigger than one page (see FACES_PER_PAGE). Selection
+        itself is just face_ids in a set (cheap even at 61k+); only the
+        currently-visible checkboxes need their widget state updated."""
+        for face in self._current_faces:
+            self._selected_face_ids.add(face.face_id)
         for fid, var in self._face_check_vars.items():
             var.set(True)
-            self._selected_face_ids.add(fid)
         self._update_selection_count()
 
     def _on_clear_selection(self) -> None:
+        self._selected_face_ids.clear()
         for var in self._face_check_vars.values():
             var.set(False)
-        self._selected_face_ids.clear()
         self._update_selection_count()
 
     def _current_summary(self):

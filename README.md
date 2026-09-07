@@ -644,20 +644,46 @@ correctness requirement the design center on (see
   default `face_cluster_min_samples=2` — it stays in an "(Unclustered)"
   bucket, browsable and manually assignable in the labeling UI, not hidden.
 
-**Tuning** (`config.yaml`, judgment-call defaults — not tuned against
-labeled ground truth, since this library has none; retune after reviewing
-real cluster quality): `face_min_det_score` (0.5 — a face below this
-RetinaFace confidence is never clustered), `face_cluster_similarity_threshold`
-(0.45 — cosine similarity floor for "same person," used both for the
-centroid match and as DBSCAN's neighbor radius), `face_cluster_min_samples`
-(2 — DBSCAN's min group size to form a brand-new person). On this session's
-real 767-face sample, 0.45 formed some quite large groups (up to ~300
-faces) — a known DBSCAN "chaining" behavior (density-connectivity is
-transitive, not a strict clique), not a bug; split an over-merged group by
-hand in the labeling UI, or lower the threshold in config.yaml and re-run
-(re-running only ever affects still-unclustered faces, so tightening the
-threshold after the fact won't un-merge an already-formed group — split it
-manually instead).
+**Tuning** (`config.yaml`, retune after reviewing real cluster quality):
+`face_min_det_score` (0.5 — a face below this RetinaFace confidence is never
+clustered), `face_cluster_similarity_threshold` (0.65 — cosine similarity
+floor for "same person," used both for the centroid match and as DBSCAN's
+neighbor radius), `face_cluster_min_samples` (4 — DBSCAN's min group size to
+form a brand-new person).
+
+**URGENT-fix follow-up session: these two were retuned from their original
+0.45/2 (this project's own earlier small-sample tuning, 39 groups from 767
+faces) after that combination was verified — against the real ~155k-photo/
+203k-face production DB, not a synthetic test — to chain 61,676 faces
+(~30% of every clustered face in the library) into a single bogus
+"cluster." Sampling its members and checking pairwise cosine similarity
+confirmed this wasn't one person with a wide age range: mean similarity
+among a random sample of its own faces was ~0.07 (indistinguishable from
+random), versus 0.39–0.78 for the library's real, correctly-formed named
+people. This is DBSCAN "chaining" (density-connectivity is transitive, not
+a strict clique) taken to its logical extreme at real scale — with tens of
+thousands of candidate faces, near-threshold false-positive pairs
+accumulate combinatorially. Raising the similarity threshold did almost all
+the real work in testing (sweeping `face_cluster_min_samples` 2→8 at
+threshold=0.45 only shrank the runaway cluster by ~8%); 0.65/4 meaningfully
+reduces — but does not claim to eliminate — this risk, traded off against
+reduced auto-match recall for already-named people whose own faces are less
+internally similar than you'd expect, especially a child whose face changes
+a lot over many years. See `src/config.py`'s
+`Config.face_cluster_similarity_threshold` field comment and CLAUDE.md/
+TODO.md for the full numbers.
+
+If a future run still produces an oversized cluster: it's now safe to open
+regardless of size (see "Face Labeling window" below — the thumbnail grid
+is paginated, not rendered all at once) and can be reset via the labeling
+UI itself — select it, click "Select All" (selects the WHOLE group, not
+just the visible page), then "Remove Selected from Cluster" to send every
+face back to "(Unclustered)," where the next `cluster-faces` run picks them
+up fresh under whatever parameters are then configured. Re-running
+`cluster-faces` only ever affects still-unclustered faces, so tightening
+the threshold after the fact won't by itself un-merge an already-formed
+group — reset it by hand first, the way just described, or split out the
+wrong faces individually if only some of a group are wrong.
 
 **Face Labeling window** (dashboard button, next to Start Face Clustering) —
 a dedicated `Toplevel`, not another progress-bar panel, since browsing/
@@ -684,6 +710,16 @@ labeling is a genuinely different, interactive task:
   the bbox coordinates out from under the actual face entirely.
 - Not modal — the rest of the dashboard stays usable while it's open, and
   finishing a clustering run while it's open refreshes it automatically.
+- **URGENT-fix follow-up session: the thumbnail grid is paginated (200
+  faces/page, Prev/Next below the grid), not rendered all at once.** A real
+  61,676-face cluster (see "Tuning" above) crashed the window when it tried
+  to build tens of thousands of Tkinter widgets/decoded thumbnails in one
+  shot. Selection (the checkboxes) is tracked by face ID regardless of
+  which page is showing, so it survives paging back and forth, and
+  **Select All selects every face in the WHOLE group**, not just the
+  current page — the intended way to select an oversized group's entire
+  membership (e.g. to reset it via "Remove Selected from Cluster," see
+  "Tuning" above) without paging through it by hand.
 
 ### Phase 3c — filtering junk clusters and marking false detections
 

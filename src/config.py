@@ -139,20 +139,56 @@ class Config:
     #     two ArcFace embeddings are treated as the same person -- used both
     #     to match a new face against an existing person's centroid AND as
     #     DBSCAN's neighbor radius (eps = 1 - threshold) when forming brand
-    #     new clusters. ~0.45 is a commonly-cited working threshold for
-    #     buffalo_l/ArcFace cosine similarity; expect to retune after
-    #     reviewing real clusters (kids' faces changing over years is an
-    #     accepted false-negative source per spec, not something to chase by
-    #     loosening this too far, which would instead risk merging different
-    #     people).
+    #     new clusters.
     #   - face_cluster_min_samples: DBSCAN's min_samples -- a person who
-    #     appears in only 1 photo can't form a cluster on their own with the
-    #     default of 2 and stays in "Unclustered" until a 2nd matching face
-    #     shows up (or the user manually creates a person from it in the
-    #     labeling UI) -- see src/face_clustering.py's module docstring.
+    #     appears in only 1 photo can't form a cluster on their own and stays
+    #     in "Unclustered" until a min_samples-th matching face shows up (or
+    #     the user manually creates a person from it in the labeling UI) --
+    #     see src/face_clustering.py's module docstring.
+    #
+    #   URGENT-fix follow-up session, defaults retuned (0.45/2 -> 0.65/4) --
+    #   0.45 was this project's own earlier small-sample tuning (39 groups
+    #   from 767 faces, CLAUDE.md), and did NOT generalize to real
+    #   full-library scale: verified directly against the real ~155k-photo/
+    #   203k-face production DB that it produces a single 61,676-face
+    #   "cluster" (~30% of all clustered faces) which real sampling +
+    #   pairwise-similarity checks confirmed is a chained mass of unrelated
+    #   people (mean pairwise cosine similarity among a random sample of its
+    #   own members: ~0.07 -- indistinguishable from random, vs. 0.39-0.78
+    #   for the library's actual real named people), not a clustering
+    #   quirk affecting one photo here or there. Root cause: DBSCAN with a
+    #   low min_samples degenerates toward single-linkage/transitive-closure
+    #   chaining, and at tens of thousands of candidate faces, near-threshold
+    #   false-positive pairs accumulate combinatorially -- confirmed
+    #   empirically (real DB, not synthetic) that this is NOT primarily a
+    #   min_samples problem: sweeping min_samples 2->8 at threshold=0.45 only
+    #   shrank the runaway cluster by ~8% (10,517->9,720 faces in a 20k-face
+    #   subsample test), while raising the threshold did the real work
+    #   (largest cluster in the same 20k-face subsample: ~10,500 at 0.45,
+    #   ~6,400 at 0.55, ~3,200 at 0.65, ~1,960 at 0.70, ~780 at 0.75) --
+    #   restricting to only high-confidence (det_score>=0.7) detections did
+    #   NOT meaningfully help either (still ~11,900/20,000 at threshold=0.45),
+    #   ruling out "it's just blurry/low-quality detections" as the fix.
+    #   0.65/4 is a deliberate middle ground, not a claim of a fully solved
+    #   problem: it meaningfully shrinks (but doesn't guarantee eliminating)
+    #   runaway chaining, while trying not to destroy match recall for
+    #   already-named people whose OWN existing faces are less internally
+    #   similar than a stranger might expect -- especially a child whose face
+    #   changes a lot over 25 years (this library's own "Juliana Moll"
+    #   cluster: only 45% of her own already-clustered faces would match her
+    #   own centroid at threshold=0.65, dropping to just 7.9% at 0.75 -- a
+    #   real, measured recall cost from going too high, not a hypothetical
+    #   one). This is a real precision/recall trade-off with no single
+    #   scalar answer, not something this session claims to have solved
+    #   perfectly -- see TODO.md's URGENT section and CLAUDE.md for the full
+    #   writeup, including why the labeling UI's own crash fix (paginated
+    #   thumbnail rendering, no longer size-limited) is what makes whatever
+    #   imperfect grouping remains at ANY parameter setting safe to view and
+    #   correct by hand (Select All + "Remove Selected from Cluster"),
+    #   rather than a hard blocker.
     face_min_det_score: float = 0.5
-    face_cluster_similarity_threshold: float = 0.45
-    face_cluster_min_samples: int = 2
+    face_cluster_similarity_threshold: float = 0.65
+    face_cluster_min_samples: int = 4
 
     # --- derived, absolute paths ---
     @property
@@ -264,8 +300,11 @@ def load_config(path: Path | None = None) -> Config:
         faces_scanned_path=raw.get("faces_scanned_path", "data/faces_scanned.jsonl"),
         face_model_pack=raw.get("face_model_pack", "buffalo_l"),
         face_min_det_score=raw.get("face_min_det_score", 0.5),
-        face_cluster_similarity_threshold=raw.get("face_cluster_similarity_threshold", 0.45),
-        face_cluster_min_samples=raw.get("face_cluster_min_samples", 2),
+        # URGENT-fix follow-up session: defaults retuned 0.45/2 -> 0.65/4 --
+        # see the Config dataclass field comment above for the full,
+        # real-data-backed reasoning.
+        face_cluster_similarity_threshold=raw.get("face_cluster_similarity_threshold", 0.65),
+        face_cluster_min_samples=raw.get("face_cluster_min_samples", 4),
     )
 
 
