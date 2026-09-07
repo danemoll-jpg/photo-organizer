@@ -710,8 +710,9 @@ labeling is a genuinely different, interactive task:
   the bbox coordinates out from under the actual face entirely.
 - Not modal — the rest of the dashboard stays usable while it's open, and
   finishing a clustering run while it's open refreshes it automatically.
-- **URGENT-fix follow-up session: the thumbnail grid is paginated (200
-  faces/page, Prev/Next below the grid), not rendered all at once.** A real
+- **URGENT-fix follow-up session: the thumbnail grid is paginated
+  (`FaceLabelingWindow.FACES_PER_PAGE` faces/page, currently 500;
+  Prev/Next below the grid), not rendered all at once.** A real
   61,676-face cluster (see "Tuning" above) crashed the window when it tried
   to build tens of thousands of Tkinter widgets/decoded thumbnails in one
   shot. Selection (the checkboxes) is tracked by face ID regardless of

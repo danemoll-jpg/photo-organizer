@@ -3137,7 +3137,7 @@ class FaceLabelingWindow(tk.Toplevel):
     # of which page is currently rendered, so it survives paging back and
     # forth, and Select All/Clear operate on the WHOLE cluster (not just the
     # visible page) for the same reason -- see _on_select_all/_on_clear_selection.
-    FACES_PER_PAGE = 200
+    FACES_PER_PAGE = 500
     # URGENT follow-up session: a real incident (an off-page selection --
     # "Select All" left over from a moment earlier, mistaken for the
     # current page -- caused a Move to silently reassign 17,764 faces, most
@@ -3565,8 +3565,8 @@ class FaceLabelingWindow(tk.Toplevel):
     def _on_select_page(self) -> None:
         """Selects EXACTLY the faces on the currently-rendered page,
         replacing any prior selection -- the way to review and assign one
-        trusted, manageable chunk of an oversized cluster (e.g. the current
-        FACES_PER_PAGE=200) without first vouching for the whole group,
+        trusted, manageable chunk of an oversized cluster (FACES_PER_PAGE
+        faces at a time) without first vouching for the whole group,
         which might be tens of thousands of faces spanning many different
         people (see the "real 61,676/17,764-face chained cluster" writeup
         in CLAUDE.md/TODO.md). Workflow: page through a big "(Unclustered)"-
