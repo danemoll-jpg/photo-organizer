@@ -355,3 +355,18 @@
 
 **Explicitly out of scope:**
 - Any editing of who's tagged in a photo from this display — this is read-only display, consistent with Phase 3d's filter-only scope. Editing face/person assignments stays in the Tkinter labeling window only.
+
+## Phase 3f — "Remove Selected from Cluster" (send outliers back to Unclustered, without creating a new person)
+
+**Context:** Found via real use — a real 408-face cluster was almost entirely the user's daughter, with a handful of genuinely misclustered faces mixed in. The existing "Split Selected Into New Person" action always creates a NEW cluster from the selection, which is the wrong tool here — the outliers weren't one cohesive different person, just miscellaneous wrong matches. Selecting and moving the ~400 CORRECT faces (to keep the cluster clean) is far more clicking than selecting the handful of WRONG ones.
+
+**Goal:** A lighter-weight action: select the few outlier faces within a cluster, remove just them, sending them back to "(Unclustered)" — no new person/cluster created, the majority of the original cluster is left untouched.
+
+**Requirements:**
+- New action in `FaceLabelingWindow`, e.g. "Remove Selected from Cluster" — takes the currently-selected face thumbnails (same selection mechanism already used for Split/Merge), sets their `cluster_id` to NULL (same destination as a genuinely unclustered face), and leaves the `not_a_person` flag untouched/false (these are still real, valid faces — just wrongly grouped, not false-positive detections; don't conflate this with Phase 3c's "mark as not a person" action).
+- **Reuse the existing centroid/face-count recompute logic already built for Split and "mark as not a person"** — don't reimplement it. The source cluster's centroid needs to be recomputed after faces leave it, exactly like those other two actions already do.
+- Removed faces should show up back in "(Unclustered)" immediately, available for manual re-labeling, a future Split, or simply waiting for the next `cluster-faces` re-run to find them a new home.
+- This is functionally "half of Split" (the removal half, without the new-cluster-creation half) — implement it as a genuinely smaller, focused action rather than a variant that still creates an empty/unnecessary cluster.
+
+**Explicitly out of scope:**
+- Any change to Split or Merge's existing behavior — this is a new, additional action alongside them, not a replacement.

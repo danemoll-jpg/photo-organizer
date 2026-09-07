@@ -469,6 +469,14 @@ See `photo-organizer-spec.md`'s "Phase 3e" section for full requirements. Gap fr
 - [x] Per rule 11: restarted `review_tool.py` via `main.py restart-review-tool --no-browser` at session end — confirmed the fresh instance (new PID) serves `GET /login` with 200 and still 401s an unauthenticated `/api/facets`.
 - [x] Per rule 12: no schema change this session (`faces`/`people` already existed from Phase 3 Session 2), so `init_db()` was not a concern here.
 
+## ACTIVE: Phase 3f — "Remove Selected from Cluster" (send outliers to Unclustered, no new person)
+See `photo-organizer-spec.md`'s "Phase 3f" section for full requirements. Found via real use: a real 408-face cluster (user's daughter) had a handful of genuinely misclustered faces — Split creates a new person (wrong tool for miscellaneous wrong matches), and selecting the ~400 correct faces to move instead is far more work than selecting the few wrong ones. **Note: face detection is currently running in the background (~11hr job) — don't interfere with it.** Summary:
+- [ ] New action in `FaceLabelingWindow` — "Remove Selected from Cluster": selected faces get `cluster_id = NULL` (back to Unclustered), `not_a_person` stays false (these are real faces, just wrongly grouped — not Phase 3c's false-positive case)
+- [ ] Reuse the existing centroid/face-count recompute logic already built for Split and "mark as not a person" — don't reimplement
+- [ ] Removed faces appear back in "(Unclustered)" immediately
+- [ ] Implement as a genuinely smaller/focused action (functionally "half of Split," the removal half only) — not a Split variant that still creates an unnecessary empty cluster
+- [ ] Out of scope: any change to existing Split/Merge behavior — additive only
+
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
 - ~~Map file_hash/path → Plex library item ID~~
