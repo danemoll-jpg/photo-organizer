@@ -124,6 +124,36 @@ class Config:
     faces_scanned_path: str = "data/faces_scanned.jsonl"
     face_model_pack: str = "buffalo_l"
 
+    # Phase 3 Session 2: face clustering (src/face_clustering.py, CLI:
+    # `main.py cluster-faces`). All three are judgment-call defaults, not
+    # yet tuned against labeled ground truth (this library has none) --
+    # config-driven per rule 4 specifically so they're retunable from the
+    # dashboard/config.yaml once the user has looked at real cluster
+    # quality in the labeling UI, without a code change.
+    #   - face_min_det_score: RetinaFace detection-confidence floor: a face
+    #     below this is never clustered (stays permanently in the "Unclustered"
+    #     bucket for manual handling) -- filters out the low-confidence,
+    #     often-partial/blurry detections face_detection.py's own docstring
+    #     flagged as worth filtering before clustering.
+    #   - face_cluster_similarity_threshold: cosine similarity above which
+    #     two ArcFace embeddings are treated as the same person -- used both
+    #     to match a new face against an existing person's centroid AND as
+    #     DBSCAN's neighbor radius (eps = 1 - threshold) when forming brand
+    #     new clusters. ~0.45 is a commonly-cited working threshold for
+    #     buffalo_l/ArcFace cosine similarity; expect to retune after
+    #     reviewing real clusters (kids' faces changing over years is an
+    #     accepted false-negative source per spec, not something to chase by
+    #     loosening this too far, which would instead risk merging different
+    #     people).
+    #   - face_cluster_min_samples: DBSCAN's min_samples -- a person who
+    #     appears in only 1 photo can't form a cluster on their own with the
+    #     default of 2 and stays in "Unclustered" until a 2nd matching face
+    #     shows up (or the user manually creates a person from it in the
+    #     labeling UI) -- see src/face_clustering.py's module docstring.
+    face_min_det_score: float = 0.5
+    face_cluster_similarity_threshold: float = 0.45
+    face_cluster_min_samples: int = 2
+
     # --- derived, absolute paths ---
     @property
     def dest_root_path(self) -> Path:
@@ -233,6 +263,9 @@ def load_config(path: Path | None = None) -> Config:
         faces_path=raw.get("faces_path", "data/faces.jsonl"),
         faces_scanned_path=raw.get("faces_scanned_path", "data/faces_scanned.jsonl"),
         face_model_pack=raw.get("face_model_pack", "buffalo_l"),
+        face_min_det_score=raw.get("face_min_det_score", 0.5),
+        face_cluster_similarity_threshold=raw.get("face_cluster_similarity_threshold", 0.45),
+        face_cluster_min_samples=raw.get("face_cluster_min_samples", 2),
     )
 
 

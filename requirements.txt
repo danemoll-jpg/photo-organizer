@@ -27,3 +27,13 @@ requests>=2.34                           # insightface dependency (below, for it
 # above (both pairs install into the same site-packages directory names).
 # Install it separately with --no-deps: see README.md's Phase 3 setup
 # section for the exact one-line command.
+
+# Phase 3 Session 2: face clustering (src/face_clustering.py) -- pure
+# numerical work in this same primary 3.14 venv, no insightface/onnxruntime
+# needed here. Both verified to have official cp314-win_amd64 wheels on
+# PyPI before adding (same caution as every other dependency in this
+# project -- faiss in particular was flagged in the spec as needing this
+# check, since it historically lagged new Python versions the way
+# insightface used to; as of faiss-cpu 1.15.0 it does not have that gap).
+faiss-cpu>=1.15          # exact cosine-similarity (inner-product-on-normalized-vectors) neighbor search, used to build a sparse neighbor graph for DBSCAN at 100k+-face scale without ever materializing a full pairwise distance matrix
+scikit-learn>=1.9         # DBSCAN clustering on top of faiss's neighbor graph (metric="precomputed" sparse input)

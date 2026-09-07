@@ -279,6 +279,8 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from PIL import Image, ImageTk
+
 from src.auth import hash_password
 from src.caption import CaptionStats, run_phase2
 from src.config import (
@@ -308,6 +310,19 @@ from src.date_audit import (
     inspect_cluster,
 )
 from src.db import connect, init_db
+from src.face_clustering import (
+    ClusterStats,
+    LoadStats,
+    cluster_faces_full,
+    create_person_from_faces,
+    crop_face_thumbnail,
+    list_clusters,
+    list_faces_in_cluster,
+    list_people_for_merge_target,
+    merge_people,
+    move_faces_to_person,
+    set_person_name,
+)
 from src.face_detection import FaceDetectionStats, run_face_detection
 from src.gps_backfill import GpsStats, run_gps_extraction
 from src.logging_setup import setup_logging
@@ -367,6 +382,24 @@ class DashboardApp:
         self.faces_stop_requested = False
         self._faces_log_path: Path | None = None
         self._faces_log_read_pos = 0
+
+        # Phase 3 Session 2 — Face Clustering panel: its own independent
+        # worker/progress, same reasoning as every batch panel above. No
+        # Cancel button/stop_check here (unlike every other batch panel) --
+        # a deliberate difference, not an oversight: run_face_clustering()
+        # is a fast in-memory numerical pass (faiss+DBSCAN over embeddings
+        # already in the DB, no per-file I/O or network/GPU inference like
+        # detect-faces/caption), benchmarked at a few seconds even for this
+        # session's real 767-face sample -- there's no realistic multi-hour
+        # run here to need interrupting. The Face Labeling window
+        # (self.face_labeling_window) is a separate, non-modal Toplevel --
+        # only one instance is kept open at a time (re-clicking "Open Face
+        # Labeling..." re-focuses the existing window instead of opening a
+        # second one against the same DB).
+        self.cluster_worker: threading.Thread | None = None
+        self._cluster_log_path: Path | None = None
+        self._cluster_log_read_pos = 0
+        self.face_labeling_window: "FaceLabelingWindow | None" = None
 
         # Remote Access panel (Phase 2d follow-up): the cloudflared
         # subprocess this dashboard itself spawned, if any. None whenever
@@ -880,6 +913,50 @@ class DashboardApp:
         faces_log_scroll.pack(side="right", fill="y")
         self.faces_log_text.configure(yscrollcommand=faces_log_scroll.set)
 
+        # --- Phase 3 Session 2: Face Clustering panel ---
+        cluster_frame = self._make_collapsible(
+            "Phase 3 Session 2 — Face Clustering + Labeling", start_expanded=False
+        )
+
+        ttk.Label(
+            cluster_frame, wraplength=740, justify="left",
+            text=(
+                "Loads data/faces.jsonl (Session 1's detected faces) into the database and groups them "
+                "by person (cosine similarity over embeddings, via faiss + DBSCAN). Re-running later after "
+                "more photos are face-detected is safe: it only ever processes faces not yet grouped, and "
+                "never touches an already-grouped face — so a name, merge, or split you've already done in "
+                "Face Labeling below can never be silently undone."
+            ),
+        ).pack(anchor="w", padx=6, pady=(6, 6))
+
+        cluster_btn_row = ttk.Frame(cluster_frame)
+        cluster_btn_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.cluster_btn = ttk.Button(cluster_btn_row, text="Start Face Clustering", command=self._on_cluster_start)
+        self.cluster_btn.pack(side="left")
+        self.cluster_label_btn = ttk.Button(
+            cluster_btn_row, text="Open Face Labeling...", command=self._on_open_face_labeling
+        )
+        self.cluster_label_btn.pack(side="left", padx=(6, 0))
+
+        cluster_prog_row = ttk.Frame(cluster_frame)
+        cluster_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.cluster_progress = ttk.Progressbar(cluster_prog_row, mode="determinate")
+        self.cluster_progress.pack(fill="x", side="left", expand=True)
+        self.cluster_status_label = ttk.Label(cluster_prog_row, text="Idle", width=28, anchor="e")
+        self.cluster_status_label.pack(side="right", padx=(6, 0))
+
+        self.cluster_results_text = tk.Text(cluster_frame, height=6, state="disabled", wrap="word")
+        self.cluster_results_text.pack(fill="x", padx=6, pady=(0, 6))
+
+        ttk.Label(cluster_frame, text="Live face clustering log:").pack(anchor="w", padx=6)
+        cluster_log_body = ttk.Frame(cluster_frame)
+        cluster_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.cluster_log_text = tk.Text(cluster_log_body, height=6, state="disabled", wrap="none")
+        self.cluster_log_text.pack(side="left", fill="both", expand=True)
+        cluster_log_scroll = ttk.Scrollbar(cluster_log_body, orient="vertical", command=self.cluster_log_text.yview)
+        cluster_log_scroll.pack(side="right", fill="y")
+        self.cluster_log_text.configure(yscrollcommand=cluster_log_scroll.set)
+
         # --- Review Users panel (Phase 2d follow-up) ---
         ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
 
@@ -1283,6 +1360,19 @@ class DashboardApp:
                     elif kind == "faces_error":
                         _, err = msg
                         self._on_faces_error(err)
+                    elif kind == "cluster_log_started":
+                        log_path = msg[1]
+                        self._start_cluster_log_tail(log_path)
+                    elif kind == "cluster_progress":
+                        _, done, total = msg
+                        self.cluster_progress.configure(maximum=max(total, 1), value=done)
+                        self.cluster_status_label.configure(text=f"{done:,} / {total:,} processed")
+                    elif kind == "cluster_done":
+                        _, load_stats, cluster_stats = msg
+                        self._on_cluster_done(load_stats, cluster_stats)
+                    elif kind == "cluster_error":
+                        _, err = msg
+                        self._on_cluster_error(err)
                     elif kind == "tunnel_output":
                         _, proc, line = msg
                         self._append_tunnel_log(proc, line)
@@ -1808,6 +1898,123 @@ class DashboardApp:
         self.faces_log_text.insert("end", new_text)
         self.faces_log_text.see("end")
         self.faces_log_text.configure(state="disabled")
+
+    # -------------------------------------- Phase 3 Session 2: Face Clustering
+    def _cluster_busy(self) -> bool:
+        return self.cluster_worker is not None and self.cluster_worker.is_alive()
+
+    def _on_cluster_start(self) -> None:
+        if self._cluster_busy():
+            return
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            "About to load data/faces.jsonl into the database and cluster faces by person "
+            "(faiss + DBSCAN over cosine similarity).\n\n"
+            "This is a fast, in-memory numerical pass — no GPU use, no network, no per-file I/O beyond "
+            "the DB. Safe to run any time and safe to re-run: it only processes faces not yet grouped, "
+            "and never reassigns or renames an already-grouped face — any name, merge, or split you've "
+            "already done in Face Labeling is never touched.\n\n"
+            "Start now?",
+        ):
+            return
+        self.cluster_progress.configure(value=0, maximum=1)
+        self.cluster_status_label.configure(text="Starting...")
+        self._set_cluster_results_text("Running...")
+        self.cluster_btn.configure(state="disabled")
+
+        self.cluster_worker = threading.Thread(target=self._cluster_worker_fn, daemon=True)
+        self.cluster_worker.start()
+
+    def _cluster_worker_fn(self) -> None:
+        # Runs on a background thread -- never touch Tk widgets here, only
+        # push messages through self.msg_queue. Same shape as every other
+        # worker above.
+        try:
+            cfg = load_config()
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.cluster"
+            )
+            self.msg_queue.put(("cluster_log_started", log_path))
+            init_db(cfg.db_path_abs, logger=logger)  # rule 12
+            logger.info("Starting Phase 3 Session 2 (face clustering) run from dashboard")
+
+            conn = connect(cfg.db_path_abs)
+            try:
+                load_stats, cluster_stats = cluster_faces_full(
+                    cfg, conn, logger, cfg.faces_path_abs,
+                    progress_cb=lambda done, total: self.msg_queue.put(("cluster_progress", done, total)),
+                )
+            finally:
+                conn.close()
+            self.msg_queue.put(("cluster_done", load_stats, cluster_stats))
+        except Exception as e:
+            self.msg_queue.put(("cluster_error", str(e)))
+
+    def _on_cluster_done(self, load_stats: LoadStats, cluster_stats: ClusterStats) -> None:
+        self.cluster_btn.configure(state="normal")
+        self.cluster_status_label.configure(text="Done")
+        lines = [
+            f"Loaded from faces.jsonl: {load_stats.inserted:,} new, {load_stats.skipped_duplicate:,} already loaded"
+            + (f", {load_stats.skipped_bad_line:,} skipped (bad line)" if load_stats.skipped_bad_line else ""),
+            "",
+            f"Candidates considered: {cluster_stats.candidates:,}"
+            + (f"  ({cluster_stats.excluded_low_confidence:,} excluded, low confidence)" if cluster_stats.excluded_low_confidence else ""),
+            f"Matched to an existing person: {cluster_stats.matched_existing:,}",
+            f"New people formed: {cluster_stats.new_clusters_formed:,}  ({cluster_stats.faces_in_new_clusters:,} face(s))",
+            f"Still unclustered: {cluster_stats.remained_unclustered:,}",
+            f"Total people in library: {cluster_stats.people_total:,}",
+        ]
+        self._set_cluster_results_text("\n".join(lines))
+        # Refresh an already-open Face Labeling window so newly-clustered
+        # faces show up immediately, rather than only on its next manual
+        # Refresh click.
+        if self.face_labeling_window is not None and self.face_labeling_window.winfo_exists():
+            self.face_labeling_window.reload()
+
+    def _on_cluster_error(self, err: str) -> None:
+        self.cluster_btn.configure(state="normal")
+        self.cluster_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"Face clustering failed: {err}")
+
+    def _set_cluster_results_text(self, text: str) -> None:
+        self.cluster_results_text.configure(state="normal")
+        self.cluster_results_text.delete("1.0", "end")
+        self.cluster_results_text.insert("1.0", text)
+        self.cluster_results_text.configure(state="disabled")
+
+    def _start_cluster_log_tail(self, log_path: Path) -> None:
+        self._cluster_log_path = log_path
+        self._cluster_log_read_pos = 0
+        self.cluster_log_text.configure(state="normal")
+        self.cluster_log_text.delete("1.0", "end")
+        self.cluster_log_text.configure(state="disabled")
+        self._append_new_cluster_log_lines()
+
+    def _append_new_cluster_log_lines(self) -> None:
+        if self._cluster_log_path is None or not self._cluster_log_path.exists():
+            return
+        try:
+            with open(self._cluster_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._cluster_log_read_pos)
+                new_text = f.read()
+                self._cluster_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.cluster_log_text.configure(state="normal")
+        self.cluster_log_text.insert("end", new_text)
+        self.cluster_log_text.see("end")
+        self.cluster_log_text.configure(state="disabled")
+
+    def _on_open_face_labeling(self) -> None:
+        if self.cfg is None:
+            return
+        if self.face_labeling_window is not None and self.face_labeling_window.winfo_exists():
+            self.face_labeling_window.lift()
+            self.face_labeling_window.focus_force()
+            return
+        self.face_labeling_window = FaceLabelingWindow(self.root, self.cfg)
 
     # ------------------------------------------------- Date Cluster Audit
     def _set_date_audit_results_text(self, text: str) -> None:
@@ -2581,6 +2788,10 @@ class DashboardApp:
             self._append_new_date_audit_log_lines()  # Date-audit Apply Fix's own view, same reasoning
         except Exception:
             pass
+        try:
+            self._append_new_cluster_log_lines()  # Face clustering's own view, same reasoning
+        except Exception:
+            pass
         self.root.after(500, self._tail_tick)
 
     # ------------------------------------------------------------- close
@@ -2620,6 +2831,305 @@ class DashboardApp:
         self.log_text.insert("end", new_text)
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+
+class FaceLabelingWindow(tk.Toplevel):
+    """Phase 3 Session 2's interactive labeling UI (photo-organizer-spec.md's
+    Phase 3 section, user's explicit choice to live here rather than in
+    review_tool.py) -- genuinely different from every batch-job panel above
+    (no progress bar/log tail, no worker thread): browse clusters, view
+    cropped face thumbnails, assign a name to a whole group, merge two
+    groups, or split/move individual faces. Opens its OWN read/write DB
+    connection for its lifetime (closed in _on_close) -- separate from every
+    background worker's own short-lived connection, and separate from the
+    dashboard's other panels, none of which hold a DB connection open.
+
+    Not modal: the rest of the dashboard (including starting another
+    clustering run) stays fully usable while this is open. If a clustering
+    run finishes while this window is open, DashboardApp._on_cluster_done
+    calls .reload() on it so newly-grouped faces show up without the user
+    needing to close/reopen this window themselves.
+
+    Selection model: self._selected_index indexes into self._clusters (the
+    list list_clusters() returns), NOT cluster_id directly -- the
+    "(Unclustered)" pseudo-group also has cluster_id=None, so tracking by
+    list index is what actually distinguishes "nothing selected yet" (index
+    is None) from "the Unclustered group is selected" (a real index whose
+    ClusterSummary.cluster_id happens to be None).
+    """
+
+    THUMB_SIZE = 110
+    THUMB_COLS = 6
+
+    def __init__(self, master: tk.Misc, cfg: Config):
+        super().__init__(master)
+        self.title("Face Labeling")
+        self.geometry("960x620")
+        self.minsize(700, 450)
+        self.cfg = cfg
+        # rule 12: every entry point that opens the DB calls this first --
+        # this window can be opened without ever having run the Face
+        # Clustering panel's Start button first (whose own worker thread
+        # would otherwise be the only thing guaranteeing a migrated schema),
+        # so it must not assume that already happened.
+        init_db(cfg.db_path_abs)
+        self.conn = connect(cfg.db_path_abs)
+
+        self._clusters: list = []  # list[ClusterSummary]
+        self._selected_index: int | None = None
+        self._current_faces: list = []  # list[FaceRecord]
+        self._selected_face_ids: set[int] = set()
+        self._face_check_vars: dict[int, tk.BooleanVar] = {}
+        self._merge_target_ids: list[int] = []
+        # Must keep a live Python reference to every ImageTk.PhotoImage --
+        # Tk itself only holds a C-level handle and the image silently goes
+        # blank the moment Python garbage-collects its last reference.
+        self._photo_refs: list[ImageTk.PhotoImage] = []
+
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.reload()
+
+    def _build_ui(self) -> None:
+        paned = ttk.PanedWindow(self, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        left = ttk.Frame(paned)
+        paned.add(left, weight=1)
+        ttk.Label(left, text="People / groups:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=6, pady=(6, 0))
+        list_row = ttk.Frame(left)
+        list_row.pack(fill="both", expand=True, padx=6, pady=6)
+        self.cluster_listbox = tk.Listbox(list_row, exportselection=False)
+        self.cluster_listbox.pack(side="left", fill="both", expand=True)
+        cl_scroll = ttk.Scrollbar(list_row, orient="vertical", command=self.cluster_listbox.yview)
+        cl_scroll.pack(side="right", fill="y")
+        self.cluster_listbox.configure(yscrollcommand=cl_scroll.set)
+        self.cluster_listbox.bind("<<ListboxSelect>>", self._on_cluster_selected)
+        ttk.Button(left, text="Refresh", command=self.reload).pack(fill="x", padx=6, pady=(0, 6))
+
+        right = ttk.Frame(paned)
+        paned.add(right, weight=3)
+
+        header = ttk.Frame(right)
+        header.pack(fill="x", padx=6, pady=6)
+        ttk.Label(header, text="Name:").pack(side="left")
+        self.name_var = tk.StringVar()
+        ttk.Entry(header, textvariable=self.name_var, width=30).pack(side="left", padx=(6, 6))
+        ttk.Button(header, text="Save Name", command=self._on_save_name).pack(side="left")
+
+        thumb_outer = ttk.Frame(right)
+        thumb_outer.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.thumb_canvas = tk.Canvas(thumb_outer, highlightthickness=0)
+        thumb_scroll = ttk.Scrollbar(thumb_outer, orient="vertical", command=self.thumb_canvas.yview)
+        self.thumb_canvas.configure(yscrollcommand=thumb_scroll.set)
+        self.thumb_canvas.pack(side="left", fill="both", expand=True)
+        thumb_scroll.pack(side="right", fill="y")
+        self.thumb_frame = ttk.Frame(self.thumb_canvas)
+        thumb_window_id = self.thumb_canvas.create_window((0, 0), window=self.thumb_frame, anchor="nw")
+        self.thumb_frame.bind(
+            "<Configure>", lambda e: self.thumb_canvas.configure(scrollregion=self.thumb_canvas.bbox("all"))
+        )
+        self.thumb_canvas.bind(
+            "<Configure>", lambda e: self.thumb_canvas.itemconfigure(thumb_window_id, width=e.width)
+        )
+        self.thumb_canvas.bind(
+            "<MouseWheel>", lambda e: self.thumb_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        )
+
+        action_bar1 = ttk.Frame(right)
+        action_bar1.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Button(action_bar1, text="Select All", command=self._on_select_all).pack(side="left")
+        ttk.Button(action_bar1, text="Clear Selection", command=self._on_clear_selection).pack(side="left", padx=(6, 0))
+        self.selection_count_label = ttk.Label(action_bar1, text="0 selected")
+        self.selection_count_label.pack(side="left", padx=(10, 0))
+        ttk.Button(action_bar1, text="Split Selected Into New Person...", command=self._on_split).pack(
+            side="right"
+        )
+
+        action_bar2 = ttk.Frame(right)
+        action_bar2.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(action_bar2, text="Target person:").pack(side="left")
+        self.target_var = tk.StringVar()
+        self.target_combo = ttk.Combobox(action_bar2, textvariable=self.target_var, state="readonly", width=32)
+        self.target_combo.pack(side="left", padx=(6, 6))
+        ttk.Button(action_bar2, text="Move Selected Faces Here", command=self._on_move).pack(side="left")
+        ttk.Button(action_bar2, text="Merge This Whole Group Here", command=self._on_merge).pack(
+            side="left", padx=(6, 0)
+        )
+
+    # ---------------------------------------------------------------- data
+    def reload(self) -> None:
+        prev_cluster_id = (
+            self._clusters[self._selected_index].cluster_id
+            if self._selected_index is not None and self._selected_index < len(self._clusters)
+            else "___none_selected_yet___"
+        )
+        self._clusters = list_clusters(self.conn)
+        self.cluster_listbox.delete(0, "end")
+        for c in self._clusters:
+            label = f"{c.assigned_name or '(unnamed)'} — {c.face_count} face(s)"
+            self.cluster_listbox.insert("end", label)
+
+        self._selected_index = None
+        for i, c in enumerate(self._clusters):
+            if c.cluster_id == prev_cluster_id:
+                self._selected_index = i
+                self.cluster_listbox.selection_set(i)
+                break
+        self._load_selected_cluster()
+
+    def _on_cluster_selected(self, event=None) -> None:
+        sel = self.cluster_listbox.curselection()
+        self._selected_index = sel[0] if sel else None
+        self._load_selected_cluster()
+
+    def _load_selected_cluster(self) -> None:
+        for widget in self.thumb_frame.winfo_children():
+            widget.destroy()
+        self._photo_refs.clear()
+        self._face_check_vars.clear()
+        self._selected_face_ids.clear()
+        self._update_selection_count()
+
+        idx = self._selected_index
+        if idx is None or idx >= len(self._clusters):
+            self._current_faces = []
+            self.name_var.set("")
+            self.target_combo["values"] = []
+            self._merge_target_ids = []
+            return
+
+        summary = self._clusters[idx]
+        self.name_var.set(summary.assigned_name or "" if summary.cluster_id is not None else "")
+        self._current_faces = list_faces_in_cluster(self.conn, summary.cluster_id)
+
+        targets = list_people_for_merge_target(self.conn, exclude_cluster_id=summary.cluster_id)
+        self._merge_target_ids = [t[0] for t in targets]
+        self.target_combo["values"] = [t[1] for t in targets]
+        if targets:
+            self.target_combo.current(0)
+
+        for i, face in enumerate(self._current_faces):
+            try:
+                crop = crop_face_thumbnail(face.current_path, face.bbox, size=self.THUMB_SIZE)
+            except Exception:
+                # Photo missing/moved/corrupt since detection -- show a
+                # plain gray placeholder rather than letting one bad file
+                # break the whole grid.
+                crop = Image.new("RGB", (self.THUMB_SIZE, self.THUMB_SIZE), (160, 160, 160))
+            photo = ImageTk.PhotoImage(crop)
+            self._photo_refs.append(photo)
+            var = tk.BooleanVar(value=False)
+            self._face_check_vars[face.face_id] = var
+            cb = tk.Checkbutton(
+                self.thumb_frame, image=photo, variable=var, indicatoron=False,
+                selectcolor="#8fc7ff", borderwidth=2,
+                command=lambda fid=face.face_id, v=var: self._on_face_toggle(fid, v),
+            )
+            cb.grid(row=i // self.THUMB_COLS, column=i % self.THUMB_COLS, padx=3, pady=3)
+
+    # ------------------------------------------------------------- actions
+    def _update_selection_count(self) -> None:
+        self.selection_count_label.configure(text=f"{len(self._selected_face_ids)} selected")
+
+    def _on_face_toggle(self, face_id: int, var: tk.BooleanVar) -> None:
+        if var.get():
+            self._selected_face_ids.add(face_id)
+        else:
+            self._selected_face_ids.discard(face_id)
+        self._update_selection_count()
+
+    def _on_select_all(self) -> None:
+        for fid, var in self._face_check_vars.items():
+            var.set(True)
+            self._selected_face_ids.add(fid)
+        self._update_selection_count()
+
+    def _on_clear_selection(self) -> None:
+        for var in self._face_check_vars.values():
+            var.set(False)
+        self._selected_face_ids.clear()
+        self._update_selection_count()
+
+    def _current_summary(self):
+        if self._selected_index is None or self._selected_index >= len(self._clusters):
+            return None
+        return self._clusters[self._selected_index]
+
+    def _on_save_name(self) -> None:
+        summary = self._current_summary()
+        if summary is None:
+            return
+        if summary.cluster_id is None:
+            messagebox.showerror(
+                "Face Labeling",
+                'Can\'t name the "(Unclustered)" group directly -- select some of its faces and use '
+                '"Split Selected Into New Person..." to create a real, nameable person first.',
+            )
+            return
+        name = self.name_var.get().strip() or None
+        set_person_name(self.conn, summary.cluster_id, name, summary.notes)
+        self.reload()
+
+    def _on_split(self) -> None:
+        if not self._selected_face_ids:
+            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            return
+        from tkinter import simpledialog
+        name = simpledialog.askstring(
+            "New Person", "Name for the new person (optional -- you can name it later):", parent=self
+        )
+        # askstring returns None on Cancel -- an empty string (user cleared
+        # the field but clicked OK) is a valid "leave unnamed for now".
+        if name is None:
+            return
+        new_cid = create_person_from_faces(self.conn, sorted(self._selected_face_ids), name=(name.strip() or None))
+        messagebox.showinfo(
+            "Face Labeling", f"Created a new person (cluster {new_cid}) with {len(self._selected_face_ids)} face(s)."
+        )
+        self.reload()
+
+    def _on_move(self) -> None:
+        if not self._selected_face_ids:
+            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            return
+        sel = self.target_combo.current()
+        if sel < 0 or sel >= len(self._merge_target_ids):
+            messagebox.showinfo("Face Labeling", "Choose a target person first.")
+            return
+        dest_cid = self._merge_target_ids[sel]
+        move_faces_to_person(self.conn, sorted(self._selected_face_ids), dest_cid)
+        self.reload()
+
+    def _on_merge(self) -> None:
+        summary = self._current_summary()
+        if summary is None:
+            return
+        if summary.cluster_id is None:
+            messagebox.showerror(
+                "Face Labeling",
+                'Can\'t merge the "(Unclustered)" group as a whole -- select individual faces and use '
+                '"Move Selected Faces Here" instead.',
+            )
+            return
+        sel = self.target_combo.current()
+        if sel < 0 or sel >= len(self._merge_target_ids):
+            messagebox.showinfo("Face Labeling", "Choose a target person first.")
+            return
+        target_cid = self._merge_target_ids[sel]
+        if not messagebox.askyesno(
+            "Face Labeling",
+            f"Merge this whole group ({summary.face_count} face(s)) into the selected person?\n\n"
+            "Every face currently in this group moves to the target person, and this group's own "
+            "entry is removed.",
+        ):
+            return
+        merge_people(self.conn, keep_cluster_id=target_cid, other_cluster_id=summary.cluster_id)
+        self.reload()
+
+    def _on_close(self) -> None:
+        self.conn.close()
+        self.destroy()
 
 
 def main() -> None:

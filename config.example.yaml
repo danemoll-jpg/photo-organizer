@@ -147,3 +147,29 @@ cloudflare_tunnel_name: "photo-viewer"
 # grid tile (photos' own grid thumbs are requested at ?max=400).
 thumbnail_dir: "data/thumbnails"
 thumbnail_max_dimension: 480
+
+# --- Phase 3 Session 1: face detection + embedding (src/face_detection.py,
+# CLI: `main.py detect-faces`) --- (note: these three were never actually
+# added to this example file during Session 1 itself -- added here as part
+# of Session 2, alongside the new clustering keys below, so this file
+# documents every face_*/faces_* key the code actually reads)
+faces_path: "data/faces.jsonl"
+faces_scanned_path: "data/faces_scanned.jsonl"
+face_model_pack: "buffalo_l"
+
+# --- Phase 3 Session 2: face clustering (src/face_clustering.py, CLI:
+# `main.py cluster-faces`) --- Judgment-call defaults, not yet tuned
+# against labeled ground truth (this library has none) -- retune after
+# reviewing real cluster quality in the dashboard's Face Labeling window.
+# face_min_det_score: a face below this RetinaFace confidence never gets
+#   clustered (stays in the "Unclustered" bucket for manual handling).
+# face_cluster_similarity_threshold: cosine similarity above which two
+#   ArcFace embeddings count as the same person -- used both to match a new
+#   face against an existing person's centroid and as DBSCAN's neighbor
+#   radius when forming brand new clusters.
+# face_cluster_min_samples: DBSCAN's min_samples -- a person seen in only 1
+#   photo won't form a cluster alone until a 2nd matching face appears (or
+#   the user manually creates a person from it in the labeling UI).
+face_min_det_score: 0.5
+face_cluster_similarity_threshold: 0.45
+face_cluster_min_samples: 2

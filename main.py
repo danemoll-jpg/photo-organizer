@@ -15,6 +15,7 @@
     venv\\Scripts\\python main.py extract-thumbnails --limit <folder prefix>  # just one folder first
     venv\\Scripts\\python main.py detect-faces                # Phase 3 Session 1: face detection + embeddings -> data/faces.jsonl
     venv\\Scripts\\python main.py detect-faces --limit <folder prefix>  # just one folder first (benchmark before a full run)
+    venv\\Scripts\\python main.py cluster-faces               # Phase 3 Session 2: load faces.jsonl + cluster into people (name/merge/split via the dashboard's Face Labeling window)
     venv\\Scripts\\python main.py review-user add <username>    # Phase 2d: add/update a review_tool.py login
     venv\\Scripts\\python main.py review-user list              # list configured usernames
     venv\\Scripts\\python main.py review-user remove <username> # revoke a login
@@ -49,6 +50,7 @@ from src.date_audit import (
     inspect_cluster,
 )
 from src.db import connect, init_db
+from src.face_clustering import cluster_faces_full
 from src.face_detection import run_face_detection
 from src.gps_backfill import run_gps_extraction
 from src.load_captions import load_captions
@@ -263,6 +265,47 @@ def cmd_detect_faces(args) -> None:
     print(stats.summary())
     print(f"\nFaces (one line per detected face): {cfg.faces_path_abs}")
     print(f"Scanned checkpoint (one line per photo): {cfg.faces_scanned_path_abs}")
+
+
+def cmd_cluster_faces(args) -> None:
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
+    logger.info(
+        f"Starting Phase 3 Session 2 face clustering run — "
+        f"similarity_threshold={cfg.face_cluster_similarity_threshold} min_samples={cfg.face_cluster_min_samples} "
+        f"min_det_score={cfg.face_min_det_score}"
+    )
+    init_db(cfg.db_path_abs, logger=logger)  # rule 12: every entry point that opens the DB calls this first
+
+    pbar: tqdm | None = None
+
+    def _progress_cb(done: int, total: int) -> None:
+        nonlocal pbar
+        if total == 0:
+            return
+        if pbar is None:
+            pbar = tqdm(total=total, desc="Face clustering", unit="face")
+        pbar.n = done
+        pbar.refresh()
+
+    conn = connect(cfg.db_path_abs)
+    try:
+        load_stats, cluster_stats = cluster_faces_full(
+            cfg, conn, logger, cfg.faces_path_abs, progress_cb=_progress_cb
+        )
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Load Summary ---")
+    print(load_stats.summary())
+    print("\n--- Clustering Summary ---")
+    print(cluster_stats.summary())
+    print(
+        "\nUse the dashboard's Face Labeling window to name/merge/split clusters "
+        "(main.py has no CLI equivalent for that — it's inherently interactive)."
+    )
 
 
 def cmd_review_user_add(args) -> None:
@@ -579,6 +622,12 @@ def main() -> None:
     faces_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
                                help="Only process photos whose current_path starts with this prefix (try a small folder first / benchmark)")
     faces_parser.set_defaults(func=cmd_detect_faces)
+
+    cluster_parser = sub.add_parser(
+        "cluster-faces",
+        help="Phase 3 Session 2: load data/faces.jsonl into the DB and cluster embeddings into people (faiss+DBSCAN)",
+    )
+    cluster_parser.set_defaults(func=cmd_cluster_faces)
 
     audit_parser = sub.add_parser(
         "audit-dates", help="Detect + fix batch-date artifacts (a whole folder landing on one wrong date)"

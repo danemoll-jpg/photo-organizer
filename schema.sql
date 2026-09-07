@@ -119,7 +119,10 @@ CREATE TABLE IF NOT EXISTS photo_tags (
     PRIMARY KEY (file_hash, tag_id)
 );
 
--- Phase 3: one row per detected face.
+-- Phase 3: one row per detected face. Loaded from data/faces.jsonl by
+-- src/face_clustering.py::load_faces_from_jsonl (main.py cluster-faces /
+-- the dashboard's Face Clustering panel) -- face_detection.py (Session 1)
+-- itself never writes here, only to that JSONL file.
 CREATE TABLE IF NOT EXISTS faces (
     face_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     file_hash      TEXT NOT NULL REFERENCES photos(file_hash) ON DELETE CASCADE,
@@ -127,20 +130,38 @@ CREATE TABLE IF NOT EXISTS faces (
     bbox_y          INTEGER NOT NULL,
     bbox_w          INTEGER NOT NULL,
     bbox_h          INTEGER NOT NULL,
-    embedding        BLOB NOT NULL,                                    -- serialized float vector
-    cluster_id        INTEGER,                                           -- NULL until clustering runs; FK-ish to people.cluster_id
+    embedding        BLOB NOT NULL,                                    -- 512-dim ArcFace vector, float32.tobytes() (see src/face_clustering.py::vec_to_blob/blob_to_vec)
+    det_score         REAL,                                              -- RetinaFace detection confidence (0-1), NULL for a pre-Session-2-schema row loaded without it
+    cluster_id        INTEGER REFERENCES people(cluster_id) ON DELETE SET NULL, -- NULL until clustered (or permanently unclustered -- see face_min_det_score/min_samples)
     detected_at        TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_faces_file_hash ON faces(file_hash);
 CREATE INDEX IF NOT EXISTS idx_faces_cluster ON faces(cluster_id);
+-- Idempotent load key: one row per actual detected face. A face's bbox is
+-- deterministic for a given (unchanged) photo, so (file_hash, bbox_*) is a
+-- stable natural key -- load_faces_from_jsonl uses INSERT OR IGNORE against
+-- this so re-running `cluster-faces` after face_detection.py appends more
+-- lines to faces.jsonl (e.g. a resumed Session-1 run) never double-inserts
+-- an already-loaded face.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_faces_unique_detection
+    ON faces(file_hash, bbox_x, bbox_y, bbox_w, bbox_h);
 
 -- Phase 3: human-assigned identity per cluster, separate from face detection
 -- output so relabeling/merging/splitting never requires re-running detection.
+-- cluster_id is a STABLE person identity, not a raw re-clustering-run label
+-- -- see src/face_clustering.py's module docstring for the full re-cluster-
+-- without-destroying-names design (representative_embedding is the key to
+-- that: a running centroid a future clustering run matches new faces
+-- against, so an existing person's cluster_id/assigned_name is reused
+-- rather than a fresh cluster_id being minted and orphaning the old name).
 CREATE TABLE IF NOT EXISTS people (
-    cluster_id       INTEGER PRIMARY KEY,
-    assigned_name     TEXT,
-    notes              TEXT
+    cluster_id             INTEGER PRIMARY KEY,
+    assigned_name           TEXT,
+    notes                    TEXT,
+    representative_embedding BLOB,                 -- running mean of every currently-assigned face's embedding, L2-renormalized (float32.tobytes())
+    face_count               INTEGER NOT NULL DEFAULT 0,  -- denormalized count of faces.cluster_id = this row's cluster_id -- kept in sync by every mutating operation in src/face_clustering.py, never trust it blindly elsewhere without re-deriving if that invariant is ever in doubt
+    updated_at                TEXT                  -- ISO 8601, last time membership/centroid changed (name-only edits don't bump this)
 );
 
 -- Phase 2f: manual-edit audit trail for review_tool.py's new edit endpoints.

@@ -588,6 +588,100 @@ purely additive JSONL, matching Phase 2's captions.jsonl — nothing here
 touches the database at all (read-only against `photos`, same shape as
 `thumbnail_backfill.py`).
 
+## Phase 3 Session 2 — face clustering + labeling
+
+Loads `data/faces.jsonl` (Session 1's output) into the DB's `faces`/`people`
+tables (both have existed since Phase 0, empty until now) and groups faces
+by person via cosine similarity — `faiss` (exact inner-product neighbor
+search over L2-normalized embeddings) feeding a sparse-graph `scikit-learn`
+`DBSCAN`. Pure numerical work, no `insightface`/GPU involved — both
+libraries have official `cp314-win_amd64`/`py3-none-any` wheels (verified
+against PyPI's current listing before adding, same caution as `insightface`
+needed in Session 1), so this installs into the same primary venv with a
+plain `pip install -r requirements.txt`, no extra step.
+
+```bash
+venv\Scripts\python main.py cluster-faces
+```
+
+**Usage — dashboard:** open **"Phase 3 Session 2 — Face Clustering +
+Labeling"** (collapsed by default, placed after Face Detection) and click
+**Start Face Clustering** — same underlying function as the CLI
+(`cluster_faces_full()`), own progress bar/results box/live log tail. No
+Cancel button here, unlike every other batch panel — a deliberate
+difference: clustering is a fast in-memory numerical pass (a few seconds
+even at this session's real 767-face sample), not a slow per-file loop with
+GPU/network calls, so there's no realistic long-running job to interrupt.
+
+**Re-clustering is safe to run again later**, e.g. after a further Session-1
+run detects faces in newly-organized photos — this is the actual
+correctness requirement the design center on (see
+`src/face_clustering.py`'s module docstring for the full reasoning):
+
+- `people.cluster_id` is a **stable person identity**, never reused or
+  renumbered — once a face is assigned a cluster_id, clustering itself never
+  reassigns it again. Only faces with `cluster_id IS NULL` are ever
+  considered on a re-run.
+- Each person keeps a `representative_embedding` (a running centroid,
+  recomputed exactly from whichever faces are currently assigned — never an
+  approximation that can drift). Every not-yet-clustered face is compared
+  against every existing person's centroid FIRST; a match above
+  `face_cluster_similarity_threshold` folds the new face into that existing
+  person (so a new photo of someone already named gets added to their
+  group, not a disconnected duplicate). Only genuinely unmatched faces get
+  DBSCAN'd among themselves to discover brand new people.
+- Net effect: any name you've assigned, or any merge/split you've done in
+  the labeling UI below, can never be silently undone by running clustering
+  again — it's a pure increment, not a from-scratch re-cluster.
+- A person seen in only one photo won't form a cluster by itself under the
+  default `face_cluster_min_samples=2` — it stays in an "(Unclustered)"
+  bucket, browsable and manually assignable in the labeling UI, not hidden.
+
+**Tuning** (`config.yaml`, judgment-call defaults — not tuned against
+labeled ground truth, since this library has none; retune after reviewing
+real cluster quality): `face_min_det_score` (0.5 — a face below this
+RetinaFace confidence is never clustered), `face_cluster_similarity_threshold`
+(0.45 — cosine similarity floor for "same person," used both for the
+centroid match and as DBSCAN's neighbor radius), `face_cluster_min_samples`
+(2 — DBSCAN's min group size to form a brand-new person). On this session's
+real 767-face sample, 0.45 formed some quite large groups (up to ~300
+faces) — a known DBSCAN "chaining" behavior (density-connectivity is
+transitive, not a strict clique), not a bug; split an over-merged group by
+hand in the labeling UI, or lower the threshold in config.yaml and re-run
+(re-running only ever affects still-unclustered faces, so tightening the
+threshold after the fact won't un-merge an already-formed group — split it
+manually instead).
+
+**Face Labeling window** (dashboard button, next to Start Face Clustering) —
+a dedicated `Toplevel`, not another progress-bar panel, since browsing/
+labeling is a genuinely different, interactive task:
+
+- Left: every person (largest group first) plus an "(Unclustered)" bucket
+  at the bottom for faces that haven't matched or grouped with anyone yet.
+- Right: cropped face thumbnails for the selected group (click to
+  select/deselect one or more), a Name field + Save, and a target-person
+  picker used by both **Move Selected Faces Here** (move just the checked
+  faces to an existing person) and **Merge This Whole Group Here** (fold
+  the entire selected group into another person, e.g. when the same person
+  ended up in two separate groups). **Split Selected Into New Person...**
+  creates a brand-new person from just the checked faces (with an optional
+  name prompt) — the fix for the opposite problem, two different people
+  merged into one group.
+- Thumbnails are cropped from the original photo file at request time (not
+  cached), with a real EXIF-orientation subtlety: `face_detection.py`'s
+  bbox was computed against the RAW, un-rotated pixel array (same
+  coordinate frame `insightface` itself needs), so `crop_face_thumbnail()`
+  crops FIRST in that same raw frame, then applies `exif_transpose()` to
+  just the resulting small crop so the face displays right-side-up —
+  applying the rotation to the full image before cropping would have moved
+  the bbox coordinates out from under the actual face entirely.
+- Not modal — the rest of the dashboard stays usable while it's open, and
+  finishing a clustering run while it's open refreshes it automatically.
+
+**Explicitly not built this session** (see TODO.md): any face/people data
+surfaced in `review_tool.py` — Phase 2c's people/faces filter placeholder
+stays inert until a future session wires it up to this real data.
+
 ## Viewing the database
 
 `data/photo_organizer.db` is a plain SQLite file — no server, no login.

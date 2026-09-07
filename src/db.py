@@ -79,6 +79,35 @@ def _migrate(conn: sqlite3.Connection, logger: logging.Logger) -> None:
             conn.execute(f"ALTER TABLE photos ADD COLUMN {col} {ddl}")
     conn.commit()
 
+    # Phase 3 Session 2: faces/people existed since Phase 0 (empty until
+    # now), but without det_score (faces) or representative_embedding/
+    # face_count/updated_at (people) -- schema.sql's CREATE TABLE IF NOT
+    # EXISTS never touches an already-existing table's columns, same reason
+    # every other ALTER TABLE in this function exists. No backfill needed
+    # for any of these: a pre-existing faces row has no det_score to
+    # recover (NULL is correctly "unknown", not "zero confidence" --
+    # src/face_clustering.py's det_score filter treats NULL as passing, not
+    # failing, the same "don't guess a value you don't have" reasoning as
+    # file_mtime's NULL-means-fall-back-to-full-check above), and a
+    # pre-existing people row (there are none in real installs yet -- this
+    # table has never been written to before this session) would get
+    # face_count backfilled to 0 by the DEFAULT, which is only wrong if
+    # faces were already clustered before this column existed, which is
+    # impossible since the clustering code that populates cluster_id is
+    # introduced in this same session.
+    face_cols = {row[1] for row in conn.execute("PRAGMA table_info(faces)")}
+    if "det_score" not in face_cols:
+        conn.execute("ALTER TABLE faces ADD COLUMN det_score REAL")
+    people_cols = {row[1] for row in conn.execute("PRAGMA table_info(people)")}
+    for col, ddl in (
+        ("representative_embedding", "BLOB"),
+        ("face_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("updated_at", "TEXT"),
+    ):
+        if col not in people_cols:
+            conn.execute(f"ALTER TABLE people ADD COLUMN {col} {ddl}")
+    conn.commit()
+
 
 def _backfill_file_mtime(conn: sqlite3.Connection, logger: logging.Logger) -> None:
     """One-time backfill for rows recorded before file_mtime existed.
