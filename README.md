@@ -720,6 +720,18 @@ labeling is a genuinely different, interactive task:
   current page — the intended way to select an oversized group's entire
   membership (e.g. to reset it via "Remove Selected from Cluster," see
   "Tuning" above) without paging through it by hand.
+- **"Select This Page"** (added right after pagination, same follow-up
+  session) selects exactly the faces on the current page, replacing any
+  prior selection — the safer counterpart to Select All when you're
+  naming/confirming people rather than resetting a bogus cluster: for a
+  large "(Unclustered)" or leftover-chained group, review one page (200
+  faces) at a time, click "Select This Page," uncheck any obvious outlier,
+  then **Split Selected Into New Person...** (first trusted page) or
+  **Move Selected Faces Here** (an already-created person from an earlier
+  page). The assigned faces leave the group, so the *next* unassigned
+  chunk becomes page 1 the moment the window reloads — repeat page by
+  page rather than ever having to vouch for hundreds or thousands of
+  unseen faces at once.
 
 ### Phase 3c — filtering junk clusters and marking false detections
 

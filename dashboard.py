@@ -3278,7 +3278,18 @@ class FaceLabelingWindow(tk.Toplevel):
 
         action_bar1 = ttk.Frame(right)
         action_bar1.pack(fill="x", padx=6, pady=(0, 4))
-        ttk.Button(action_bar1, text="Select All", command=self._on_select_all).pack(side="left")
+        # URGENT fix follow-up, same session: for an oversized cluster (the
+        # exact scenario the pagination fix above was built for), Select
+        # All selects the WHOLE group -- correct for resetting a confirmed-
+        # bogus cluster, but the wrong tool for confirming/naming people,
+        # since it forces trusting hundreds or thousands of unseen faces are
+        # the same person before assigning a name. "Select This Page" is the
+        # narrower, safer counterpart: review one manageable page (e.g. 200
+        # faces) at a time, select just that page, then Split/Move it to a
+        # person -- repeat page by page, only ever vouching for faces you've
+        # actually looked at. See _on_select_page()'s docstring.
+        ttk.Button(action_bar1, text="Select This Page", command=self._on_select_page).pack(side="left")
+        ttk.Button(action_bar1, text="Select All", command=self._on_select_all).pack(side="left", padx=(6, 0))
         ttk.Button(action_bar1, text="Clear Selection", command=self._on_clear_selection).pack(side="left", padx=(6, 0))
         self.selection_count_label = ttk.Label(action_bar1, text="0 selected")
         self.selection_count_label.pack(side="left", padx=(10, 0))
@@ -3523,6 +3534,25 @@ class FaceLabelingWindow(tk.Toplevel):
             self._selected_face_ids.add(face_id)
         else:
             self._selected_face_ids.discard(face_id)
+        self._update_selection_count()
+
+    def _on_select_page(self) -> None:
+        """Selects EXACTLY the faces on the currently-rendered page,
+        replacing any prior selection -- the way to review and assign one
+        trusted, manageable chunk of an oversized cluster (e.g. the current
+        FACES_PER_PAGE=200) without first vouching for the whole group,
+        which might be tens of thousands of faces spanning many different
+        people (see the "real 61,676/17,764-face chained cluster" writeup
+        in CLAUDE.md/TODO.md). Workflow: page through a big "(Unclustered)"-
+        style group, and on each page that clearly looks like one person,
+        click this, uncheck any obvious outlier, then "Split Selected Into
+        New Person..." (first page) or "Move Selected Faces Here" (an
+        already-created person from an earlier page) -- the assigned faces
+        leave this cluster, so the NEXT unassigned chunk becomes page 1
+        after the window's automatic reload(), ready to repeat."""
+        self._selected_face_ids = set(self._face_check_vars.keys())
+        for var in self._face_check_vars.values():
+            var.set(True)
         self._update_selection_count()
 
     def _on_select_all(self) -> None:
