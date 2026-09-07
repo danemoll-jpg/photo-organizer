@@ -13,6 +13,8 @@
     venv\\Scripts\\python main.py extract-gps --limit <folder prefix>  # just one folder first
     venv\\Scripts\\python main.py extract-thumbnails                # Phase 2g: cache a real first-frame thumbnail per video
     venv\\Scripts\\python main.py extract-thumbnails --limit <folder prefix>  # just one folder first
+    venv\\Scripts\\python main.py detect-faces                # Phase 3 Session 1: face detection + embeddings -> data/faces.jsonl
+    venv\\Scripts\\python main.py detect-faces --limit <folder prefix>  # just one folder first (benchmark before a full run)
     venv\\Scripts\\python main.py review-user add <username>    # Phase 2d: add/update a review_tool.py login
     venv\\Scripts\\python main.py review-user list              # list configured usernames
     venv\\Scripts\\python main.py review-user remove <username> # revoke a login
@@ -47,6 +49,7 @@ from src.date_audit import (
     inspect_cluster,
 )
 from src.db import connect, init_db
+from src.face_detection import run_face_detection
 from src.gps_backfill import run_gps_extraction
 from src.load_captions import load_captions
 from src.logging_setup import setup_logging
@@ -228,6 +231,38 @@ def cmd_extract_thumbnails(args) -> None:
     print("\n--- Summary ---")
     print(stats.summary())
     print(f"\nCached to: {cfg.thumbnail_dir_abs}")
+
+
+def cmd_detect_faces(args) -> None:
+    cfg = load_config()
+    logger, _log_path = setup_logging(cfg.log_dir_abs)
+    logger.info(f"Starting Phase 3 Session 1 face detection run — model_pack={cfg.face_model_pack} gpu_enabled={cfg.gpu_enabled}")
+    init_db(cfg.db_path_abs, logger=logger)  # rule 12: every entry point that opens the DB calls this first, read-only or not
+
+    pbar: tqdm | None = None
+
+    def _progress_cb(done: int, total: int) -> None:
+        nonlocal pbar
+        if pbar is None:
+            pbar = tqdm(total=total, desc="Face detection", unit="photo")
+        pbar.n = done
+        pbar.refresh()
+
+    conn = connect(cfg.db_path_abs)
+    try:
+        stats = run_face_detection(
+            cfg, conn, logger, cfg.faces_path_abs, cfg.faces_scanned_path_abs,
+            progress_cb=_progress_cb, folder_prefix=args.limit,
+        )
+    finally:
+        conn.close()
+        if pbar is not None:
+            pbar.close()
+
+    print("\n--- Summary ---")
+    print(stats.summary())
+    print(f"\nFaces (one line per detected face): {cfg.faces_path_abs}")
+    print(f"Scanned checkpoint (one line per photo): {cfg.faces_scanned_path_abs}")
 
 
 def cmd_review_user_add(args) -> None:
@@ -506,7 +541,7 @@ def cmd_load_captions(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2/2b")
+    parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2/2b/3")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-db", help="Create the SQLite database and schema").set_defaults(func=cmd_init_db)
@@ -537,6 +572,13 @@ def main() -> None:
     thumbs_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
                                 help="Only process videos whose current_path starts with this prefix (try a small folder first)")
     thumbs_parser.set_defaults(func=cmd_extract_thumbnails)
+
+    faces_parser = sub.add_parser(
+        "detect-faces", help="Phase 3 Session 1: face detection + embeddings (buffalo_l) -> data/faces.jsonl"
+    )
+    faces_parser.add_argument("--limit", metavar="FOLDER_PREFIX",
+                               help="Only process photos whose current_path starts with this prefix (try a small folder first / benchmark)")
+    faces_parser.set_defaults(func=cmd_detect_faces)
 
     audit_parser = sub.add_parser(
         "audit-dates", help="Detect + fix batch-date artifacts (a whole folder landing on one wrong date)"

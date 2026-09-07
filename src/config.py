@@ -109,6 +109,21 @@ class Config:
     thumbnail_dir: str = "data/thumbnails"
     thumbnail_max_dimension: int = 480
 
+    # Phase 3 Session 1: face detection + embedding (src/face_detection.py,
+    # CLI: `main.py detect-faces`). faces_path is the actual per-face output
+    # (one line per DETECTED face, not per photo -- see that module's
+    # docstring); faces_scanned_path is a separate small resumability
+    # checkpoint file (one line per photo actually scanned, including
+    # photos with 0 faces found) since faces_path alone can't distinguish
+    # "not yet scanned" from "scanned, 0 faces" the way captions.jsonl's
+    # one-line-per-photo shape can. face_model_pack is config-driven per
+    # rule 4 even though buffalo_l is the only pack actually verified this
+    # session -- same reasoning as ollama_model being config-driven despite
+    # qwen3-vl:2b being the only model benchmarked so far.
+    faces_path: str = "data/faces.jsonl"
+    faces_scanned_path: str = "data/faces_scanned.jsonl"
+    face_model_pack: str = "buffalo_l"
+
     # --- derived, absolute paths ---
     @property
     def dest_root_path(self) -> Path:
@@ -136,6 +151,16 @@ class Config:
     @property
     def thumbnail_dir_abs(self) -> Path:
         p = Path(self.thumbnail_dir)
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def faces_path_abs(self) -> Path:
+        p = Path(self.faces_path)
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def faces_scanned_path_abs(self) -> Path:
+        p = Path(self.faces_scanned_path)
         return p if p.is_absolute() else REPO_ROOT / p
 
     @property
@@ -205,6 +230,9 @@ def load_config(path: Path | None = None) -> Config:
         cloudflare_tunnel_name=raw.get("cloudflare_tunnel_name", "photo-viewer"),
         thumbnail_dir=raw.get("thumbnail_dir", "data/thumbnails"),
         thumbnail_max_dimension=raw.get("thumbnail_max_dimension", 480),
+        faces_path=raw.get("faces_path", "data/faces.jsonl"),
+        faces_scanned_path=raw.get("faces_scanned_path", "data/faces_scanned.jsonl"),
+        face_model_pack=raw.get("face_model_pack", "buffalo_l"),
     )
 
 

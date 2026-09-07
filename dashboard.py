@@ -210,6 +210,36 @@ Panels:
   view. _set_date_audit_results_text() now auto-scrolls its result into
   view as an extra safety net on top of the general scrolling fix.
 
+- Phase 3 — Face Detection (Session 1 scope only — see TODO.md/CLAUDE.md):
+  runs src.face_detection.run_face_detection (same function `main.py
+  detect-faces` calls) against every already-organized photo in the DB not
+  yet scanned, via insightface's FaceAnalysis (buffalo_l pack). Same "own
+  worker thread, own progress bar/results box/dedicated live log tail"
+  pattern as every other batch panel, own distinct logger_name
+  ("photo_organizer.faces"). Read-only against the DB (no init_db()-guarded
+  write path needed here beyond the standard rule-12 startup call) and
+  read-only against photos — output goes to data/faces.jsonl (one line per
+  DETECTED FACE, not per photo) + data/faces_scanned.jsonl (its own
+  resumability checkpoint — see src/face_detection.py's module docstring for
+  why one file alone can't answer "already scanned?" when a photo can
+  legitimately have zero faces).
+  **Real GPU contention, unlike every earlier batch panel**: this is the
+  first Phase-3-or-earlier panel that actually shares the GPU with Phase 2's
+  Ollama captioning (insightface uses onnxruntime's CUDAExecutionProvider —
+  see build_face_analysis()'s explicit "confirm, don't assume" provider
+  check). The confirmation dialog says so plainly rather than reusing GPS/
+  Thumbnail's "no GPU contention" framing, which would be actively wrong
+  here. Collapsed by default, placed after Date Cluster Audit.
+  **Architecture note worth knowing without re-deriving** (see CLAUDE.md
+  rule 13): this was originally planned to require a second, separate
+  Python 3.11-3.13 environment (insightface had no official Python 3.14
+  wheel when that plan was written). Verified during this session that both
+  insightface (1.0.1, now a version-agnostic `py3-none-any` wheel) and
+  onnxruntime-gpu (1.29.0, official cp314 wheel) install and run cleanly
+  directly in this project's existing primary 3.14 venv — no second Python
+  install needed, so this is a normal dashboard panel like any other, not
+  some special cross-environment invocation.
+
 Every panel is collapsible — a ▼/▶ toggle in its header hides/shows its
 body (see _make_collapsible()), so a section you're not using right now
 (e.g. Source folders, once already configured, or Phase 1's Run panel
@@ -278,6 +308,7 @@ from src.date_audit import (
     inspect_cluster,
 )
 from src.db import connect, init_db
+from src.face_detection import FaceDetectionStats, run_face_detection
 from src.gps_backfill import GpsStats, run_gps_extraction
 from src.logging_setup import setup_logging
 from src.organize import RunStats, run_phase1
@@ -326,6 +357,16 @@ class DashboardApp:
         self.thumbs_stop_requested = False
         self._thumbs_log_path: Path | None = None
         self._thumbs_log_read_pos = 0
+
+        # Phase 3 — Face Detection panel (Session 1 scope only). Also its
+        # own independent worker/progress, but unlike GPS/Thumbnails this
+        # one DOES share real GPU load with a concurrent Phase 2 captioning
+        # run (insightface's CUDAExecutionProvider) — see the module
+        # docstring above and this panel's confirmation dialog.
+        self.faces_worker: threading.Thread | None = None
+        self.faces_stop_requested = False
+        self._faces_log_path: Path | None = None
+        self._faces_log_read_pos = 0
 
         # Remote Access panel (Phase 2d follow-up): the cloudflared
         # subprocess this dashboard itself spawned, if any. None whenever
@@ -800,6 +841,45 @@ class DashboardApp:
         da_log_scroll.pack(side="right", fill="y")
         self.date_audit_log_text.configure(yscrollcommand=da_log_scroll.set)
 
+        # --- Phase 3 Session 1: Face Detection panel ---
+        faces_frame = self._make_collapsible(
+            "Phase 3 — Face Detection (Session 1: detection + benchmarking only)", start_expanded=False
+        )
+
+        faces_info_row = ttk.Frame(faces_frame)
+        faces_info_row.pack(fill="x", padx=6, pady=(6, 0))
+        self.faces_info_label = ttk.Label(faces_info_row, text="(loading config...)", wraplength=740, justify="left")
+        self.faces_info_label.pack(side="left", fill="x", expand=True)
+
+        faces_btn_row = ttk.Frame(faces_frame)
+        faces_btn_row.pack(fill="x", padx=6, pady=6)
+        self.faces_btn = ttk.Button(faces_btn_row, text="Start Face Detection", command=self._on_faces_start)
+        self.faces_btn.pack(side="left")
+        self.faces_cancel_btn = ttk.Button(faces_btn_row, text="Cancel", command=self._on_faces_cancel, state="disabled")
+        self.faces_cancel_btn.pack(side="left", padx=(6, 0))
+
+        faces_prog_row = ttk.Frame(faces_frame)
+        faces_prog_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.faces_progress = ttk.Progressbar(faces_prog_row, mode="determinate")
+        self.faces_progress.pack(fill="x", side="left", expand=True)
+        self.faces_status_label = ttk.Label(faces_prog_row, text="Idle", width=28, anchor="e")
+        self.faces_status_label.pack(side="right", padx=(6, 0))
+
+        self.faces_results_text = tk.Text(faces_frame, height=6, state="disabled", wrap="word")
+        self.faces_results_text.pack(fill="x", padx=6, pady=(0, 6))
+
+        # Dedicated live log tail, same reasoning as every other batch
+        # panel above — its own view onto whatever logs/organize_*.log the
+        # current/most recent face detection run wrote to.
+        ttk.Label(faces_frame, text="Live face detection log:").pack(anchor="w", padx=6)
+        faces_log_body = ttk.Frame(faces_frame)
+        faces_log_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.faces_log_text = tk.Text(faces_log_body, height=8, state="disabled", wrap="none")
+        self.faces_log_text.pack(side="left", fill="both", expand=True)
+        faces_log_scroll = ttk.Scrollbar(faces_log_body, orient="vertical", command=self.faces_log_text.yview)
+        faces_log_scroll.pack(side="right", fill="y")
+        self.faces_log_text.configure(yscrollcommand=faces_log_scroll.set)
+
         # --- Review Users panel (Phase 2d follow-up) ---
         ru_frame = self._make_collapsible("Review Users (review_tool.py logins)", start_expanded=False)
 
@@ -977,6 +1057,13 @@ class DashboardApp:
             "instead of the generic play-icon placeholder. Never touches the database — "
             "a cache file already on disk means \"done\", so it's naturally resumable. "
             "~0.1s/video (benchmarked, not assumed) — minutes for the whole library, not days."
+        )
+        self.faces_info_label.configure(
+            text=f"Detects faces + extracts embeddings (insightface, {self.cfg.face_model_pack} pack) for every "
+            f"already-organized photo not yet scanned, writing results to {self.cfg.faces_path}. Photos only, "
+            "no video. Session 1 scope: detection + benchmarking only — no clustering, no people/names yet. "
+            f"gpu_enabled={self.cfg.gpu_enabled} — shares real GPU load with a concurrent Phase 2 captioning run, "
+            "unlike GPS/Thumbnail extraction above."
         )
         self._refresh_folder_list()
         self._refresh_review_users()
@@ -1183,6 +1270,19 @@ class DashboardApp:
                     elif kind == "thumbs_error":
                         _, err = msg
                         self._on_thumbs_error(err)
+                    elif kind == "faces_log_started":
+                        log_path = msg[1]
+                        self._start_faces_log_tail(log_path)
+                    elif kind == "faces_progress":
+                        _, done, total = msg
+                        self.faces_progress.configure(maximum=max(total, 1), value=done)
+                        self.faces_status_label.configure(text=f"{done:,} / {total:,} processed")
+                    elif kind == "faces_done":
+                        _, stats, was_stopped = msg
+                        self._on_faces_done(stats, was_stopped)
+                    elif kind == "faces_error":
+                        _, err = msg
+                        self._on_faces_error(err)
                     elif kind == "tunnel_output":
                         _, proc, line = msg
                         self._append_tunnel_log(proc, line)
@@ -1591,6 +1691,123 @@ class DashboardApp:
         self.thumbs_log_text.insert("end", new_text)
         self.thumbs_log_text.see("end")
         self.thumbs_log_text.configure(state="disabled")
+
+    # ---------------------------------- Phase 3 Session 1: face detection
+    def _faces_busy(self) -> bool:
+        return self.faces_worker is not None and self.faces_worker.is_alive()
+
+    def _on_faces_start(self) -> None:
+        if self._faces_busy():
+            return
+        if not messagebox.askyesno(
+            "Photo Organizer",
+            "About to run face detection (insightface, buffalo_l pack) on every "
+            "already-organized photo not yet scanned, writing results to "
+            f"{self.cfg.faces_path} (one line per detected face, not per photo).\n\n"
+            "This only reads photo files and writes to that JSONL file — it never "
+            "modifies, moves, or deletes any photo, and never touches the database.\n\n"
+            "Photos only, no video. Session 1 scope: this detects + benchmarks only — "
+            "no clustering, no people/names yet.\n\n"
+            "UNLIKE GPS/Thumbnail extraction above, this DOES use the GPU "
+            "(onnxruntime's CUDA execution provider) — running it at the same time as "
+            "a Phase 2 captioning run means the two will contend for the same GPU. "
+            "Safe to Cancel and resume any time; already-scanned photos are skipped "
+            "next run.\n\n"
+            "Start now?",
+        ):
+            return
+        self.faces_stop_requested = False
+        self.faces_progress.configure(value=0, maximum=1)
+        self.faces_status_label.configure(text="Starting...")
+        self._set_faces_results_text("Running... (loading FaceAnalysis model may take a moment)")
+        self.faces_btn.configure(state="disabled")
+        self.faces_cancel_btn.configure(state="normal")
+
+        self.faces_worker = threading.Thread(target=self._faces_worker, daemon=True)
+        self.faces_worker.start()
+
+    def _on_faces_cancel(self) -> None:
+        self.faces_stop_requested = True
+        self.faces_status_label.configure(text="Stopping...")
+
+    def _faces_worker(self) -> None:
+        # Runs on a background thread — never touch Tk widgets here, only
+        # push messages through self.msg_queue for the main thread to apply.
+        # Same shape as _gps_worker/_thumbs_worker above. Unlike those two,
+        # building the FaceAnalysis app itself (model load, CUDA session
+        # init) happens inside run_face_detection() on this same background
+        # thread — it's slow enough (model load + CUDA context init) that it
+        # must not block the Tk main loop either.
+        try:
+            cfg = load_config()
+            logger, log_path = setup_logging(
+                cfg.log_dir_abs, echo_to_console=False, logger_name="photo_organizer.faces"
+            )
+            self.msg_queue.put(("faces_log_started", log_path))
+            init_db(cfg.db_path_abs, logger=logger)  # rule 12: read-only entry points call this too
+            logger.info(f"Starting Phase 3 Session 1 (face detection) run from dashboard — model_pack={cfg.face_model_pack} gpu_enabled={cfg.gpu_enabled}")
+
+            conn = connect(cfg.db_path_abs)
+            try:
+                stats = run_face_detection(
+                    cfg, conn, logger, cfg.faces_path_abs, cfg.faces_scanned_path_abs,
+                    progress_cb=lambda done, total: self.msg_queue.put(("faces_progress", done, total)),
+                    stop_check=lambda: self.faces_stop_requested,
+                )
+            finally:
+                conn.close()
+            self.msg_queue.put(("faces_done", stats, self.faces_stop_requested))
+        except Exception as e:
+            self.msg_queue.put(("faces_error", str(e)))
+
+    def _on_faces_done(self, stats: FaceDetectionStats, was_stopped: bool) -> None:
+        self.faces_btn.configure(state="normal")
+        self.faces_cancel_btn.configure(state="disabled")
+        self.faces_status_label.configure(text="Stopped early" if was_stopped else "Done")
+        lines = [f"Scanned: {stats.scanned:,}" + ("  (stopped early by user)" if was_stopped else "")]
+        lines.append(f"Already scanned (skipped): {stats.already_scanned:,}")
+        lines.append(f"Faces found: {stats.faces_found:,}")
+        lines.append(f"Photos with 1+ face(s): {stats.photos_with_faces:,}")
+        lines.append(f"Photos with 0 faces: {stats.photos_with_no_faces:,}")
+        lines.append(f"Errors: {stats.errors:,}" + ("  — see log for details" if stats.errors else ""))
+        self._set_faces_results_text("\n".join(lines))
+
+    def _on_faces_error(self, err: str) -> None:
+        self.faces_btn.configure(state="normal")
+        self.faces_cancel_btn.configure(state="disabled")
+        self.faces_status_label.configure(text="Error")
+        messagebox.showerror("Photo Organizer", f"Face detection failed: {err}")
+
+    def _set_faces_results_text(self, text: str) -> None:
+        self.faces_results_text.configure(state="normal")
+        self.faces_results_text.delete("1.0", "end")
+        self.faces_results_text.insert("1.0", text)
+        self.faces_results_text.configure(state="disabled")
+
+    def _start_faces_log_tail(self, log_path: Path) -> None:
+        self._faces_log_path = log_path
+        self._faces_log_read_pos = 0
+        self.faces_log_text.configure(state="normal")
+        self.faces_log_text.delete("1.0", "end")
+        self.faces_log_text.configure(state="disabled")
+        self._append_new_faces_log_lines()
+
+    def _append_new_faces_log_lines(self) -> None:
+        if self._faces_log_path is None or not self._faces_log_path.exists():
+            return
+        try:
+            with open(self._faces_log_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._faces_log_read_pos)
+                new_text = f.read()
+                self._faces_log_read_pos = f.tell()
+        except OSError:
+            return
+        if not new_text:
+            return
+        self.faces_log_text.configure(state="normal")
+        self.faces_log_text.insert("end", new_text)
+        self.faces_log_text.see("end")
+        self.faces_log_text.configure(state="disabled")
 
     # ------------------------------------------------- Date Cluster Audit
     def _set_date_audit_results_text(self, text: str) -> None:
@@ -2354,6 +2571,10 @@ class DashboardApp:
             pass
         try:
             self._append_new_thumbs_log_lines()  # Thumbnail extraction's own view, same reasoning
+        except Exception:
+            pass
+        try:
+            self._append_new_faces_log_lines()  # Face detection's own view, same reasoning
         except Exception:
             pass
         try:

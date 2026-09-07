@@ -11,3 +11,19 @@ ollama>=0.6              # Phase 2: local vision-model captioning client (talks 
 reverse_geocoder>=1.5     # Phase 2b: offline EXIF-GPS -> place-name reverse geocoding (bundled worldwide city gazetteer, no API key/network) — pulls in numpy+scipy
 flask>=3.1                 # Phase 2b: standalone browser-based review tool (review_tool.py) — separate local web app, not part of the Tkinter dashboard
 opencv-python-headless>=4.10   # Phase 2g: video first-frame thumbnail extraction — bundled codec backend, no separate system ffmpeg install needed; -headless since this never needs any GUI window functions
+
+# Phase 3 Session 1: face detection + embedding (src/face_detection.py).
+# Both install cleanly on this project's existing primary Python 3.14 venv —
+# no second Python environment needed (verified this session; see CLAUDE.md
+# rule 13 / README.md for the full story of why that was originally assumed
+# necessary and why it turned out not to be).
+onnxruntime-gpu[cuda,cudnn]==1.29.0  # ONNX inference + GPU execution provider; [cuda,cudnn] pulls in pip-installable CUDA 13/cuDNN 9 runtime wheels, no system CUDA toolkit install needed
+onnx>=1.22                             # insightface dependency (below), listed here since it installs standalone with no conflicts
+scikit-image>=0.26                      # insightface dependency (below), listed here since it installs standalone with no conflicts
+requests>=2.34                           # insightface dependency (below, for its model-pack download), listed here since it installs standalone with no conflicts
+# insightface itself is deliberately NOT listed here -- a plain `pip install
+# -r requirements.txt` would pull in its declared opencv-python/onnxruntime
+# deps and conflict with the opencv-python-headless/onnxruntime-gpu pinned
+# above (both pairs install into the same site-packages directory names).
+# Install it separately with --no-deps: see README.md's Phase 3 setup
+# section for the exact one-line command.

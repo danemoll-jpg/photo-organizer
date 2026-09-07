@@ -3,7 +3,7 @@
 Local tool to sort ~25 years of family photos (and, since Phase 1b, videos)
 into `E:\Pics\YYYY\YYYY-MM\`.
 See [`photo-organizer-spec.md`](photo-organizer-spec.md) for the full design and
-[`TODO.md`](TODO.md) for current phase status. This README covers Phase 0/1/1b/2/2b setup and usage.
+[`TODO.md`](TODO.md) for current phase status. This README covers Phase 0/1/1b/2/2b/3 setup and usage.
 
 ## Setup (one-time)
 
@@ -496,6 +496,97 @@ location, and vice versa.
 Every invited login can edit — there's no owner-vs-guest distinction yet.
 Edits are behind the same login as browsing, plus CSRF protection matching
 the login page's own.
+
+## Phase 3 — face detection (Session 1: detection + benchmarking only)
+
+Detects faces and extracts 512-dim ArcFace embeddings for every
+already-organized photo (JPG/PNG/HEIC — no video, same scope decision as
+Phase 2's captioning) via [`insightface`](https://github.com/deepinsight/insightface)'s
+`FaceAnalysis` (the `buffalo_l` model pack: RetinaFace detection + ArcFace
+recognition), GPU-accelerated via `onnxruntime-gpu`. **This is Session 1
+only** — detection and benchmarking. Clustering, the `faces`/`people`
+tables, and any labeling UI are a separate, later session (see TODO.md).
+
+**No second Python install needed.** This was originally expected to
+require a separate Python 3.11-3.13 environment, since `insightface`
+historically had no official Python 3.14 wheel. That's no longer true as of
+`insightface` 1.0.1 (a single version-agnostic `py3-none-any` wheel) and
+`onnxruntime-gpu` 1.29.0 (an official `cp314-win_amd64` wheel) — both were
+verified to install and run cleanly, including real GPU use, directly in
+this project's existing primary venv. `requirements.txt` covers everything
+except `insightface` itself, which needs one extra manual step because its
+declared dependencies (`opencv-python`, `onnxruntime`) would otherwise
+conflict with the `opencv-python-headless`/`onnxruntime-gpu` this project
+already pins:
+
+```bash
+# After the normal `pip install -r requirements.txt`:
+venv\Scripts\pip install insightface==1.0.1 --no-deps
+```
+
+The first run downloads the `buffalo_l` model pack (~280MB) to
+`%USERPROFILE%\.insightface\models\buffalo_l\` automatically — a one-time
+network fetch, not a project dependency.
+
+**A real Windows-only GPU bug was found and fixed while benchmarking this.**
+`onnxruntime-gpu`'s CUDA execution provider silently fell back to CPU with
+no exception raised anywhere — `insightface`'s own default logger severity
+swallows the real error, so the *only* reason this was caught at all is
+`src/face_detection.py::build_face_analysis()` explicitly logging (and
+warning on) which provider each sub-model actually ended up using, never
+just trusting that asking for CUDA got CUDA. The real cause: the CUDA/cuDNN
+DLLs that `onnxruntime-gpu[cuda,cudnn]`'s pip-installed `nvidia-*` packages
+bundle aren't on any search path Windows checks automatically.
+`os.add_dll_directory()` — the "correct," modern fix for this class of
+problem — did **not** actually resolve it; prepending those directories to
+the `PATH` environment variable from within the running process did. Fixed
+once, transparently, in `_register_cuda_dll_dirs()` — nothing to do
+manually, just worth knowing if a future dependency hits the same wall.
+
+**Real GPU throughput, benchmarked before suggesting any full-run
+estimate** (GTX 1660 Ti, two real samples from different eras/devices, 469
+real photos total, 0 errors): **~0.26 seconds/photo** (3.3-4.5 photos/sec —
+faster for photos with fewer faces, slower for group shots, since each
+detected face gets its own landmark+embedding pass). At this library's real
+~155,000 photos (video excluded), that's roughly **11 hours of continuous
+run time** — far lighter than Phase 2's captioning (8-9 days), but still
+worth running as a background job, not expecting it instantly.
+**GPU contention with a concurrent Phase 2 captioning run was deliberately
+NOT tested** — unlike GPS/thumbnail extraction (confirmed zero GPU load),
+face detection genuinely shares the GPU with Ollama, and this session's
+benchmark was run with captioning paused rather than risk destabilizing a
+live multi-day job to find out. Treat this as an open question for a future
+session/full-run decision, not a confirmed "safe to run alongside
+captioning" the way GPS/thumbnails are.
+
+```bash
+# Detect faces in every already-organized photo not yet scanned
+venv\Scripts\python main.py detect-faces
+
+# Try one folder first (matches current_path by prefix) — same pattern
+# extract-gps/extract-thumbnails use, good for a quick benchmark too
+venv\Scripts\python main.py detect-faces --limit "E:\Pics\2025\2025-01"
+```
+
+**Usage — dashboard:** open the **"Phase 3 — Face Detection"** panel
+(collapsed by default) and click **Start Face Detection**. Same underlying
+function as the CLI (`run_face_detection()`), own progress bar/results
+box/live log tail, independent of every other panel — but see the GPU
+contention caveat above before running it alongside an active Phase 2
+captioning run.
+
+**Output** (`data/faces.jsonl` by default): one JSON line per **detected
+face**, not per photo — a photo can have 0, 1, or many. Fields: `file_hash`,
+`path`, `bbox` (`[x1, y1, x2, y2]` pixels), `embedding` (512-dim,
+L2-normalized — ready for cosine-similarity clustering), `det_score`
+(RetinaFace's own confidence, 0-1), `detected_at`. A second file,
+`data/faces_scanned.jsonl`, is the actual resumability checkpoint — one
+line per photo *scanned*, whatever it found (including 0 faces), since
+`faces.jsonl` alone can't tell "not yet scanned" apart from "scanned, no
+faces" the way `captions.jsonl`'s one-line-per-photo shape can. Both are
+purely additive JSONL, matching Phase 2's captions.jsonl — nothing here
+touches the database at all (read-only against `photos`, same shape as
+`thumbnail_backfill.py`).
 
 ## Viewing the database
 
