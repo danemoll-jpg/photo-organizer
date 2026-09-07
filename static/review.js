@@ -250,6 +250,8 @@
   const viewerTags = el("viewer-tags");
   const viewerLocation = el("viewer-location");
   const viewerPeople = el("viewer-people"); // Phase 3e
+  const viewerPersonInput = el("viewer-person-input"); // Phase 3i
+  const viewerPersonAddBtn = el("viewer-person-add"); // Phase 3i
   const viewerFavoriteBtn = el("viewer-favorite-btn"); // Phase 3h
   const viewerFavoritedBy = el("viewer-favorited-by"); // Phase 3h
   const viewerPlayPause = el("viewer-playpause");
@@ -366,15 +368,24 @@
   // pattern in the same page.
   const VIEWER_PEOPLE_VISIBLE = 4;
 
+  // Phase 3i: each name badge gets a small "×" (reusing the People filter's
+  // own .chip-remove look, see review.css) to remove that person from
+  // THIS photo -- see removePersonFromCurrent below.
+  function personBadge(p) {
+    return `<span class="badge person" data-cluster-id="${p.cluster_id}">${escapeHtml(p.name)}` +
+      `<button type="button" class="chip-remove person-remove" data-cluster-id="${p.cluster_id}" ` +
+      `title="Remove ${escapeHtml(p.name)} from this photo">&times;</button></span>`;
+  }
+
   function renderPeopleList(people) {
     if (!people || !people.length) {
       return `<span class="placeholder">No named people identified in this photo yet.</span>`;
     }
     const shown = people.slice(0, VIEWER_PEOPLE_VISIBLE);
     const rest = people.slice(VIEWER_PEOPLE_VISIBLE);
-    let html = shown.map(p => `<span class="badge person">${escapeHtml(p.name)}</span>`).join(" ");
+    let html = shown.map(personBadge).join(" ");
     if (rest.length) {
-      const restHtml = rest.map(p => `<span class="badge person">${escapeHtml(p.name)}</span>`).join(" ");
+      const restHtml = rest.map(personBadge).join(" ");
       html += ` <button type="button" class="people-more-toggle" data-count="${rest.length}">+${rest.length} more</button>` +
         `<span class="people-rest" hidden> ${restHtml}</span>`;
     }
@@ -386,6 +397,11 @@
   // same reasoning review.js already uses elsewhere for content that's
   // rebuilt from scratch per item.
   viewerPeople.addEventListener("click", (e) => {
+    const removeBtn = e.target.closest(".person-remove");
+    if (removeBtn) {
+      removePersonFromCurrent(Number(removeBtn.dataset.clusterId));
+      return;
+    }
     const btn = e.target.closest(".people-more-toggle");
     if (!btn) return;
     const restEl = viewerPeople.querySelector(".people-rest");
@@ -598,6 +614,19 @@
     }
   });
 
+  // Phase 3i: three more reuses of attachSuggestionDropdown (fifth/sixth/
+  // seventh overall, per rule 7) -- unlike the People FILTER above (which
+  // requires an exact match against a real known person), these three
+  // deliberately accept a genuinely new typed name too, same "type freely,
+  // suggestions are just quick-picks" contract the bulk-edit Location field
+  // already established. Suggestions are plain labels here (not
+  // disambiguated the way the filter's chips are), since typing an exact
+  // existing name is enough for the add/remove routes to resolve it
+  // server-side (src.people_tags.find_person_by_name/resolve_or_create_person).
+  attachSuggestionDropdown(viewerPersonInput, el("viewer-person-suggestions"), () => allPeople.map((p) => p.label));
+  attachSuggestionDropdown(el("bulk-person-add-input"), el("bulk-person-add-suggestions"), () => allPeople.map((p) => p.label));
+  attachSuggestionDropdown(el("bulk-person-remove-input"), el("bulk-person-remove-suggestions"), () => allPeople.map((p) => p.label));
+
   // ---------------------------------------------------------------------
   // Stats
   // ---------------------------------------------------------------------
@@ -766,15 +795,18 @@
   // Every bulk action goes through this one call — same CSRF token the
   // single-item edit form already uses (window.REVIEW_CONFIG.csrfToken).
   // `mode` defaults server-side to "set" (apply the same value to every
-  // selected item via apply_edit's existing semantics); "add_tag" is the
-  // one exception (union into each item's own existing tags — see
+  // selected item via apply_edit's existing semantics); "add_tag" is one
+  // exception (union into each item's own existing tags — see
   // src/edits.py::add_tag_bulk / review_tool.py's api_bulk_edit).
-  async function postBulkEdit(field, value, mode) {
+  // Phase 3i: "add_person"/"remove_person" are a second exception — they
+  // don't use field/value at all, just `extra` (cluster_id or name, see
+  // the two handlers below), which this just spreads into the request body.
+  async function postBulkEdit(field, value, mode, extra) {
     const res = await fetch("/api/bulk-edit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        file_hashes: Array.from(state.selection), field, value, mode,
+        file_hashes: Array.from(state.selection), field, value, mode, ...(extra || {}),
         csrf_token: cfg.csrfToken,
       }),
     });
@@ -838,6 +870,44 @@
     try {
       const data = await postBulkEdit("excluded", true, "set");
       showBulkResult(data, "Hide from library");
+      await afterBulkAction();
+    } catch (e) { alert(e.message); }
+  });
+
+  // Phase 3i: mass add/remove a person across every selected item. "Add"
+  // resolves the typed name to an existing person (exact match against
+  // allPeople) if there is one, otherwise sends the raw name so the server
+  // creates a brand-new person ONCE for the whole batch (see
+  // review_tool.py's api_bulk_edit) -- same "type freely" contract as the
+  // bulk-edit Location field. "Remove" only makes sense for a name that
+  // already exists (there's nothing to remove from one that was never
+  // tagged anywhere), so an unmatched name is rejected client-side with a
+  // clear message rather than silently doing nothing.
+  el("bulk-person-add-apply").addEventListener("click", async () => {
+    const input = el("bulk-person-add-input");
+    const name = input.value.trim();
+    if (!name) { alert("Type a person's name first."); return; }
+    const match = allPeople.find((p) => p.label.toLowerCase() === name.toLowerCase());
+    const extra = match ? { cluster_id: match.cluster_id } : { name };
+    try {
+      const data = await postBulkEdit(null, null, "add_person", extra);
+      showBulkResult(data, `Add person "${name}"`);
+      input.value = "";
+      if (!match) await loadFacets(); // a brand-new person needs to show up in future suggestions/filters
+      await afterBulkAction();
+    } catch (e) { alert(e.message); }
+  });
+
+  el("bulk-person-remove-apply").addEventListener("click", async () => {
+    const input = el("bulk-person-remove-input");
+    const name = input.value.trim();
+    if (!name) { alert("Type a person's name first."); return; }
+    const match = allPeople.find((p) => p.label.toLowerCase() === name.toLowerCase());
+    if (!match) { alert(`No known person named "${name}".`); return; }
+    try {
+      const data = await postBulkEdit(null, null, "remove_person", { cluster_id: match.cluster_id });
+      showBulkResult(data, `Remove person "${name}"`);
+      input.value = "";
       await afterBulkAction();
     } catch (e) { alert(e.message); }
   });
@@ -1330,6 +1400,71 @@
     }
   }
   viewerFavoriteBtn.addEventListener("click", toggleFavorite);
+
+  // ---------------------------------------------------------------------
+  // Phase 3i: manual person tagging for the CURRENT photo (add/remove) --
+  // grid's mass add/remove is the bulk-edit handlers above; this is the
+  // single-photo counterpart. See review_tool.py's api_photo_person.
+  // ---------------------------------------------------------------------
+  async function postPersonAction(fileHash, action, extra) {
+    return fetch(`/api/photo/${fileHash}/person`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...extra, csrf_token: cfg.csrfToken }),
+    });
+  }
+
+  async function addPersonToCurrent() {
+    if (!state.viewer.current) return;
+    const name = viewerPersonInput.value.trim();
+    if (!name) return;
+    // Same "type freely" contract as the bulk-edit Location field: an exact
+    // match against an already-known person reuses them, anything else is
+    // sent as a raw name for the server to create a brand-new person from
+    // (src.people_tags.resolve_or_create_person) -- tagging someone never
+    // detected/named before is exactly the point of this control.
+    const match = allPeople.find((p) => p.label.toLowerCase() === name.toLowerCase());
+    const extra = match ? { cluster_id: match.cluster_id } : { name };
+    viewerPersonAddBtn.disabled = true;
+    try {
+      const res = await postPersonAction(state.viewer.current.file_hash, "add", extra);
+      if (res.status === 401) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || "Could not add — try again."); return; }
+      renderViewerItem(data.item);
+      viewerPersonInput.value = "";
+      if (!match) await loadFacets(); // a brand-new person needs to show up in future suggestions/filters
+      loadGridPage({ keepPageNum: true }); // this card's people badges may have changed
+    } catch (e) {
+      alert("Could not add — network error.");
+    } finally {
+      viewerPersonAddBtn.disabled = false;
+    }
+  }
+  viewerPersonAddBtn.addEventListener("click", addPersonToCurrent);
+  viewerPersonInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addPersonToCurrent(); }
+  });
+
+  async function removePersonFromCurrent(clusterId) {
+    if (!state.viewer.current) return;
+    try {
+      const res = await postPersonAction(state.viewer.current.file_hash, "remove", { cluster_id: clusterId });
+      if (res.status === 401) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || "Could not remove — try again."); return; }
+      renderViewerItem(data.item);
+      loadGridPage({ keepPageNum: true });
+    } catch (e) {
+      alert("Could not remove — network error.");
+    }
+  }
 
   // ---------------------------------------------------------------------
   // Init

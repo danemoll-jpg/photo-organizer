@@ -539,6 +539,34 @@ body {
 }
 .favorite-btn.is-favorited { border-color: gold; color: #a67c00; }
 .favorited-by { font-size: 12px; color: var(--muted); }
+
+/* Phase 3i: manual person add/remove for the current photo -- remove is a
+   small × on each name badge (person-remove reuses .chip-remove's look
+   directly, see review.js's personBadge), so only "Add" needs its own row
+   here. */
+.people-add-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.people-add-row input {
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+}
+.people-add-row button {
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* .badge.person now hosts a .chip-remove × button -- needs inline-flex so
+   the badge and its × align on one line rather than the button dropping to
+   its own row (a plain .badge is display:inline, per review.css above). */
+.badge.person { display: inline-flex; align-items: center; gap: 2px; }
 .hide-row { margin-top: 20px; }
 .hide-btn {
   width: 100%;

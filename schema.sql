@@ -240,3 +240,43 @@ CREATE INDEX IF NOT EXISTS idx_favorites_file_hash ON favorites(file_hash);
 -- review_user, or "__me__" resolved server-side to the current session's
 -- username) without a table scan.
 CREATE INDEX IF NOT EXISTS idx_favorites_username ON favorites(username);
+
+-- Phase 3i: manual person tagging for review_tool.py -- a narrow, deliberate
+-- exception to "who's in this photo" being decided solely by face
+-- detection/clustering (the faces/people join Phase 3e already displays),
+-- for the two cases that join can never cover by itself: a person
+-- face_detection.py never actually detected a face for (occluded, back
+-- turned, low quality, or a photo predating Phase 3 entirely), and a false
+-- match the automatic join shows but shouldn't (the real fix for a
+-- misclustered FACE is the Tkinter FaceLabelingWindow's Remove Selected
+-- from Cluster/Split, which this does NOT replace -- but a web-UI user
+-- reviewing day-to-day needs a quick per-PHOTO "no, not them" too, without
+-- touching the underlying faces.cluster_id data those tools own).
+--
+-- Deliberately layered ON TOP of the automatic faces/people join, never
+-- writing to faces.cluster_id/not_a_person or people.face_count/
+-- representative_embedding -- review_tool.py::_people_for_hashes computes
+-- (automatic people) UNION (action='add' rows) MINUS (action='remove'
+-- rows). One row per (photo, person): action is 'add' or 'remove', and
+-- src/people_tags.py's add/remove functions keep this table as small as
+-- possible by only ever inserting a row when it CONTRADICTS what the
+-- automatic join alone would already say -- e.g. removing a manually-added
+-- (never automatically-detected) person deletes the 'add' row outright
+-- rather than writing a redundant 'remove' override for a fact that was
+-- never automatically true in the first place.
+-- A brand-new table -- no ALTER TABLE needed in src/db.py::_migrate(),
+-- same as favorites above.
+CREATE TABLE IF NOT EXISTS photo_people_overrides (
+    file_hash   TEXT NOT NULL REFERENCES photos(file_hash) ON DELETE CASCADE,
+    cluster_id  INTEGER NOT NULL REFERENCES people(cluster_id) ON DELETE CASCADE,
+    action      TEXT NOT NULL CHECK (action IN ('add', 'remove')),
+    edited_by   TEXT NOT NULL,   -- config.yaml review_users username that made this edit
+    edited_at   TEXT NOT NULL,   -- ISO 8601 UTC timestamp
+    PRIMARY KEY (file_hash, cluster_id)
+);
+
+-- Supports review_tool.py::_people_for_hashes' batched per-page override
+-- lookup (src/people_tags.py::overrides_for_hashes) without a table scan --
+-- same "one query per page, not one per row" discipline as
+-- idx_favorites_file_hash above.
+CREATE INDEX IF NOT EXISTS idx_photo_people_overrides_file_hash ON photo_people_overrides(file_hash);

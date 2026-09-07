@@ -212,15 +212,25 @@ def test_people_batched_not_per_row(tmp: Path) -> None:
             finally:
                 conn.set_trace_callback(None)
                 conn.close()
-            people_join_count = sum(1 for s in statements if "JOIN people p" in s)
+            # Phase 3i: _people_for_hashes now issues a SECOND batched query
+            # (src.people_tags.overrides_for_hashes, to layer manual add/
+            # remove overrides on top of the automatic join) -- also
+            # "FROM faces f ... JOIN people p" no more than the join query
+            # itself, so distinguish the two by their actual FROM clause
+            # rather than the shared "JOIN people p" substring both contain.
+            people_join_count = sum(1 for s in statements if "FROM faces f" in s and "JOIN people p" in s)
+            overrides_count = sum(1 for s in statements if "FROM photo_people_overrides" in s)
             counts[limit] = people_join_count
-            print(f"  limit={limit}: {len(items)} rows fetched, {people_join_count} people-join SELECT(s) issued")
+            print(f"  limit={limit}: {len(items)} rows fetched, {people_join_count} people-join SELECT(s), "
+                  f"{overrides_count} overrides SELECT(s) issued")
+            assert overrides_count == 1, (limit, overrides_count)
 
         # The whole point of batching: one people-join query per PAGE, not one
         # per ROW -- this must be exactly 1 whether the page has 10 rows or 150.
         assert counts[10] == 1, counts
         assert counts[150] == 1, counts
         print(f"  people-join query count stays exactly 1 regardless of page size ({counts[10]} vs {counts[150]}) -- no N+1  OK")
+        print("  Phase 3i's overrides lookup is also exactly 1 query per page, not one per row  OK")
 
         # Also a real wall-clock number, not just a statement count, at a size in
         # the ballpark of a real page load (default review_page_size well below

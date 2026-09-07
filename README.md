@@ -798,6 +798,36 @@ pre-existing production-shaped DB.
 surfaced in `review_tool.py` — Phase 2c's people/faces filter placeholder
 stays inert until a future session wires it up to this real data.
 
+## Phase 3i — manual person tagging in the review tool
+
+`review_tool.py`'s grid and viewer can now add/remove a named person for a
+photo directly, without opening the Tkinter Face Labeling window:
+
+- **Viewer**: the "People" row has a small "×" on each name badge to
+  remove that person from the one open photo, plus an "Add a person…"
+  field (type an existing name, or a brand-new one to create a person on
+  the spot).
+- **Grid**: check some photos (the same checkboxes bulk-editing already
+  uses), then use the bulk-action bar's "Add person"/"Remove person"
+  fields to apply to every selected photo at once.
+
+This is deliberately a lighter, photo-level correction, not a replacement
+for the Tkinter tool: it never touches the underlying `faces.cluster_id`/
+`not_a_person` data or a person's `face_count`/embedding — those stay the
+Face Labeling window's job (Split/Move/Remove Selected from Cluster for
+correcting which *face* belongs to whom). This is for two things that
+tool can't help with: someone `main.py detect-faces` never detected a
+face for at all, or a wrong automatic match you want to fix in passing
+while browsing. A new `photo_people_overrides` table
+(`src/people_tags.py`) sits on top of the automatic `faces`/`people` join
+— removing an automatically-detected person just hides them from that
+one photo's display, it never reassigns or deletes the real face data.
+
+**Known gap**: the grid's Person/People filter still only searches the
+automatic face data, not these manual overrides — a person you've
+manually added to a photo won't yet make it match a filter for them (and
+vice versa for a manual removal).
+
 ## Phase 3b — resync folder placement with date_taken
 
 A tool for a real gap the Date Cluster Audit (above) left open: correcting

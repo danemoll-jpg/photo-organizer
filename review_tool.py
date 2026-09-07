@@ -216,6 +216,41 @@ client), `__any__` (favorited by at least one user), or a literal
 username — a real DB table like `location`/`people`, so (like those) it
 needs no live-cache scanning fallback and every route that already calls
 `_build_filters` (grid, nav, random, stats) picks it up automatically.
+
+Phase 3i (deliberate, narrow exception to Phase 3e's "display only, no
+editing surface here -- that stays in the Tkinter FaceLabelingWindow"
+line): every authenticated user can now manually tag/untag a person for a
+specific photo, from the web UI -- the grid (mass add/remove across the
+existing checkbox multi-select) and the viewer (add/remove for the one
+open photo). This does NOT replace or duplicate the Tkinter tool's job of
+correcting the underlying face/cluster_id data (misclustered faces still
+need Split/Move/Remove Selected from Cluster there) -- it's a lighter,
+photo-level "who's in this shot" correction for the two things the
+automatic faces/people join can never cover by itself: a person
+face_detection.py never actually detected a face for at all, and a wrong
+automatic match a day-to-day web user wants to correct without opening
+the Tkinter labeling window. New src/people_tags.py + photo_people_
+overrides table (schema.sql) -- a layer strictly ON TOP of the automatic
+join (_people_for_hashes now computes automatic + add - remove; see that
+function's own updated docstring), never writing to faces.cluster_id/
+not_a_person or people.face_count/representative_embedding. Two new/
+extended write routes, same auth/CSRF posture as every other write route
+above: POST /api/photo/<file_hash>/person (single photo, the viewer) and
+/api/bulk-edit's new mode="add_person"|"remove_person" (many photos at
+once, the grid). "Add" accepts either an already-known cluster_id or a
+typed name (resolved to an existing person by exact case-insensitive
+match, or a brand-new `people` row created on the spot -- see
+src.people_tags.resolve_or_create_person); "Remove" always takes a
+cluster_id (there's nothing to remove from a name that was never
+tagged). Known scope boundary, not fixed this session: the grid's
+Person/People FILTER (_build_filters' person/people params) still only
+reflects the AUTOMATIC faces/people join, not these overrides -- a
+manually-added person won't yet make a photo match a filter for them, and
+a manually-removed one won't yet be excluded from one. Fixing that would
+mean reworking the People filter's relational-intersection query (Phase
+3g) to be override-aware per person in the list, a bigger, separate piece
+of work than this session's add/remove editing feature -- flagged here
+rather than silently left inconsistent.
 """
 from __future__ import annotations
 
@@ -240,6 +275,12 @@ from src.db import init_db
 from src.edits import EDITABLE_FIELDS, MAX_BULK_ITEMS, add_tag_bulk, apply_edit, current_tags, manual_edit_fields
 from src.favorites import favorites_for_hashes, set_favorite
 from src.logging_setup import setup_logging
+from src.people_tags import (
+    add_person_to_photo,
+    overrides_for_hashes,
+    remove_person_from_photo,
+    resolve_or_create_person,
+)
 from src.port_check import listening_pids
 from src.storage import PhotoStorage, get_storage
 
@@ -810,7 +851,18 @@ def _people_for_hashes(conn: sqlite3.Connection, file_hashes: list[str]) -> dict
     size. Single-row callers (the viewer's /api/nav, /api/random,
     /api/edit/<hash>) just pass a one-element list -- same query shape, same
     index, negligible cost either way. Returns {} for an empty input without
-    ever touching the DB (a page can't skip the query it's not on)."""
+    ever touching the DB (a page can't skip the query it's not on).
+
+    Phase 3i: layers src.people_tags.overrides_for_hashes' manual add/remove
+    overrides on top of this automatic answer -- a SECOND batched query
+    (same one-per-page discipline, not one per row), applied in memory: a
+    'remove' override drops that cluster_id from the list even though the
+    automatic join found it, an 'add' override appends it if the automatic
+    join didn't already include it. This is the one place that reconciles
+    "what face detection/clustering says" with "what a human manually
+    corrected" into the single list every caller (grid cards, viewer)
+    actually renders -- see src/people_tags.py's module docstring for why
+    the override table itself never needs to touch faces/people directly."""
     if not file_hashes:
         return {}
     placeholders = ",".join("?" * len(file_hashes))
@@ -826,6 +878,16 @@ def _people_for_hashes(conn: sqlite3.Connection, file_hashes: list[str]) -> dict
     result: dict[str, list[dict]] = {}
     for r in conn.execute(sql, file_hashes).fetchall():
         result.setdefault(r["file_hash"], []).append({"cluster_id": r["cluster_id"], "name": r["assigned_name"]})
+
+    overrides = overrides_for_hashes(conn, file_hashes)
+    for file_hash, rows in overrides.items():
+        people = result.setdefault(file_hash, [])
+        for cluster_id, action, name in rows:
+            if action == "remove":
+                people[:] = [p for p in people if p["cluster_id"] != cluster_id]
+            elif not any(p["cluster_id"] == cluster_id for p in people):
+                people.append({"cluster_id": cluster_id, "name": name})
+        people.sort(key=lambda p: p["name"].lower())
     return result
 
 
@@ -1300,17 +1362,26 @@ def api_bulk_edit():
     mode="add_tag" (union), never a full replace (see BULK_SET_FIELDS).
 
     Body: {"file_hashes": [...], "field": ..., "value": ..., "mode":
-    "set"|"add_tag", "csrf_token": "..."}. `mode` defaults to "set".
+    "set"|"add_tag"|"add_person"|"remove_person", "csrf_token": "..."}.
+    `mode` defaults to "set". "add_person"/"remove_person" (Phase 3i) don't
+    use `field`/`value` at all — they take `cluster_id` (an already-known
+    person) or, for "add_person" only, `name` (resolve-or-create a person
+    by name, see src.people_tags.resolve_or_create_person) — resolved/
+    created ONCE up front, before the per-item loop, so every selected
+    photo that needs a brand-new person ends up pointing at the SAME new
+    `people` row rather than one each.
 
-    Every selected file_hash is applied independently (one apply_edit() or
-    add_tag_bulk() call, one photo_edits audit row each, `edited_by` the
-    real logged-in user per spec — not a synthetic batch-tool tag like the
-    fully-automated date-audit tool uses) — a bad hash or an invalid value
-    for one item is recorded in `failed` and does NOT abort the rest of the
-    batch, so one typo/stale selection can't silently zero out an otherwise
-    successful bulk action. Returns a summary ({updated, failed, total}) so
-    the front end can show a clear "N updated, M failed" result rather than
-    silently succeeding or failing (per spec)."""
+    Every selected file_hash is applied independently (one apply_edit()/
+    add_tag_bulk()/add_person_to_photo()/remove_person_from_photo() call
+    per item — the first two log one photo_edits audit row each,
+    `edited_by` the real logged-in user per spec, not a synthetic batch-
+    tool tag like the fully-automated date-audit tool uses) — a bad hash
+    or an invalid value for one item is recorded in `failed` and does NOT
+    abort the rest of the batch, so one typo/stale selection can't
+    silently zero out an otherwise successful bulk action. Returns a
+    summary ({updated, failed, total}) so the front end can show a clear
+    "N updated, M failed" result rather than silently succeeding or
+    failing (per spec)."""
     data = request.get_json(silent=True) or {}
     if data.get("csrf_token") != session.get("_csrf"):
         return jsonify({"error": "Your session looks stale — reload the page and try again."}), 403
@@ -1324,12 +1395,18 @@ def api_bulk_edit():
     field = data.get("field")
     mode = data.get("mode") or "set"
     value = data.get("value")
+    person_cluster_id = None
     if mode == "add_tag":
         if field != "tags":
             return jsonify({"error": "mode='add_tag' only applies to the tags field."}), 400
     elif mode == "set":
         if field not in BULK_SET_FIELDS:
             return jsonify({"error": f"{field!r} is not a bulk-editable field."}), 400
+    elif mode in ("add_person", "remove_person"):
+        person_cluster_id = data.get("cluster_id")
+        person_name = (data.get("name") or "").strip()
+        if person_cluster_id is None and not (mode == "add_person" and person_name):
+            return jsonify({"error": "cluster_id (or name, for mode='add_person') is required."}), 400
     else:
         return jsonify({"error": f"Unknown bulk-edit mode {mode!r}."}), 400
 
@@ -1338,15 +1415,28 @@ def api_bulk_edit():
     failed: list[dict] = []
     write_conn = get_db_write()
     try:
-        for file_hash in file_hashes:
-            try:
-                if mode == "add_tag":
-                    add_tag_bulk(write_conn, file_hash, value, edited_by=edited_by, logger=_logger)
-                else:
-                    apply_edit(write_conn, file_hash, field, value, edited_by=edited_by, logger=_logger)
-                updated += 1
-            except ValueError as e:
-                failed.append({"file_hash": file_hash, "error": str(e)})
+        if mode in ("add_person", "remove_person"):
+            if person_cluster_id is None:
+                person_cluster_id = resolve_or_create_person(write_conn, person_name)
+            for file_hash in file_hashes:
+                try:
+                    if mode == "add_person":
+                        add_person_to_photo(write_conn, file_hash, person_cluster_id, edited_by=edited_by)
+                    else:
+                        remove_person_from_photo(write_conn, file_hash, person_cluster_id, edited_by=edited_by)
+                    updated += 1
+                except ValueError as e:
+                    failed.append({"file_hash": file_hash, "error": str(e)})
+        else:
+            for file_hash in file_hashes:
+                try:
+                    if mode == "add_tag":
+                        add_tag_bulk(write_conn, file_hash, value, edited_by=edited_by, logger=_logger)
+                    else:
+                        apply_edit(write_conn, file_hash, field, value, edited_by=edited_by, logger=_logger)
+                    updated += 1
+                except ValueError as e:
+                    failed.append({"file_hash": file_hash, "error": str(e)})
     finally:
         write_conn.close()
 
@@ -1383,6 +1473,64 @@ def api_favorite(file_hash: str):
     try:
         try:
             set_favorite(write_conn, file_hash, username, favorited)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+    finally:
+        write_conn.close()
+
+    read_conn = get_db()
+    try:
+        row = read_conn.execute("SELECT * FROM photos WHERE file_hash = ?", (file_hash,)).fetchone()
+        if row is None:
+            return jsonify({"error": "Photo not found."}), 404
+        item = _row_to_dict(row, read_conn)
+    finally:
+        read_conn.close()
+    return jsonify({"item": item})
+
+
+@app.route("/api/photo/<file_hash>/person", methods=["POST"])
+def api_photo_person(file_hash: str):
+    """Phase 3i: manually tag/untag a person for ONE specific photo, from
+    the viewer's "People" row. Same auth gate (before_request already
+    covers /api/*) and CSRF posture as every other write route above.
+    Deliberately its own route/mechanism, same reasoning as
+    /api/favorite/<hash>: this isn't a single photos-table column
+    apply_edit()/EDITABLE_FIELDS could cover, and it's layered on top of
+    (never replacing) the automatic faces/people join -- see
+    src/people_tags.py's module docstring.
+
+    Body: {"action": "add"|"remove", "cluster_id": <int>, "csrf_token":
+    "..."} to tag/untag an already-known person, or, for "add" only,
+    {"action": "add", "name": "<str>", "csrf_token": "..."} to resolve-or-
+    create a person by name (src.people_tags.resolve_or_create_person) --
+    the suggestion dropdown sends cluster_id when the typed name matched
+    an existing person exactly, name otherwise, so a genuinely new person
+    (never detected/clustered before) can still be tagged. Returns the
+    freshly-updated photo, same convention as every other write route
+    here."""
+    data = request.get_json(silent=True) or {}
+    if data.get("csrf_token") != session.get("_csrf"):
+        return jsonify({"error": "Your session looks stale — reload the page and try again."}), 403
+
+    action = data.get("action")
+    if action not in ("add", "remove"):
+        return jsonify({"error": f"Unknown action {action!r}."}), 400
+    edited_by = session.get("user") or "unknown"
+
+    write_conn = get_db_write()
+    try:
+        try:
+            cluster_id = data.get("cluster_id")
+            if cluster_id is None:
+                name = (data.get("name") or "").strip()
+                if action != "add" or not name:
+                    return jsonify({"error": "cluster_id (or name, for action='add') is required."}), 400
+                cluster_id = resolve_or_create_person(write_conn, name)
+            if action == "add":
+                add_person_to_photo(write_conn, file_hash, cluster_id, edited_by=edited_by)
+            else:
+                remove_person_from_photo(write_conn, file_hash, cluster_id, edited_by=edited_by)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
     finally:

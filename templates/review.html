@@ -140,6 +140,28 @@
       <input type="date" id="bulk-date-input">
     </label>
     <button type="button" id="bulk-date-apply" class="secondary">Apply</button>
+    <!-- Phase 3i: mass add/remove a person across every selected item, same
+         free-text + suggestion-dropdown pattern as "Set location" above
+         (attachSuggestionDropdown, reused again -- see static/review.js).
+         "Add person" accepts a brand-new name (creates a person on the
+         spot, resolved/created ONCE for the whole batch -- see
+         review_tool.py's api_bulk_edit); "Remove person" only makes sense
+         for a name that already exists, so it doesn't get that same
+         create-on-the-fly behavior. -->
+    <label>Add person
+      <span class="tag-input-wrap">
+        <input type="text" id="bulk-person-add-input" placeholder="e.g. Dan Moll" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <ul id="bulk-person-add-suggestions" class="tag-suggestions" hidden></ul>
+      </span>
+    </label>
+    <button type="button" id="bulk-person-add-apply" class="secondary">Apply</button>
+    <label>Remove person
+      <span class="tag-input-wrap">
+        <input type="text" id="bulk-person-remove-input" placeholder="e.g. Dan Moll" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <ul id="bulk-person-remove-suggestions" class="tag-suggestions" hidden></ul>
+      </span>
+    </label>
+    <button type="button" id="bulk-person-remove-apply" class="secondary">Apply</button>
     <button type="button" id="bulk-hide-apply" class="secondary bulk-danger">🚫 Hide selected</button>
   </div>
   <span id="bulk-result" class="bulk-result" hidden></span>
@@ -220,6 +242,19 @@
            #viewer-info-toggle/setInfoExpanded already established above,
            rather than inventing a new collapse pattern. -->
       <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people"></span></div>
+      <!-- Phase 3i: add/remove a person for THIS one photo. Remove is a
+           small × on each name badge above (see review.js's
+           renderPeopleList/removePersonFromCurrent) -- no separate control
+           needed for it here. Add takes a typed name (existing person via
+           the suggestion dropdown, or a brand-new one created on the spot
+           -- see review_tool.py's api_photo_person). -->
+      <div class="viewer-row people-add-row">
+        <span class="tag-input-wrap">
+          <input type="text" id="viewer-person-input" placeholder="Add a person…" autocomplete="off" autocapitalize="none" spellcheck="false">
+          <ul id="viewer-person-suggestions" class="tag-suggestions" hidden></ul>
+        </span>
+        <button type="button" id="viewer-person-add" class="secondary">+ Add</button>
+      </div>
       <!-- Phase 3h: per-user favorites. The button marks/unmarks the
            favorite for the CURRENT logged-in user only (see review.js's
            toggleFavorite) -- the "favorited by" list next to it shows
