@@ -61,6 +61,22 @@ People/faces: Phase 3 doesn't exist yet. Every photo response carries a
 reserved section for it regardless, so this tool won't need a UI rebuild
 once Phase 3 lands, only that field needing to be populated for real.
 
+Phase 3d (this session): the grid's people/faces FILTER (added inert in
+Phase 2c, disabled control, "Phase 3 doesn't exist yet") is now wired to
+real Phase 3 data — a `person` query param (a `people.cluster_id`) narrows
+every browsing route to photos with at least one face in that cluster, via
+a plain `faces`/`people` join folded straight into `_build_filters` (see
+its docstring): unlike tag/caption-keyword filtering, this needs no live-
+cache scanning path, it's a real committed DB table like `location`, so it
+stays on the cheap indexed SQL path and every route that already calls
+`_build_filters` (grid, nav, random, stats) picks it up automatically, no
+per-route changes needed. `/api/facets` gained a `people` list (real
+assigned names only, from the `people` table — unclustered/unnamed faces
+are never offered) for the front end's dropdown — see its docstring. The
+per-photo `people` field above is UNCHANGED and deliberately still always
+`None` — Phase 3d's scope is the filter/browse control only, not per-photo
+face display (that would need its own session, if ever wanted).
+
 Phase 2c added: a Random button + random slideshow order in the viewer
 (/api/random, /api/nav?mode=random — see their docstrings), and new
 filters (tag, caption keyword, GPS/location, plus a visible-but-inert
@@ -310,6 +326,23 @@ def _build_filters(args) -> tuple[str, list]:
     path rather than forcing every query through the batched-scan path
     tag/caption-keyword filtering needs.
 
+    `person` (Phase 3d: the grid's people/faces filter, wired to real data
+    for the first time -- see module docstring) is a `people.cluster_id`,
+    matched via `file_hash IN (SELECT file_hash FROM faces WHERE
+    cluster_id = ?)`. Same reasoning as `location`/`media_type` above: a
+    real, already-committed DB table (Phase 3's `faces`/`people`), not the
+    live captions cache, so it belongs here rather than in
+    _build_extra_predicate and needs no scanning fallback. Deliberately
+    permissive like `location` -- this only matches against whatever
+    cluster_id the client sends, it does not itself check that cluster_id
+    resolves to a NAMED person; that restriction lives one layer up, in
+    which cluster_ids /api/facets' `people` list offers the front end to
+    pick from (see its docstring) -- a hand-crafted URL naming an
+    unclustered/unnamed cluster_id still filters correctly (just to
+    whatever faces share that id), it's simply never offered as a choice
+    in the UI. A non-integer value is silently ignored (same posture as an
+    unrecognized `media_type`), not an error.
+
     `show_hidden` (Phase 2f "Hide from library"): by default every route
     that calls this excludes `excluded=1` rows entirely -- they're meant to
     have permanently disappeared from the tool, per spec. Passing
@@ -338,6 +371,7 @@ def _build_filters(args) -> tuple[str, list]:
     location = (args.get("location") or "").strip()
     has_location = (args.get("has_location") or "").strip().lower()
     media_type = (args.get("media_type") or "").strip().lower()
+    person = (args.get("person") or "").strip()
     show_hidden = (args.get("show_hidden") or "").strip().lower() in ("1", "true", "yes")
     if date_from:
         clauses.append("date_taken >= ?")
@@ -376,6 +410,14 @@ def _build_filters(args) -> tuple[str, list]:
             like_params = []
         clauses.append(video_clause if media_type == "video" else f"NOT {video_clause}")
         params.extend(like_params)
+    if person:
+        try:
+            person_id = int(person)
+        except ValueError:
+            person_id = None
+        if person_id is not None:
+            clauses.append("file_hash IN (SELECT file_hash FROM faces WHERE cluster_id = ?)")
+            params.append(person_id)
     if not show_hidden:
         clauses.append("(excluded IS NULL OR excluded = 0)")
     sql = " AND ".join(clauses)
@@ -679,10 +721,11 @@ def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
         # -- not currently rendered distinctly by the front end, but harmless
         # to expose now rather than needing a new field later.
         "edited_fields": sorted(edited_fields),
-        # Phase 3 doesn't exist yet -- always None. Kept on every response
-        # now (rather than added later) so the front-end's reserved
-        # people/faces section never needs new wiring once it does; see
-        # module docstring and templates/review.html.
+        # Still always None -- Phase 3d (see module docstring) wired up the
+        # grid's people/faces FILTER to real data, but deliberately left
+        # this per-photo display field alone; that's a separate, not-yet-
+        # requested piece of work, not folded into this filter/browse-only
+        # session.
         "people": None,
     }
 
@@ -765,6 +808,18 @@ def api_facets():
     after the page loaded won't appear until the next page load/refresh --
     acceptable since extract-gps is a fast, user-run, occasional step (see
     CLAUDE.md), not a multi-day background process like Phase 2 captioning.
+
+    Phase 3d added `people`: real named people from the `people` table
+    (`cluster_id` + `assigned_name`), sorted by name -- deliberately
+    excludes unclustered/unnamed rows (`assigned_name IS NULL` or blank),
+    same "only offer real, already-meaningful values" posture as
+    `locations` above. Unlike `tags`/`locations` (plain string lists, since
+    a tag name IS the value filtered on), each entry here is an object --
+    the Person filter needs the id (`cluster_id`, what _build_filters'
+    `person` param actually matches on) alongside the display name, since
+    `assigned_name` itself has no uniqueness constraint (two different real
+    people could share a name) -- see static/review.js's loadFacets for how
+    the front end disambiguates that rare case.
     """
     conn = get_db()
     try:
@@ -775,9 +830,14 @@ def api_facets():
             "SELECT DISTINCT location_name FROM photos "
             "WHERE location_name IS NOT NULL ORDER BY location_name COLLATE NOCASE"
         ).fetchall()]
+        people = [dict(r) for r in conn.execute(
+            "SELECT cluster_id, assigned_name FROM people "
+            "WHERE assigned_name IS NOT NULL AND TRIM(assigned_name) != '' "
+            "ORDER BY assigned_name COLLATE NOCASE"
+        ).fetchall()]
     finally:
         conn.close()
-    return jsonify({"tags": tags, "locations": locations})
+    return jsonify({"tags": tags, "locations": locations, "people": people})
 
 
 @app.route("/api/stats")

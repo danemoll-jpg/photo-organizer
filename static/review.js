@@ -112,6 +112,21 @@
  *   fix above so this reuses that exact behavior rather than a second
  *   copy-pasted implementation. Scoped to the bulk-edit UI only -- the
  *   single-item viewer edit form's Location field was already free-text.
+ *
+ * Phase 3d (this session): the grid's Person filter (added inert in
+ *   Phase 2c -- disabled control, "Phase 3 doesn't exist yet") is wired to
+ *   real Phase 3 data. Populated from /api/facets' new `people` list (real
+ *   assigned names only), filtering via a new `person` param
+ *   (review_tool.py's _build_filters resolves it to a cluster_id join --
+ *   see its docstring). THIRD reuse of attachSuggestionDropdown (Tag
+ *   filter, bulk-edit Location, now this) -- per rule 7, no third
+ *   copy-pasted implementation. `assigned_name` has no uniqueness
+ *   constraint (unlike tags.tag_name), so allPeople below disambiguates
+ *   same-named entries by appending "(#cluster_id)" only to whichever
+ *   ones actually collide, so the exact-typed-name-match resolution
+ *   applyFilters() does (same "value must exactly match a real known
+ *   value" contract as Tag) still lands on the right cluster_id even in
+ *   that rare case.
  */
 (() => {
   const cfg = window.REVIEW_CONFIG;
@@ -122,7 +137,7 @@
   const NO_LOCATION_VALUE = "__no_location__";
 
   const state = {
-    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", show_hidden: false },
+    filters: { date_from: "", date_to: "", tag: "", caption_kw: "", location: "", has_location: "", media_type: "", person: "", show_hidden: false },
     pageSize: cfg.pageSize,
     // Phase 2h Part A: file_hash values checked in the grid, independent of
     // which page is currently loaded -- see renderGrid/toggleSelect.
@@ -215,9 +230,11 @@
   }
 
   function currentFilterParams() {
-    // Note: no "people" param — the people/faces filter is deliberately
-    // inert (disabled control, Phase 3 doesn't exist yet) and never sent.
     // Note: no "folder" param — that filter was removed from the UI.
+    // Phase 3d: "person" is a people.cluster_id (see applyFilters' exact-
+    // label lookup against allPeople), not a raw typed name — so the
+    // same-name-different-person edge case (see loadFacets) is never
+    // ambiguous server-side either.
     return {
       date_from: state.filters.date_from,
       date_to: state.filters.date_to,
@@ -226,13 +243,14 @@
       location: state.filters.location,
       has_location: state.filters.has_location,
       media_type: state.filters.media_type,
+      person: state.filters.person,
       show_hidden: state.filters.show_hidden ? "1" : "",
     };
   }
 
   function hasActiveFilters() {
     const f = state.filters;
-    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type);
+    return Boolean(f.date_from || f.date_to || f.tag || f.caption_kw || f.location || f.has_location || f.media_type || f.person);
   }
 
   // Random 31-bit int as a string — used to seed a fresh random-order
@@ -278,10 +296,11 @@
   }
 
   // ---------------------------------------------------------------------
-  // Facets (Location dropdown + Tag suggestion data)
+  // Facets (Location dropdown + Tag/Person suggestion data)
   // ---------------------------------------------------------------------
   let allTags = []; // populated below, filtered client-side by the Tag suggestion dropdown
   let allLocations = []; // ditto, for the bulk-edit Location suggestion dropdown below
+  let allPeople = []; // Phase 3d: [{cluster_id, label}] for the Person filter's suggestion dropdown, see below
 
   async function loadFacets() {
     try {
@@ -301,6 +320,20 @@
       // just quick-pick suggestions, not a hard constraint on what can be
       // typed/submitted.
       allLocations = data.locations || [];
+      // Phase 3d: /api/facets' `people` list is real named people only
+      // (see review_tool.py). Unlike tags.tag_name, `assigned_name` has no
+      // uniqueness constraint -- two different real people COULD share a
+      // name -- so build a `label` that's only disambiguated with
+      // "(#cluster_id)" for whichever names actually collide, keeping the
+      // common case's label identical to the plain assigned_name (so
+      // applyFilters' exact-label lookup below still "just works" the same
+      // way Tag's exact-match-against-a-known-value already does).
+      const nameCounts = {};
+      for (const p of data.people || []) nameCounts[p.assigned_name] = (nameCounts[p.assigned_name] || 0) + 1;
+      allPeople = (data.people || []).map((p) => ({
+        cluster_id: p.cluster_id,
+        label: nameCounts[p.assigned_name] > 1 ? `${p.assigned_name} (#${p.cluster_id})` : p.assigned_name,
+      }));
     } catch (e) {
       // Non-fatal: filters just show "Any"/no suggestions until reloaded.
     }
@@ -370,6 +403,12 @@
   // Real-user-feedback fix: bulk-edit Location, same pattern, suggestions
   // drawn from allLocations instead of allTags.
   attachSuggestionDropdown(bulkLocationInput, bulkLocationSuggestionsEl, () => allLocations);
+  // Phase 3d: grid Person filter, third reuse of the same component -- see
+  // module docstring. Suggestions are display labels (allPeople's
+  // disambiguated `label`, not raw assigned_name) so a picked suggestion's
+  // text is exactly what applyFilters' exact-match lookup below expects.
+  const personInput = el("f-person");
+  const hidePersonSuggestions = attachSuggestionDropdown(personInput, el("f-person-suggestions"), () => allPeople.map((p) => p.label));
 
   // ---------------------------------------------------------------------
   // Stats
@@ -634,8 +673,21 @@
       state.filters.has_location = "";
     }
     state.filters.media_type = el("f-media-type").value;
+    // Phase 3d: Person is free-text like Tag, but must resolve to a real
+    // cluster_id, not a raw name string, before it's sent anywhere -- an
+    // exact (case-insensitive) match against allPeople's disambiguated
+    // `label` (see loadFacets), same "typed value must exactly match a
+    // real known value" contract Tag already has for tags. No match (typo,
+    // partial text, or just left blank) means no person filter, not an
+    // error.
+    const personText = el("f-person").value.trim();
+    const personMatch = personText
+      ? allPeople.find((p) => p.label.toLowerCase() === personText.toLowerCase())
+      : null;
+    state.filters.person = personMatch ? personMatch.cluster_id : "";
     state.filters.show_hidden = el("f-show-hidden").checked;
     hideTagSuggestions();
+    hidePersonSuggestions();
     loadGridPage({ resetPageNum: true });
     refreshStats();
     // The filtered set just changed size/membership -- any in-progress
@@ -646,7 +698,7 @@
     else { state.viewer.randomSeed = null; state.viewer.randomIdx = 0; }
   }
   el("f-apply").addEventListener("click", applyFilters);
-  for (const id of ["f-tag", "f-caption-kw"]) {
+  for (const id of ["f-tag", "f-caption-kw", "f-person"]) {
     el(id).addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
   }
   el("f-reset").addEventListener("click", () => {
@@ -656,6 +708,7 @@
     el("f-caption-kw").value = "";
     el("f-location").value = "";
     el("f-media-type").value = "";
+    el("f-person").value = "";
     el("f-show-hidden").checked = false;
     applyFilters();
   });

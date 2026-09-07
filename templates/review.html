@@ -61,10 +61,21 @@
       <option value="video">Videos only</option>
     </select>
   </label>
-  <label>People/Faces
-    <select id="f-people" disabled title="Face detection isn't built yet (Phase 3) — this filter will work once it is.">
-      <option>Not available yet</option>
-    </select>
+  <label>Person
+    <!-- Phase 3d: wired up to real Phase 3 people/faces data (was a
+         disabled placeholder, "Phase 3 doesn't exist yet"). Reuses the
+         exact same custom suggestion-dropdown component as the Tag filter
+         above and the bulk-edit Location field below (attachSuggestionDropdown
+         in static/review.js) rather than a third copy of the same pattern,
+         per rule 7 -- free-text like those, populated from /api/facets'
+         new `people` list (real assigned names only; unclustered/unnamed
+         faces are never offered). An unrecognized/partial name just means
+         no person filter is applied, same "typed value must exactly match
+         a real known value" contract the Tag filter already has. -->
+    <span class="tag-input-wrap">
+      <input type="text" id="f-person" placeholder="Start typing a named person…" autocomplete="off" autocapitalize="none" spellcheck="false">
+      <ul id="f-person-suggestions" class="tag-suggestions" hidden></ul>
+    </span>
   </label>
   <label class="show-hidden-label">
     <input type="checkbox" id="f-show-hidden">
@@ -184,7 +195,12 @@
       <div class="viewer-row"><span class="label">Caption</span><span id="viewer-caption"></span><button type="button" class="edit-btn" data-field="caption" title="Edit caption">&#9998;</button></div>
       <div class="viewer-row"><span class="label">Tags</span><span id="viewer-tags"></span><button type="button" class="edit-btn" data-field="tags" title="Edit tags">&#9998;</button></div>
       <div class="viewer-row"><span class="label">Location</span><span id="viewer-location"></span><button type="button" class="edit-btn" data-field="location" title="Edit location">&#9998;</button></div>
-      <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people" class="placeholder">Face detection isn't built yet (Phase 3) — this will show who's in the photo once it is.</span></div>
+      <!-- Phase 3d wired up the grid's Person FILTER only (see the filters
+           section above) -- this per-photo "who's in this shot" display is
+           a separate, not-yet-requested piece of work, so the text below
+           is updated just enough to stop claiming Phase 3 itself doesn't
+           exist (it now does), without actually populating it. -->
+      <div class="viewer-row people-row"><span class="label">People</span><span id="viewer-people" class="placeholder">Not shown here yet — use the grid's Person filter to browse by who's in a photo.</span></div>
 
       <!-- Shared inline edit form -- one at a time, whichever edit-btn above
            was last clicked (see review.js's openEditForm/closeEditForm). -->
