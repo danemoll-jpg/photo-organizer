@@ -314,14 +314,18 @@ from src.face_clustering import (
     ClusterStats,
     LoadStats,
     cluster_faces_full,
+    count_not_a_person,
     create_person_from_faces,
     crop_face_thumbnail,
     list_clusters,
     list_faces_in_cluster,
+    list_not_a_person_faces,
     list_people_for_merge_target,
+    mark_faces_not_a_person,
     merge_people,
     move_faces_to_person,
     set_person_name,
+    unmark_faces_not_a_person,
 )
 from src.face_detection import FaceDetectionStats, run_face_detection
 from src.gps_backfill import GpsStats, run_gps_extraction
@@ -3129,7 +3133,19 @@ class FaceLabelingWindow(tk.Toplevel):
         init_db(cfg.db_path_abs)
         self.conn = connect(cfg.db_path_abs)
 
-        self._clusters: list = []  # list[ClusterSummary]
+        self._clusters: list = []  # list[ClusterSummary], unfiltered -- straight from list_clusters()
+        # Phase 3c: self._display is what's actually shown in the listbox --
+        # self._clusters with the min-size/hide-named filters applied (a
+        # pure display-layer filter, never touches the DB -- see
+        # _rebuild_display_list()), plus an optional trailing
+        # ("not_a_person", count) entry for the "(Marked as not a person)"
+        # bucket when its own toggle is on. self._selected_index indexes
+        # into THIS list, not self._clusters -- see _display_key_for()'s
+        # docstring for why a simple cluster_id isn't a stable enough
+        # selection key on its own once this second pseudo-bucket exists.
+        self._display: list[tuple[str, object]] = []
+        self._not_a_person_count: int = 0
+        self._current_view: str | None = None  # "cluster" | "not_a_person" | None (nothing selected)
         self._selected_index: int | None = None
         self._current_faces: list = []  # list[FaceRecord]
         self._selected_face_ids: set[int] = set()
@@ -3139,6 +3155,17 @@ class FaceLabelingWindow(tk.Toplevel):
         # Tk itself only holds a C-level handle and the image silently goes
         # blank the moment Python garbage-collects its last reference.
         self._photo_refs: list[ImageTk.PhotoImage] = []
+
+        # Phase 3c filter state -- purely UI-layer, per the spec ("must
+        # never affect the underlying data, clustering, or which faces are
+        # assigned to which person"). Traced so typing/toggling re-renders
+        # immediately without a DB round trip (_rebuild_display_list() only
+        # ever reads self._clusters/self._not_a_person_count, already
+        # in memory from the last reload()).
+        self.min_size_var = tk.StringVar(value="3")
+        self.min_size_var.trace_add("write", lambda *_: self._rebuild_display_list())
+        self.hide_named_var = tk.BooleanVar(value=False)
+        self.show_not_a_person_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -3151,6 +3178,35 @@ class FaceLabelingWindow(tk.Toplevel):
         left = ttk.Frame(paned)
         paned.add(left, weight=1)
         ttk.Label(left, text="People / groups:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=6, pady=(6, 0))
+
+        # Phase 3c: display-only filters -- never touch the DB, never alter
+        # which faces belong to which person (see photo-organizer-spec.md's
+        # Phase 3c section). Re-rendered live via _rebuild_display_list(),
+        # no "Apply" button needed.
+        filter_frame = ttk.Frame(left)
+        filter_frame.pack(fill="x", padx=6, pady=(4, 0))
+        size_row = ttk.Frame(filter_frame)
+        size_row.pack(fill="x")
+        ttk.Label(size_row, text="Hide groups smaller than").pack(side="left")
+        ttk.Spinbox(size_row, from_=0, to=100000, width=5, textvariable=self.min_size_var).pack(
+            side="left", padx=(4, 4)
+        )
+        ttk.Label(size_row, text="faces").pack(side="left")
+        ttk.Checkbutton(
+            filter_frame, text="Hide already-named people",
+            variable=self.hide_named_var, command=self._rebuild_display_list,
+        ).pack(anchor="w", pady=(2, 0))
+        ttk.Checkbutton(
+            filter_frame, text="Show marked-as-not-a-person",
+            variable=self.show_not_a_person_var, command=self._rebuild_display_list,
+        ).pack(anchor="w")
+        ttk.Label(
+            filter_frame,
+            text='"(Unclustered)" always stays visible regardless of these filters.',
+            foreground="#666666", font=("Segoe UI", 8),
+            wraplength=220, justify="left",
+        ).pack(anchor="w", pady=(2, 4))
+
         list_row = ttk.Frame(left)
         list_row.pack(fill="both", expand=True, padx=6, pady=6)
         self.cluster_listbox = tk.Listbox(list_row, exportselection=False)
@@ -3196,6 +3252,20 @@ class FaceLabelingWindow(tk.Toplevel):
         ttk.Button(action_bar1, text="Clear Selection", command=self._on_clear_selection).pack(side="left", padx=(6, 0))
         self.selection_count_label = ttk.Label(action_bar1, text="0 selected")
         self.selection_count_label.pack(side="left", padx=(10, 0))
+        # Phase 3c: reversible false-positive flag -- see
+        # photo-organizer-spec.md's Phase 3c section and
+        # src/face_clustering.py's mark/unmark_faces_not_a_person()
+        # docstrings. Both buttons stay enabled regardless of the current
+        # view; the handlers themselves guard against the nonsensical
+        # combination (e.g. "un-mark" while not viewing the
+        # "(Marked as not a person)" bucket) with a clear message rather
+        # than a disabled/greyed-out button the user has to guess why.
+        ttk.Button(action_bar1, text="Mark as Not a Person", command=self._on_mark_not_a_person).pack(
+            side="left", padx=(10, 0)
+        )
+        ttk.Button(action_bar1, text="Un-mark Selected", command=self._on_unmark_not_a_person).pack(
+            side="left", padx=(6, 0)
+        )
         ttk.Button(action_bar1, text="Split Selected Into New Person...", command=self._on_split).pack(
             side="right"
         )
@@ -3213,23 +3283,90 @@ class FaceLabelingWindow(tk.Toplevel):
 
     # ---------------------------------------------------------------- data
     def reload(self) -> None:
-        prev_cluster_id = (
-            self._clusters[self._selected_index].cluster_id
-            if self._selected_index is not None and self._selected_index < len(self._clusters)
-            else "___none_selected_yet___"
-        )
+        """Refetches from the DB (list_clusters()/count_not_a_person()) and
+        re-renders. Called on window open, Refresh, after every mutating
+        action, and by DashboardApp when a clustering run finishes while
+        this window is open. Distinct from _rebuild_display_list(), which
+        only re-applies the display filters to already-fetched data --
+        toggling a filter should never need to hit the DB again."""
+        prev_key = self._display_key(self._selected_index)
         self._clusters = list_clusters(self.conn)
-        self.cluster_listbox.delete(0, "end")
+        self._not_a_person_count = count_not_a_person(self.conn)
+        self._rebuild_display_list(prev_key=prev_key)
+
+    def _display_key_for(self, kind: str, payload) -> tuple:
+        """A stable identity for a display-list entry, used to re-find the
+        same selection after reload()/_rebuild_display_list() rebuilds the
+        list (list index alone isn't stable -- filtering or a changed face
+        count can shift everything). cluster_id alone isn't quite enough
+        either: the "(Unclustered)" cluster entry and the "(Marked as not a
+        person)" pseudo-bucket both have no real cluster_id, so the `kind`
+        tag is what actually tells them apart."""
+        if kind == "cluster":
+            return ("cluster", payload.cluster_id)
+        return ("not_a_person", None)
+
+    def _display_key(self, index: int | None):
+        if index is None or index >= len(self._display):
+            return None
+        kind, payload = self._display[index]
+        return self._display_key_for(kind, payload)
+
+    def _rebuild_display_list(self, prev_key=None) -> None:
+        """Phase 3c: rebuilds self._display from self._clusters/
+        self._not_a_person_count (already in memory -- no DB query here)
+        applying the min-size and hide-already-named filters, plus the
+        optional trailing "(Marked as not a person)" entry. Purely a
+        display-layer operation: never changes clustering, cluster_id
+        assignment, or which faces belong to which person -- see the spec's
+        own explicit requirement on this.
+
+        prev_key, when given (only by reload()), is used to try to keep the
+        same logical selection across a DB refetch. A bare filter-widget
+        change (no prev_key passed, e.g. the trace/command callbacks below)
+        instead tries to preserve whatever's CURRENTLY selected, so typing
+        into "Hide groups smaller than" doesn't blow away an in-progress
+        selection every keystroke."""
+        if prev_key is None:
+            prev_key = self._display_key(self._selected_index)
+
+        try:
+            min_size = max(0, int(self.min_size_var.get()))
+        except (ValueError, tk.TclError):
+            min_size = 0  # mid-edit/blank entry -- show everything rather than erroring
+        hide_named = self.hide_named_var.get()
+
+        display: list[tuple[str, object]] = []
         for c in self._clusters:
-            label = f"{c.assigned_name or '(unnamed)'} — {c.face_count} face(s)"
+            if c.cluster_id is None:
+                # "(Unclustered)" -- per spec, always visible, these filters don't apply to it.
+                display.append(("cluster", c))
+                continue
+            if hide_named and c.assigned_name:
+                continue
+            if c.face_count < min_size:
+                continue
+            display.append(("cluster", c))
+
+        if self.show_not_a_person_var.get() and self._not_a_person_count > 0:
+            display.append(("not_a_person", self._not_a_person_count))
+
+        self._display = display
+        self.cluster_listbox.delete(0, "end")
+        for kind, payload in self._display:
+            if kind == "cluster":
+                label = f"{payload.assigned_name or '(unnamed)'} — {payload.face_count} face(s)"
+            else:
+                label = f"(Marked as not a person) — {payload} face(s)"
             self.cluster_listbox.insert("end", label)
 
         self._selected_index = None
-        for i, c in enumerate(self._clusters):
-            if c.cluster_id == prev_cluster_id:
-                self._selected_index = i
-                self.cluster_listbox.selection_set(i)
-                break
+        if prev_key is not None:
+            for i, (kind, payload) in enumerate(self._display):
+                if self._display_key_for(kind, payload) == prev_key:
+                    self._selected_index = i
+                    self.cluster_listbox.selection_set(i)
+                    break
         self._load_selected_cluster()
 
     def _on_cluster_selected(self, event=None) -> None:
@@ -3246,22 +3383,36 @@ class FaceLabelingWindow(tk.Toplevel):
         self._update_selection_count()
 
         idx = self._selected_index
-        if idx is None or idx >= len(self._clusters):
+        if idx is None or idx >= len(self._display):
+            self._current_view = None
             self._current_faces = []
             self.name_var.set("")
             self.target_combo["values"] = []
             self._merge_target_ids = []
             return
 
-        summary = self._clusters[idx]
-        self.name_var.set(summary.assigned_name or "" if summary.cluster_id is not None else "")
-        self._current_faces = list_faces_in_cluster(self.conn, summary.cluster_id)
+        kind, payload = self._display[idx]
+        self._current_view = kind
 
-        targets = list_people_for_merge_target(self.conn, exclude_cluster_id=summary.cluster_id)
-        self._merge_target_ids = [t[0] for t in targets]
-        self.target_combo["values"] = [t[1] for t in targets]
-        if targets:
-            self.target_combo.current(0)
+        if kind == "not_a_person":
+            # No name/merge-target concept for this bucket -- see the
+            # _on_save_name/_on_split/_on_move/_on_merge guards below, which
+            # are the actual enforcement of "un-mark first, then split/move
+            # normally" rather than a disabled widget here.
+            self.name_var.set("")
+            self._current_faces = list_not_a_person_faces(self.conn)
+            self.target_combo["values"] = []
+            self._merge_target_ids = []
+        else:
+            summary = payload
+            self.name_var.set(summary.assigned_name or "" if summary.cluster_id is not None else "")
+            self._current_faces = list_faces_in_cluster(self.conn, summary.cluster_id)
+
+            targets = list_people_for_merge_target(self.conn, exclude_cluster_id=summary.cluster_id)
+            self._merge_target_ids = [t[0] for t in targets]
+            self.target_combo["values"] = [t[1] for t in targets]
+            if targets:
+                self.target_combo.current(0)
 
         for i, face in enumerate(self._current_faces):
             try:
@@ -3306,11 +3457,28 @@ class FaceLabelingWindow(tk.Toplevel):
         self._update_selection_count()
 
     def _current_summary(self):
-        if self._selected_index is None or self._selected_index >= len(self._clusters):
+        """Returns the selected ClusterSummary, or None if either nothing is
+        selected OR the current view is the "(Marked as not a person)"
+        bucket (which has no ClusterSummary at all -- see _display's
+        ("not_a_person", count) entries). Callers that need to tell those
+        two None-causes apart for a clearer error message check
+        self._current_view themselves first (see _on_save_name/_on_merge
+        below) rather than relying on this alone."""
+        idx = self._selected_index
+        if idx is None or idx >= len(self._display):
             return None
-        return self._clusters[self._selected_index]
+        kind, payload = self._display[idx]
+        return payload if kind == "cluster" else None
 
     def _on_save_name(self) -> None:
+        if self._current_view == "not_a_person":
+            messagebox.showerror(
+                "Face Labeling",
+                'Can\'t name the "(Marked as not a person)" bucket -- these are flagged false-positive '
+                'detections, not a person. Select some and click "Un-mark Selected" if they were flagged '
+                'by mistake.',
+            )
+            return
         summary = self._current_summary()
         if summary is None:
             return
@@ -3328,6 +3496,13 @@ class FaceLabelingWindow(tk.Toplevel):
     def _on_split(self) -> None:
         if not self._selected_face_ids:
             messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            return
+        if self._current_view == "not_a_person":
+            messagebox.showerror(
+                "Face Labeling",
+                'These faces are flagged as not a person. Click "Un-mark Selected" first, then split/move '
+                "them normally.",
+            )
             return
         from tkinter import simpledialog
         name = simpledialog.askstring(
@@ -3347,6 +3522,13 @@ class FaceLabelingWindow(tk.Toplevel):
         if not self._selected_face_ids:
             messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
             return
+        if self._current_view == "not_a_person":
+            messagebox.showerror(
+                "Face Labeling",
+                'These faces are flagged as not a person. Click "Un-mark Selected" first, then split/move '
+                "them normally.",
+            )
+            return
         sel = self.target_combo.current()
         if sel < 0 or sel >= len(self._merge_target_ids):
             messagebox.showinfo("Face Labeling", "Choose a target person first.")
@@ -3356,6 +3538,12 @@ class FaceLabelingWindow(tk.Toplevel):
         self.reload()
 
     def _on_merge(self) -> None:
+        if self._current_view == "not_a_person":
+            messagebox.showerror(
+                "Face Labeling",
+                'Can\'t merge the "(Marked as not a person)" bucket -- these aren\'t a person.',
+            )
+            return
         summary = self._current_summary()
         if summary is None:
             return
@@ -3379,6 +3567,39 @@ class FaceLabelingWindow(tk.Toplevel):
         ):
             return
         merge_people(self.conn, keep_cluster_id=target_cid, other_cluster_id=summary.cluster_id)
+        self.reload()
+
+    def _on_mark_not_a_person(self) -> None:
+        """Phase 3c: flags the selected faces as confirmed false-positive
+        detections (a pattern/object/pet misdetected as a face) -- reversible
+        via _on_unmark_not_a_person below, never a delete. Pulls each face
+        out of its current cluster (mark_faces_not_a_person's own job) and
+        excludes it from every future `cluster-faces` run."""
+        if not self._selected_face_ids:
+            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            return
+        if self._current_view == "not_a_person":
+            messagebox.showinfo("Face Labeling", "These faces are already marked as not a person.")
+            return
+        mark_faces_not_a_person(self.conn, sorted(self._selected_face_ids))
+        self.reload()
+
+    def _on_unmark_not_a_person(self) -> None:
+        """Reverses a "Mark as Not a Person" flag. Only meaningful while
+        viewing the "(Marked as not a person)" bucket -- guarded rather than
+        silently no-op'd elsewhere, since a user clicking this from a normal
+        cluster view most likely meant "Mark", not "Un-mark"."""
+        if not self._selected_face_ids:
+            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            return
+        if self._current_view != "not_a_person":
+            messagebox.showinfo(
+                "Face Labeling",
+                'Switch to the "(Marked as not a person)" view (check "Show marked-as-not-a-person" on '
+                "the left) to un-mark faces.",
+            )
+            return
+        unmark_faces_not_a_person(self.conn, sorted(self._selected_face_ids))
         self.reload()
 
     def _on_close(self) -> None:

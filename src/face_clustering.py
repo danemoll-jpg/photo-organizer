@@ -342,12 +342,17 @@ def run_face_clustering(
     min_samples = cfg.face_cluster_min_samples
 
     stats.excluded_low_confidence = conn.execute(
-        "SELECT COUNT(*) FROM faces WHERE cluster_id IS NULL AND det_score IS NOT NULL AND det_score < ?",
+        "SELECT COUNT(*) FROM faces WHERE cluster_id IS NULL AND not_a_person = 0 "
+        "AND det_score IS NOT NULL AND det_score < ?",
         (cfg.face_min_det_score,),
     ).fetchone()[0]
 
+    # not_a_person = 0: a Phase 3c-flagged false positive is never a
+    # clustering candidate, even after it's back to cluster_id IS NULL --
+    # see mark_faces_not_a_person()'s docstring. This is the actual
+    # enforcement point for "excluded from future cluster-faces re-runs".
     rows = conn.execute(
-        "SELECT face_id, embedding FROM faces WHERE cluster_id IS NULL "
+        "SELECT face_id, embedding FROM faces WHERE cluster_id IS NULL AND not_a_person = 0 "
         "AND (det_score IS NULL OR det_score >= ?)",
         (cfg.face_min_det_score,),
     ).fetchall()
@@ -574,12 +579,19 @@ def list_clusters(conn: sqlite3.Connection, include_unclustered: bool = True) ->
         out.append(_cluster_summary(cluster_id, name, notes, face_count, sample))
 
     if include_unclustered:
-        count = conn.execute("SELECT COUNT(*) FROM faces WHERE cluster_id IS NULL").fetchone()[0]
+        # not_a_person = 0: a Phase 3c-flagged face is pulled out of the
+        # "(Unclustered)" bucket too, not just out of a real cluster -- it
+        # has its own dedicated bucket (see list_not_a_person_faces /
+        # count_not_a_person), which FaceLabelingWindow shows separately
+        # behind its "Show marked-as-not-a-person" toggle, off by default.
+        count = conn.execute(
+            "SELECT COUNT(*) FROM faces WHERE cluster_id IS NULL AND not_a_person = 0"
+        ).fetchone()[0]
         if count:
             sample = conn.execute(
                 "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path "
                 "FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash "
-                "WHERE f.cluster_id IS NULL LIMIT 1"
+                "WHERE f.cluster_id IS NULL AND f.not_a_person = 0 LIMIT 1"
             ).fetchone()
             out.append(_cluster_summary(None, "(Unclustered)", None, count, sample))
     return out
@@ -608,12 +620,17 @@ class FaceRecord:
 
 
 def list_faces_in_cluster(conn: sqlite3.Connection, cluster_id: int | None) -> list[FaceRecord]:
-    """cluster_id=None lists the "(Unclustered)" bucket."""
+    """cluster_id=None lists the "(Unclustered)" bucket. A face flagged
+    not_a_person is excluded here too (it has cluster_id IS NULL like any
+    other unclustered face, but belongs to its own dedicated bucket -- see
+    list_not_a_person_faces) -- filtered unconditionally, not just for the
+    cluster_id IS NULL branch, as a defensive guard in case a real cluster_id
+    row is ever left inconsistent."""
     where = "f.cluster_id IS NULL" if cluster_id is None else "f.cluster_id = ?"
     params = () if cluster_id is None else (cluster_id,)
     rows = conn.execute(
         "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score "
-        f"FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash WHERE {where} "
+        f"FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash WHERE {where} AND f.not_a_person = 0 "
         "ORDER BY f.face_id",
         params,
     ).fetchall()
@@ -621,6 +638,68 @@ def list_faces_in_cluster(conn: sqlite3.Connection, cluster_id: int | None) -> l
         FaceRecord(face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6], det_score=r[7])
         for r in rows
     ]
+
+
+def count_not_a_person(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM faces WHERE not_a_person = 1").fetchone()[0]
+
+
+def list_not_a_person_faces(conn: sqlite3.Connection) -> list[FaceRecord]:
+    """The dedicated bucket for Phase 3c-flagged false positives -- shown by
+    FaceLabelingWindow only behind its "Show marked-as-not-a-person" toggle,
+    off by default, per the spec's "hidden from view by default" requirement."""
+    rows = conn.execute(
+        "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score "
+        "FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash "
+        "WHERE f.not_a_person = 1 ORDER BY f.face_id"
+    ).fetchall()
+    return [
+        FaceRecord(face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6], det_score=r[7])
+        for r in rows
+    ]
+
+
+def mark_faces_not_a_person(conn: sqlite3.Connection, face_ids: list[int]) -> None:
+    """Phase 3c's "Mark as not a person" action -- a reversible flag (same
+    philosophy as photos.excluded / "Hide from library"), never a face row
+    delete. Pulls each face out of whatever cluster it's currently in (same
+    mechanical effect as a split, but tagged not_a_person rather than moved
+    to a new named person) and recomputes that cluster's centroid so it
+    doesn't keep counting a face that no longer belongs to it. Idempotent --
+    marking an already-marked face (cluster_id already NULL) is a harmless
+    no-op recompute-of-nothing."""
+    if not face_ids:
+        return
+    source_clusters = _source_clusters_of(conn, face_ids)
+    conn.executemany(
+        "UPDATE faces SET not_a_person = 1, cluster_id = NULL WHERE face_id = ?",
+        [(fid,) for fid in face_ids],
+    )
+    for cid in source_clusters:
+        _recompute_person_centroid(conn, cid)
+    conn.commit()
+
+
+def unmark_faces_not_a_person(conn: sqlite3.Connection, face_ids: list[int]) -> None:
+    """Reverses mark_faces_not_a_person(). Deliberately does NOT try to
+    restore whatever cluster_id the face had before it was marked -- that
+    prior grouping is stale the moment the face left it (the cluster's
+    centroid has already been recomputed without it, and time may have
+    passed), and DBSCAN cluster_ids aren't meaningfully "the same" across
+    runs anyway (see this module's own re-clustering design note). An
+    un-marked face simply rejoins the "(Unclustered)" bucket with
+    cluster_id NULL, same as a never-flagged, never-clustered face --
+    the next `cluster-faces` run picks it back up like any other
+    unclustered candidate (matching an existing person's centroid, or
+    seeding a new one), and the user can also manually move/split it
+    from the Unclustered bucket right away without waiting for that."""
+    if not face_ids:
+        return
+    conn.executemany(
+        "UPDATE faces SET not_a_person = 0 WHERE face_id = ?",
+        [(fid,) for fid in face_ids],
+    )
+    conn.commit()
 
 
 def list_people_for_merge_target(conn: sqlite3.Connection, exclude_cluster_id: int | None = None) -> list[tuple[int, str]]:

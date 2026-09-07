@@ -678,6 +678,48 @@ labeling is a genuinely different, interactive task:
 - Not modal — the rest of the dashboard stays usable while it's open, and
   finishing a clustering run while it's open refreshes it automatically.
 
+### Phase 3c — filtering junk clusters and marking false detections
+
+At full-library scale, many small clusters (1–3 faces — blurry shots,
+strangers in the background, bad detections) can bury the important groups.
+Three display-layer filters sit above the people list, none of which ever
+touch the DB or change which faces belong to which person:
+
+- **"Hide groups smaller than N faces"** (default 3) — a live numeric
+  filter on the people list. Nothing hidden is deleted or altered; set it
+  to 0 to see everything again.
+- **"Hide already-named people"** — once you've named someone, check this
+  to drop them off the list so you're not re-scrolling past people you've
+  already finished.
+- The **"(Unclustered)" bucket always stays visible** regardless of either
+  filter above — it's a single fixed entry, not a growing list of clusters.
+
+**"Mark as Not a Person"** / **"Un-mark Selected"** (action buttons next to
+Select All/Clear Selection) handle false-positive detections — a
+pattern/object/pet `insightface` mistook for a face. Same reversible-flag
+philosophy as "Hide from library" for photos (`photos.excluded`) — never a
+row delete:
+
+- Select one or more face thumbnails (in any cluster, or the "(Unclustered)"
+  bucket) and click **Mark as Not a Person**. The face is pulled out of
+  whatever cluster it was in (that cluster's centroid/face count are
+  recomputed) and flagged `faces.not_a_person = 1`.
+- A flagged face is **excluded from every future `cluster-faces` run** —
+  `run_face_clustering()`'s candidate query filters `not_a_person = 0`, so
+  it's never re-considered even though it has `cluster_id IS NULL` like a
+  genuinely unclustered face.
+- Flagged faces are **hidden by default** — check **"Show
+  marked-as-not-a-person"** on the left to reveal a dedicated
+  "(Marked as not a person)" bucket. Select faces there and click
+  **Un-mark Selected** to reverse the flag; it rejoins the "(Unclustered)"
+  bucket and becomes a normal clustering candidate again on the next run
+  (Save Name/Split/Move/Merge are all disabled while viewing this bucket —
+  un-mark first, then use those normally).
+
+See `tests/test_phase3c.py` for full coverage, including a migration test
+confirming `faces.not_a_person` is added and backfilled to `0` for a
+pre-existing production-shaped DB.
+
 **Explicitly not built this session** (see TODO.md): any face/people data
 surfaced in `review_tool.py` — Phase 2c's people/faces filter placeholder
 stays inert until a future session wires it up to this real data.

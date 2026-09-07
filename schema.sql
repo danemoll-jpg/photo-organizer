@@ -133,6 +133,18 @@ CREATE TABLE IF NOT EXISTS faces (
     embedding        BLOB NOT NULL,                                    -- 512-dim ArcFace vector, float32.tobytes() (see src/face_clustering.py::vec_to_blob/blob_to_vec)
     det_score         REAL,                                              -- RetinaFace detection confidence (0-1), NULL for a pre-Session-2-schema row loaded without it
     cluster_id        INTEGER REFERENCES people(cluster_id) ON DELETE SET NULL, -- NULL until clustered (or permanently unclustered -- see face_min_det_score/min_samples)
+    -- Phase 3c: reversible false-positive flag (same non-destructive
+    -- philosophy as photos.excluded / "Hide from library" -- a flag, never
+    -- a row delete). 1 = a human confirmed this detection isn't actually a
+    -- face (a pattern/object/pet misdetected). Set via
+    -- src/face_clustering.py::mark_faces_not_a_person(), which also clears
+    -- cluster_id (pulling it out of whatever group it was in, same
+    -- mechanical effect as a split). run_face_clustering()'s candidate
+    -- query excludes not_a_person=1 rows so a future cluster-faces run
+    -- never re-adds one to a group. Reversible via
+    -- unmark_faces_not_a_person() -- see that function's docstring for why
+    -- un-marking doesn't try to restore the old cluster_id.
+    not_a_person      INTEGER NOT NULL DEFAULT 0,
     detected_at        TEXT NOT NULL
 );
 

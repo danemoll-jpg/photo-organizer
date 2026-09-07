@@ -98,6 +98,11 @@ def _migrate(conn: sqlite3.Connection, logger: logging.Logger) -> None:
     face_cols = {row[1] for row in conn.execute("PRAGMA table_info(faces)")}
     if "det_score" not in face_cols:
         conn.execute("ALTER TABLE faces ADD COLUMN det_score REAL")
+    # Phase 3c: false-positive flag -- see schema.sql's comment on
+    # faces.not_a_person. Defaults to 0 for every pre-existing row, which is
+    # exactly right: nothing was ever flagged before this column existed.
+    if "not_a_person" not in face_cols:
+        conn.execute("ALTER TABLE faces ADD COLUMN not_a_person INTEGER NOT NULL DEFAULT 0")
     people_cols = {row[1] for row in conn.execute("PRAGMA table_info(people)")}
     for col, ddl in (
         ("representative_embedding", "BLOB"),
