@@ -336,3 +336,22 @@
 
 **Explicitly out of scope:**
 - Any editing of face/person data from `review_tool.py` — this is a filter/browse feature only, consistent with `review_tool.py`'s existing edit scope (captions/tags/location/date/hide) not being extended to faces in this pass unless separately requested.
+
+## Phase 3e — Display named people on the individual viewer AND the grid
+
+**Context:** Phase 3d wired up the ability to *filter* by person, but never wired up actually *displaying* who's in a photo — the viewer's "People" row was left as an inert placeholder (this was a genuine gap in the Phase 3d spec, not a scope decision Code made on its own). The user now wants this shown in both places: the full viewer AND directly on grid thumbnails.
+
+**Requirements:**
+
+**Individual viewer:**
+- Wire up the existing "People" row/field to show the actual named people appearing in that specific photo (join `photos`/`faces`/`people` on `file_hash`, named people only — no unnamed/unclustered entries shown here, consistent with Phase 3d's filter also being named-only).
+- **Collapse when there are many people in one photo** — show a reasonable number (e.g. first 3-4 names) plus a "+N more" indicator, with a way to expand and see everyone (click to expand is fine — reuse whatever collapse/expand pattern already exists elsewhere in the UI if one does, don't invent a new one if an equivalent pattern is already established; check first).
+
+**Grid thumbnails:**
+- Show named people directly on/near each grid card too, not just in the full viewer.
+- Given thumbnails are much smaller than the full viewer, this needs to be compact by default — small name badges/chips is a reasonable approach, but use judgment on exact sizing/placement so it doesn't overwhelm the thumbnail itself.
+- Same collapsing principle as the viewer, likely even more aggressive given the smaller space (e.g. first 1-2 names + "+N", full list available via hover or click-through to the viewer) — exact threshold is a reasonable implementation judgment call, doesn't need to match the viewer's exact number.
+- This adds a join to the grid's existing query for every visible page of results — since results are already paginated, this should stay cheap (only needs data for the current page's rows, not the whole filtered set), but worth confirming this doesn't meaningfully slow down grid page loads at real scale.
+
+**Explicitly out of scope:**
+- Any editing of who's tagged in a photo from this display — this is read-only display, consistent with Phase 3d's filter-only scope. Editing face/person assignments stays in the Tkinter labeling window only.

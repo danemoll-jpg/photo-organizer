@@ -457,6 +457,15 @@ See `photo-organizer-spec.md`'s "Phase 3d" section for full requirements. Phase 
 - [x] Per rule 12: no schema change this session (`faces`/`people` already existed), so `init_db()` was not a concern here
 - [x] Out of scope: any face/person editing from `review_tool.py` — filter/browse only. Also left the per-photo `people` display field (`_row_to_dict`, viewer's People row) exactly as-is (`None`) — that's a separate, not-yet-requested piece of work, not folded into this filter-only session; the viewer's placeholder text was updated just enough to stop claiming Phase 3 itself doesn't exist yet (it now does)
 
+## ACTIVE: Phase 3e — Display named people on the individual viewer AND the grid
+See `photo-organizer-spec.md`'s "Phase 3e" section for full requirements. Gap from Phase 3d's spec (not a Code scope decision) — the filter got wired up, the actual display never did. Summary:
+- [ ] Viewer: wire up the existing "People" row to real named-people data (`photos`/`faces`/`people` join, named only)
+- [ ] Viewer: collapse when many people are in one photo — first 3-4 names + "+N more", expandable. Reuse an existing collapse/expand pattern if one's already established in the codebase, check first.
+- [ ] Grid: show named people directly on/near each thumbnail card too, not just the viewer
+- [ ] Grid: compact by default given card size — small badges/chips, more aggressive collapsing than the viewer (e.g. first 1-2 + "+N"), exact threshold is a reasonable implementation judgment call
+- [ ] Confirm the added join doesn't meaningfully slow grid page loads at real scale — should stay cheap since results are already paginated (only current page's rows need data), but verify rather than assume
+- [ ] Out of scope: editing who's tagged in a photo from this display — read-only, consistent with Phase 3d; editing stays in the Tkinter labeling window only
+
 ## LOCKED — Phase 4: Daughter-Facing Search + Plex Deep Links — SUPERSEDED, do not build as written
 **Superseded by Phase 2d above.** The user now prefers `review_tool.py` itself (password-gated, remotely accessible) over a Plex-deep-link companion app. Left here for historical reference only — do not implement this as originally scoped unless the user explicitly says otherwise.
 - ~~Map file_hash/path → Plex library item ID~~
