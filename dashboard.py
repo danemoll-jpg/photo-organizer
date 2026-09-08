@@ -3199,6 +3199,44 @@ class FaceLabelingWindow(tk.Toplevel):
         self._hover_after_id: str | None = None
         self._hover_tooltip: tk.Toplevel | None = None
 
+        # Real usability bug, this follow-up session: selecting a cluster
+        # used to decode every thumbnail on the page (up to FACES_PER_PAGE,
+        # real disk I/O + JPEG decode per face) SYNCHRONOUSLY on the main
+        # thread before returning control to Tk -- fine for the small
+        # synthetic clusters this was tested against, but on a real,
+        # possibly-slow drive with hundreds of real photos, this froze the
+        # whole window for minutes. Worse: while frozen, Tk cannot process
+        # the mainloop at all, so any clicks the user made out of
+        # impatience just queued up and fired only once the freeze ended --
+        # landing the window on whatever the LAST queued click happened to
+        # hit (often a small, already-named cluster nearby in the list),
+        # not the one originally clicked. Fixed by decoding thumbnails on a
+        # background thread (see _render_face_page/_decode_faces_worker)
+        # and making cluster/page selection itself instant: the widget grid
+        # (and its checkboxes -- Select All/This Page/etc. never depended
+        # on images) now appears immediately, thumbnails pop in as decoded,
+        # and clicking a DIFFERENT cluster/page while one is still loading
+        # cleanly supersedes it rather than queuing behind it.
+        #
+        # self._face_load_generation is bumped every time a new page/cluster
+        # load starts; a background job captures its own generation number
+        # and every message it posts carries it, so _poll_face_thumb_queue
+        # can silently discard results from a superseded (no-longer-
+        # current) load instead of ever rendering a stale cluster's images
+        # into the current view. self._face_load_stop is set to ask the
+        # PREVIOUS job to bail out early between images (not mid-decode --
+        # no partial/corrupt state possible) rather than let it keep doing
+        # pointless disk I/O that would only slow down the new job sharing
+        # the same drive.
+        self._face_load_generation: int = 0
+        self._face_load_stop: threading.Event = threading.Event()
+        self._face_thumb_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._face_widgets: dict[int, tk.Checkbutton] = {}
+        self._face_loading_total: int = 0
+        self._face_loading_done: int = 0
+        self._face_page_label_base: str = "No faces."
+        self._face_poll_after_id: str | None = self.after(50, self._poll_face_thumb_queue)
+
         # Phase 3c filter state -- purely UI-layer, per the spec ("must
         # never affect the underlying data, clustering, or which faces are
         # assigned to which person"). Traced so typing/toggling re-renders
@@ -3510,11 +3548,54 @@ class FaceLabelingWindow(tk.Toplevel):
         of the cluster sits as plain FaceRecord data (cheap) until paged
         to. Checkbox state is seeded from self._selected_face_ids (which
         persists across pages), so a selection made on one page is still
-        reflected if you page away and back."""
+        reflected if you page away and back.
+
+        Real usability bug, a later follow-up session: this used to decode
+        (open + JPEG-decode, real disk I/O) EVERY thumbnail on the page
+        synchronously, right here, before ever returning control to Tk --
+        fine against the small synthetic fixtures this was built/tested
+        against, but on a real slow drive with hundreds of real photos this
+        froze the entire window for minutes, with NOTHING visibly updating
+        in the meantime (not even the Name field or page label, despite
+        those being cheap DB-only lookups already computed in
+        _load_selected_cluster -- they were stuck behind this same blocked
+        mainloop). Worse, while frozen, Tk cannot process input at all, so
+        any further clicks made out of impatience just queued up and fired
+        one-by-one, each triggering its own full synchronous re-decode,
+        only settling on whatever the LAST queued click happened to land on
+        -- often a different, smaller, already-named cluster nearby in the
+        (size-sorted, so the biggest and slowest is always first) list.
+
+        Fixed by making the actual pixel decoding asynchronous: this method
+        now only builds the widget grid (all of it, with a plain gray
+        placeholder image) and returns immediately -- the Name field,
+        target combo, and page label are already showing correctly by the
+        time this returns, same as clicking anywhere else in the window.
+        Real thumbnails are decoded on a background thread
+        (_decode_faces_worker) and streamed in one at a time via
+        _poll_face_thumb_queue, which swaps each placeholder for its real
+        image as it arrives. Selecting a DIFFERENT cluster/page while one is
+        still streaming in cleanly supersedes it (see the
+        self._face_load_generation/_face_load_stop comment in __init__)
+        rather than queuing behind it -- clicking is always instant and
+        always reflects whatever was clicked LAST, including the largest
+        cluster in the list."""
+        # A different cluster/page is being rendered now -- ask whichever
+        # background job was decoding the PREVIOUS page to stop between
+        # images (not mid-decode) rather than keep burning disk I/O nobody
+        # will ever see, and bump the generation so any of its messages
+        # still in flight get silently discarded by the poll loop below.
+        self._face_load_stop.set()
+        self._face_load_generation += 1
+        gen = self._face_load_generation
+        self._face_load_stop = threading.Event()
+        stop_event = self._face_load_stop
+
         for widget in self.thumb_frame.winfo_children():
             widget.destroy()
         self._photo_refs.clear()
         self._face_check_vars.clear()
+        self._face_widgets.clear()
         # Rebuilding the grid (page change, cluster switch, reload) destroys
         # every widget a pending hover job/tooltip might reference -- cancel
         # both so a stale after() callback can't fire against a dead widget.
@@ -3525,21 +3606,27 @@ class FaceLabelingWindow(tk.Toplevel):
         self._face_page = max(0, min(self._face_page, page_count - 1))
         start = self._face_page * self.FACES_PER_PAGE
         end = min(start + self.FACES_PER_PAGE, total)
+        page_faces = self._current_faces[start:end]
 
-        for i, face in enumerate(self._current_faces[start:end]):
-            try:
-                crop = crop_face_thumbnail(face.current_path, face.bbox, size=self.THUMB_SIZE)
-            except Exception:
-                # Photo missing/moved/corrupt since detection -- show a
-                # plain gray placeholder rather than letting one bad file
-                # break the whole grid.
-                crop = Image.new("RGB", (self.THUMB_SIZE, self.THUMB_SIZE), (160, 160, 160))
-            photo = ImageTk.PhotoImage(crop)
-            self._photo_refs.append(photo)
+        self._face_page_label_base = (
+            "No faces." if total == 0
+            else f"Showing {start + 1}-{end} of {total} face(s) — page {self._face_page + 1}/{page_count}"
+        )
+        self._face_loading_total = len(page_faces)
+        self._face_loading_done = 0
+
+        # One shared placeholder image for every widget on this page --
+        # cheap (a single small solid-gray bitmap), and every Checkbutton
+        # just displays the same one until its real thumbnail streams in.
+        # Kept alive in self._photo_refs like any other PhotoImage.
+        placeholder = ImageTk.PhotoImage(Image.new("RGB", (self.THUMB_SIZE, self.THUMB_SIZE), (200, 200, 200)))
+        self._photo_refs.append(placeholder)
+
+        for i, face in enumerate(page_faces):
             var = tk.BooleanVar(value=face.face_id in self._selected_face_ids)
             self._face_check_vars[face.face_id] = var
             cb = tk.Checkbutton(
-                self.thumb_frame, image=photo, variable=var, indicatoron=False,
+                self.thumb_frame, image=placeholder, variable=var, indicatoron=False,
                 selectcolor="#8fc7ff", borderwidth=2,
                 command=lambda fid=face.face_id, v=var: self._on_face_toggle(fid, v),
             )
@@ -3548,20 +3635,84 @@ class FaceLabelingWindow(tk.Toplevel):
             # face's bbox highlighted (the actual requirement); hovering
             # shows a small delayed preview of the same thing (the
             # nice-to-have -- see _on_face_hover_enter's docstring for why
-            # it's debounced rather than instant).
+            # it's debounced rather than instant). Both work immediately,
+            # even before this face's own grid thumbnail has streamed in --
+            # they load their own (single-photo, already-fast) image
+            # independently.
             cb.bind("<Double-Button-1>", lambda e, f=face: self._on_face_double_click(f))
             cb.bind("<Enter>", lambda e, f=face, w=cb: self._on_face_hover_enter(f, w))
             cb.bind("<Leave>", lambda e: self._on_face_hover_leave())
+            self._face_widgets[face.face_id] = cb
 
-        if total == 0:
-            self.page_label.configure(text="No faces.")
-        else:
-            self.page_label.configure(
-                text=f"Showing {start + 1}-{end} of {total} face(s) — page {self._face_page + 1}/{page_count}"
-            )
+        self._update_page_status_label()
         self.prev_page_btn.configure(state="normal" if self._face_page > 0 else "disabled")
         self.next_page_btn.configure(state="normal" if self._face_page < page_count - 1 else "disabled")
         self._update_selection_count()
+
+        if page_faces:
+            threading.Thread(
+                target=self._decode_faces_worker, args=(gen, page_faces, stop_event), daemon=True
+            ).start()
+
+    def _decode_faces_worker(self, gen: int, faces: list, stop_event: threading.Event) -> None:
+        """Runs on a background thread -- must never touch a Tk widget
+        directly, only push results through self._face_thumb_queue for
+        _poll_face_thumb_queue (main thread) to apply. `gen` and
+        `stop_event` are the specific values _render_face_page captured for
+        THIS page load, passed in explicitly rather than read back off
+        `self` later, since `self._face_load_generation`/`_face_load_stop`
+        may have already moved on to a newer page/cluster by the time any
+        given iteration of this loop runs."""
+        for face in faces:
+            if stop_event.is_set():
+                return  # superseded by a newer selection -- stop doing pointless disk I/O
+            try:
+                crop = crop_face_thumbnail(face.current_path, face.bbox, size=self.THUMB_SIZE)
+            except Exception:
+                # Photo missing/moved/corrupt since detection -- a plain
+                # gray placeholder rather than letting one bad file break
+                # the whole page (a slightly darker gray than the
+                # loading placeholder, so "failed" reads differently from
+                # "still loading" if you look closely).
+                crop = Image.new("RGB", (self.THUMB_SIZE, self.THUMB_SIZE), (160, 160, 160))
+            self._face_thumb_queue.put(("thumb", gen, face.face_id, crop))
+
+    def _poll_face_thumb_queue(self) -> None:
+        """Drains self._face_thumb_queue and applies each decoded thumbnail
+        to its widget -- the ONLY place PhotoImage objects get created for
+        the grid, since that must happen on the main thread. Same
+        defensive per-message try/except shape as DashboardApp._poll_queue
+        (one bad message must never kill this polling loop for the rest of
+        the window's life). Reschedules itself for as long as the window
+        exists; cancelled in _on_close()."""
+        try:
+            while True:
+                msg = self._face_thumb_queue.get_nowait()
+                try:
+                    kind, gen, face_id, crop = msg
+                    if kind == "thumb" and gen == self._face_load_generation:
+                        # Anything else (a stale generation from a
+                        # since-superseded selection) is silently
+                        # discarded -- see the generation/stop_event
+                        # comment in __init__.
+                        widget = self._face_widgets.get(face_id)
+                        if widget is not None and widget.winfo_exists():
+                            photo = ImageTk.PhotoImage(crop)
+                            self._photo_refs.append(photo)
+                            widget.configure(image=photo)
+                        self._face_loading_done += 1
+                        self._update_page_status_label()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        self._face_poll_after_id = self.after(50, self._poll_face_thumb_queue)
+
+    def _update_page_status_label(self) -> None:
+        text = self._face_page_label_base
+        if self._face_loading_total and self._face_loading_done < self._face_loading_total:
+            text += f"  (loading {self._face_loading_done}/{self._face_loading_total} thumbnail(s)...)"
+        self.page_label.configure(text=text)
 
     # ----------------------------------------------- Phase 3j: full photo
     def _popup_max_size(self) -> tuple[int, int]:
@@ -4004,6 +4155,14 @@ class FaceLabelingWindow(tk.Toplevel):
 
     def _on_close(self) -> None:
         self._cancel_hover_preview()
+        # Ask any in-flight thumbnail-decoding thread to stop, and cancel
+        # the recurring _poll_face_thumb_queue after() job -- otherwise it
+        # would keep firing against a destroyed window and raise on the
+        # next self.after() reschedule inside it.
+        self._face_load_stop.set()
+        if self._face_poll_after_id is not None:
+            self.after_cancel(self._face_poll_after_id)
+            self._face_poll_after_id = None
         self.conn.close()
         self.destroy()
 
