@@ -911,17 +911,27 @@ def unmark_faces_not_a_person(conn: sqlite3.Connection, face_ids: list[int]) -> 
 
 
 def list_people_for_merge_target(conn: sqlite3.Connection, exclude_cluster_id: int | None = None) -> list[tuple[int, str]]:
-    """(cluster_id, display label) pairs for a "merge into..." / "move to
-    existing person..." picker, largest group first."""
+    """(cluster_id, display label) pairs for FaceLabelingWindow's "Target
+    person" picker ("Move Selected Faces Here" / "Merge This Whole Group
+    Here"). Named people only, alphabetical by name (case-insensitive) --
+    per the user's own direct request. An unnamed cluster showing up here
+    wasn't useful as a move/merge target anyway (you can't tell WHO you'd
+    be moving faces into), and once this library has dozens of real named
+    people, an alphabetical list is far easier to scan for a specific name
+    than the previous largest-first ordering. This is a UI-picker change
+    only -- the cluster LIST on the left (list_clusters()) is untouched and
+    deliberately stays largest-first, since unnamed groups worth a
+    labeler's time are exactly what that list should prioritize."""
     rows = conn.execute(
-        "SELECT cluster_id, assigned_name, face_count FROM people WHERE face_count > 0 ORDER BY face_count DESC"
+        "SELECT cluster_id, assigned_name, face_count FROM people "
+        "WHERE face_count > 0 AND assigned_name IS NOT NULL AND TRIM(assigned_name) != '' "
+        "ORDER BY assigned_name COLLATE NOCASE ASC"
     ).fetchall()
     out = []
     for cid, name, count in rows:
         if cid == exclude_cluster_id:
             continue
-        label = f"{name or '(unnamed)'} — {count} face(s) [cluster {cid}]"
-        out.append((cid, label))
+        out.append((cid, f"{name} — {count} face(s) [cluster {cid}]"))
     return out
 
 
