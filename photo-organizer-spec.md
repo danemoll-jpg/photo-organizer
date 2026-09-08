@@ -401,3 +401,43 @@
 
 **Explicitly out of scope:**
 - Any notification/alerting when someone else favorites a photo — just visibility on the photo itself, nothing proactive.
+
+## Phase 5 — "Process New Photos": one-button automated pipeline + dashboard simplification
+
+**Context:** The historical backlog is cleared. Going forward, the user wants to drop new photos into their existing ongoing source folder (no new folder-selection mechanism needed — this was already the intended design of `source_folders` from early in the project, once the folder list naturally narrows down to one active folder) and run the full processing chain with one action, instead of manually clicking through 6 separate dashboard panels every time.
+
+**Goal:** A single orchestrated pipeline covering everything that requires zero human judgment, run in the one correct order, plus a simplified, prominent way to trigger it from the dashboard.
+
+**Requirements:**
+- **New orchestration module** (e.g. `src/pipeline.py`) that runs these steps, in this exact order, by calling each phase's EXISTING underlying function — do not reimplement any of them, per rule 7:
+  1. Organize (photos + video)
+  2. GPS extraction
+  3. Video thumbnails
+  4. Face detection
+  5. Face clustering
+  6. Captioning
+- **Captioning and face detection must never run concurrently** — confirmed real GPU VRAM contention earlier in this project (captioning nearly stalls). The strict linear order above already enforces this as long as steps are never parallelized — don't parallelize any of them.
+- **A step that fails or is unavailable must not crash the whole pipeline.** Log the failure clearly and either skip-and-continue or halt with an actionable message, whichever is more appropriate per step — this matters not just for robustness now but directly informs a future simplified build (e.g. a version without Ollama/GPS/face-detection installed at all) not choking on a missing optional dependency.
+- **New "Process New Photos" prominent button/panel** in the dashboard — runs the whole sequence as one job: a single combined progress display ("Step X of 6: <name>" plus that step's own internal progress), and a single combined/scrolling log view (reusing each step's existing logging setup, not a new logging path).
+- **Cancelable**, reusing each individual step's existing cancel/resumability mechanics at its own natural checkpoints — no new cancellation mechanism needs to be invented.
+- **The existing individual panels (Captioning, GPS, Thumbnails, Face Detection, etc.) remain fully available, unchanged** — this is additive, a faster path for the common case, not a replacement for the detailed one-off tools.
+- Per rule 10 — trivially satisfied, since the whole point is a dashboard button.
+- Per rule 11/12 if applicable (this orchestrator calls existing tools, likely doesn't touch `review_tool.py` or schema directly — confirm rather than assume).
+
+**Explicitly out of scope:**
+- Any change to which folder(s) are scanned — this reuses the existing `source_folders`/implicit-dest-scan design as-is, no new folder-selection UI.
+- Face labeling, caption review, hide/exclude decisions, or the Date Cluster Audit — these require human judgment and stay manual, not part of the automated sequence.
+
+## Phase 3j — View the full source photo from a face thumbnail in the labeling window
+
+**Context:** Face thumbnails in `FaceLabelingWindow` are tight crops — sometimes not enough context to confidently identify who someone is (especially babies/toddlers, or a partial/awkward angle). The user wants a way to see the full original photo a given face crop came from, for more identifying context.
+
+**Requirements:**
+- **Double-click a face thumbnail to open the full original photo** in a new window/popup — every face row already stores which photo (`path`/`file_hash`) it came from, no new data needed.
+- **Highlight the specific face's bounding box on the full photo** (an outline/rectangle drawn at the stored `bbox` coordinates) — this directly serves the disambiguation goal, since a group photo could have several faces and the user needs to know which one is the crop they were just looking at.
+- Reuse the existing PIL/ImageTk image-loading code already used to render face crops — don't build a second image-loading path.
+- Scale the full photo to fit a reasonable window/screen size rather than showing at full native resolution (consistent with how thumbnails are already scaled elsewhere in this project) — performance and usability, not a hard technical requirement either way.
+- A hover-preview (rather than or in addition to double-click) is a nice-to-have if straightforward to add cleanly in Tkinter, but double-click-to-open is the actual requirement — don't skip the click-based version in favor of only a hover if hover turns out complex.
+
+**Explicitly out of scope:**
+- Any editing from this full-photo view — purely a viewing aid to help with labeling decisions made back in the main cluster view.
