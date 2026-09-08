@@ -58,6 +58,20 @@ CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
 -- didn't (see organize.py module docstring).
 CREATE INDEX IF NOT EXISTS idx_photos_current_path ON photos(current_path);
 CREATE INDEX IF NOT EXISTS idx_photos_original_path ON photos(original_path);
+-- review_tool.py's grid/viewer walk photos in chronological (date_taken)
+-- order, not current_path order (see review_tool.py's module docstring and
+-- _fetch_page/_scan_matches/etc.). date_taken is ISO 8601 TEXT, so it sorts
+-- correctly as a plain string comparison; COALESCE(...) below pushes an
+-- undated/unsorted row to sort LAST rather than SQLite's own
+-- ASC-sorts-NULLs-first default (grouped at the end of a chronological
+-- grid, not scattered randomly through it). file_hash is the tiebreaker for
+-- rows sharing an identical date_taken (common for burst photos) — the two
+-- columns together give a fully deterministic total order, which correct
+-- keyset (cursor) pagination depends on. An EXPRESSION index: the query
+-- text in review_tool.py must use this exact same COALESCE(...) expression
+-- for SQLite's planner to actually use it instead of a full table scan.
+CREATE INDEX IF NOT EXISTS idx_photos_date_taken_sort
+    ON photos(COALESCE(date_taken, '9999-99-99T23:59:59'), file_hash);
 
 -- Read-only view for the user's MS Access ODBC link (see README.md /
 -- CLAUDE.md's Data access notes — Access as an optional query front-end,

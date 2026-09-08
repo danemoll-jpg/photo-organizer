@@ -4,7 +4,11 @@
  *   - viewer: single-photo step navigation + auto-advance slideshow
  *     (see /api/nav) — cursor-based, so stepping past a grid page's last
  *     photo, or letting a slideshow run indefinitely, never hits a page
- *     boundary; each step is just "the next matching row after this path".
+ *     boundary; each step is just "the next matching row after this one,
+ *     in chronological order". Cursors are a file_hash (item.file_hash),
+ *     not a path — a later follow-up session switched the grid/viewer's
+ *     walk order from current_path to true chronological (date_taken)
+ *     order server-side; see review_tool.py's module docstring.
  *
  * Phase 2c additions:
  *   - Filters: tag, caption keyword, GPS/location (+ a disabled, visibly
@@ -735,8 +739,8 @@
     state.grid.items = data.items;
     state.grid.hasNext = data.has_next;
     state.grid.hasPrev = data.has_prev;
-    state.grid.firstCursor = data.items.length ? data.items[0].current_path : null;
-    state.grid.lastCursor = data.items.length ? data.items[data.items.length - 1].current_path : null;
+    state.grid.firstCursor = data.items.length ? data.items[0].file_hash : null;
+    state.grid.lastCursor = data.items.length ? data.items[data.items.length - 1].file_hash : null;
     state.grid.lastAfter = after || null;
     state.grid.lastBefore = before || null;
     if (resetPageNum) state.grid.pageNum = 1;
@@ -1112,7 +1116,7 @@
 
   async function stepViewer(dir, { manual = false } = {}) {
     if (manual) pauseSlideshow();
-    const cursor = state.viewer.current ? state.viewer.current.current_path : "";
+    const cursor = state.viewer.current ? state.viewer.current.file_hash : "";
     const params = { ...currentFilterParams(), dir };
     if (cursor) params.cursor = cursor;
     const data = await fetchJSON(`/api/nav?${qs(params)}`);

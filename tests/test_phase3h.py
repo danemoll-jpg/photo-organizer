@@ -310,14 +310,12 @@ def test_favorite_by_filter(tmp: Path) -> None:
 
     resp = dan.get("/api/nav?favorite_by=__me__&dir=next")
     assert resp.get_json()["item"]["file_hash"] == "h1"
-    resp = dan.get(f"/api/nav?favorite_by=__me__&dir=next&cursor={dest_path_for(dan, 'h1')}")
+    # cursor is a file_hash (see review_tool.py's module docstring on the
+    # grid/viewer's chronological-order follow-up) -- "h1" itself, no
+    # lookup needed.
+    resp = dan.get("/api/nav?favorite_by=__me__&dir=next&cursor=h1")
     assert resp.get_json()["item"] is None, "only h1 matches dan's __me__ filter -- stepping past it must reach the end"
     print("  /api/nav respects favorite_by too (sequential stepping stops correctly at the end)  OK")
-
-
-def dest_path_for(client, file_hash):
-    items = client.get("/api/photos?limit=50").get_json()["items"]
-    return next(i["current_path"] for i in items if i["file_hash"] == file_hash)
 
 
 # ---------------------------------------------------------------------------

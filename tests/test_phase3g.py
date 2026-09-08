@@ -119,7 +119,7 @@ def test_nav_respects_people_and_filter(tmp: Path) -> None:
     resp = client.get("/api/nav?people=10,20&dir=next")
     first = resp.get_json()["item"]
     assert first["file_hash"] == "h2", first
-    resp = client.get(f"/api/nav?people=10,20&dir=next&cursor={first['current_path']}")
+    resp = client.get(f"/api/nav?people=10,20&dir=next&cursor={first['file_hash']}")
     assert resp.get_json()["item"] is None, "must stop at the end -- no other photo has both Alice and Bob"
     print("  people=10,20 next-stepping visits only h2, then end (never h1/h3 -- OR would have)  OK")
 

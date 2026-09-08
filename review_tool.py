@@ -255,7 +255,27 @@ than the raw faces table. Bundled in: the automatic side now also
 excludes not_a_person=1 faces -- a pre-existing gap from Phase 3d
 (predating Phase 3i) where the filter never checked this flag at all,
 fixed alongside since it's the identical correctness goal.
-"""
+
+Follow-up session, direct user request: the grid/viewer's walk order
+changed from current_path (roughly year/month/filename, matching the
+on-disk folder layout) to true chronological order by date_taken. This
+touches every place that walks `photos` in "the grid's canonical order" --
+_fetch_page (grid pagination), /api/nav's sequential dir=next/prev
+stepping, _scan_matches/_count_matches/_all_matching_hashes (the tag/
+caption-keyword live-cache scanning path), _pick_random_row's plain-filter
+OFFSET base, and /api/nav?mode=random's plain-filter OFFSET base -- see
+_DATE_SORT_EXPR's own module-level comment for the exact expression
+(undated photos sort last, file_hash as tiebreaker) and idx_photos_
+date_taken_sort (schema.sql) for the supporting expression index. Cursors
+(grid pagination's after/before, the viewer's nav cursor) changed from a
+current_path value to a file_hash value -- already present on every item,
+so no new field needed; _resolve_cursor() translates an incoming file_hash
+cursor into the (sort_key, file_hash) pair keyset comparisons actually use.
+_all_matching_paths was renamed _all_matching_hashes to match (its two
+callers' downstream row lookups switched from `WHERE current_path = ?` to
+`WHERE file_hash = ?`, the natural PK lookup). Random-order slideshow
+(_random_order_for) was already a real Fisher-Yates shuffle -- unaffected
+in behavior, its cache just now holds file_hash values instead of paths."""
 from __future__ import annotations
 
 import argparse
@@ -304,6 +324,47 @@ _cfg: Config
 _video_exts: set[str] = set()
 _storage: PhotoStorage
 _logger: logging.Logger = logging.getLogger("photo_organizer")  # overwritten by main() with the real configured logger
+
+# The grid/viewer's "walk order" -- chronological by the photo's own
+# date_taken, per the user's own direct request (previously current_path
+# order, i.e. roughly year/month/filename -- see the git history around
+# this line for the old design and why it changed). date_taken is ISO 8601
+# TEXT (schema.sql), so it sorts correctly as a plain string comparison
+# with no cast. The COALESCE sentinel pushes an undated/unsorted photo to
+# sort LAST (grouped at the end, not scattered randomly through the middle
+# the way SQLite's own ASC-sorts-NULLs-first default would place it).
+# file_hash is the tiebreaker for rows sharing an identical date_taken
+# (common for burst photos) -- the pair together gives a fully
+# deterministic total order, which correct keyset (cursor) pagination
+# depends on. Every ORDER BY / WHERE comparison that needs to "walk the
+# photos table in the grid's canonical order" (_fetch_page, _scan_matches,
+# _count_matches, _all_matching_paths, _pick_random_row, /api/nav) uses
+# this exact same expression text -- it must match idx_photos_date_taken_sort
+# (schema.sql) verbatim for SQLite's planner to use that index instead of a
+# full table scan at 100k+ rows. _DATE_SORT_SENTINEL is the Python-side
+# mirror of the same literal, used when a batched scan advances its own
+# "last row seen" cursor from data already in hand (a plain Python string
+# comparison, not another SQL round-trip) -- kept as one shared source so
+# the two can never drift apart.
+_DATE_SORT_SENTINEL = "9999-99-99T23:59:59"
+_DATE_SORT_EXPR = f"COALESCE(date_taken, '{_DATE_SORT_SENTINEL}')"
+
+
+def _resolve_cursor(conn: sqlite3.Connection, file_hash: str | None) -> tuple[str, str] | None:
+    """Translates an opaque cursor (a file_hash, exactly as returned in
+    every item's own "file_hash" field -- see _fetch_page/api_photos) into
+    the (sort_key, file_hash) pair keyset pagination actually compares
+    against. Returns None for a missing/blank cursor (start of the walk) OR
+    a file_hash that no longer exists (the row it pointed to was deleted/
+    hidden/relocated since the client fetched it -- treated the same as "no
+    cursor" rather than a hard error, so a stale link never 500s, just
+    restarts the walk from the beginning)."""
+    if not file_hash:
+        return None
+    row = conn.execute(
+        f"SELECT {_DATE_SORT_EXPR}, file_hash FROM photos WHERE file_hash = ?", (file_hash,)
+    ).fetchone()
+    return (row[0], row[1]) if row is not None else None
 
 
 class CaptionsCache:
@@ -710,7 +771,8 @@ def _build_extra_predicate(args):
 def _scan_matches(conn, where, params, extra_pred, cursor, want, forward=True):
     """Only used when extra_pred (tag/caption-keyword) is active --
     date/folder/GPS-only filters never call this, they stay on the plain
-    indexed SQL path. Walks `photos` in current_path order, batching the
+    indexed SQL path. Walks `photos` in the grid's chronological order
+    (_DATE_SORT_EXPR, see its own module-level comment), batching the
     underlying SQL fetch (growing the batch size when a batch turns up
     few/no matches, e.g. a rare tag) rather than either pulling the whole
     filtered table into memory up front or doing one SQL round-trip per
@@ -720,28 +782,35 @@ def _scan_matches(conn, where, params, extra_pred, cursor, want, forward=True):
     _build_extra_predicate) -- but it's bounded by rows actually read in
     growing batches, never by materializing them all at once.
 
+    `cursor` is a file_hash (or None to start from the beginning) --
+    resolved ONCE via _resolve_cursor into the (sort_key, file_hash) pair
+    keyset comparisons actually use; every subsequent step advances
+    `last_seen` straight from the row data already in hand (a plain Python
+    tuple, no repeated lookups).
+
     Returns (matches, exhausted): `exhausted` is True once the underlying
     table ran out of candidate rows in this direction, whether or not
     `want` matches were found by then -- callers use it the same way the
     plain-SQL path infers has_next/has_prev today."""
     results: list[sqlite3.Row] = []
-    last_seen = cursor
+    last_seen = _resolve_cursor(conn, cursor)
     batch_size = max(want * 4, 200)
     exhausted = False
+    op, order = (">", "ASC") if forward else ("<", "DESC")
     while len(results) < want:
         sql = f"SELECT * FROM photos WHERE {where}"
         p = list(params)
         if last_seen is not None:
-            sql += " AND current_path > ?" if forward else " AND current_path < ?"
-            p.append(last_seen)
-        sql += " ORDER BY current_path ASC LIMIT ?" if forward else " ORDER BY current_path DESC LIMIT ?"
+            sql += f" AND ({_DATE_SORT_EXPR}, file_hash) {op} (?, ?)"
+            p.extend(last_seen)
+        sql += f" ORDER BY {_DATE_SORT_EXPR} {order}, file_hash {order} LIMIT ?"
         p.append(batch_size)
         rows = conn.execute(sql, p).fetchall()
         if not rows:
             exhausted = True
             break
         for r in rows:
-            last_seen = r["current_path"]
+            last_seen = (r["date_taken"] or _DATE_SORT_SENTINEL, r["file_hash"])
             if extra_pred(r["file_hash"]):
                 results.append(r)
                 if len(results) >= want:
@@ -764,18 +833,18 @@ def _count_matches(conn, where, params, extra_pred) -> int:
     last_seen = None
     batch_size = 5000
     while True:
-        sql = f"SELECT file_hash, current_path FROM photos WHERE {where}"
+        sql = f"SELECT file_hash, date_taken FROM photos WHERE {where}"
         p = list(params)
         if last_seen is not None:
-            sql += " AND current_path > ?"
-            p.append(last_seen)
-        sql += " ORDER BY current_path ASC LIMIT ?"
+            sql += f" AND ({_DATE_SORT_EXPR}, file_hash) > (?, ?)"
+            p.extend(last_seen)
+        sql += f" ORDER BY {_DATE_SORT_EXPR} ASC, file_hash ASC LIMIT ?"
         p.append(batch_size)
         rows = conn.execute(sql, p).fetchall()
         if not rows:
             break
         for r in rows:
-            last_seen = r["current_path"]
+            last_seen = (r["date_taken"] or _DATE_SORT_SENTINEL, r["file_hash"])
             if extra_pred(r["file_hash"]):
                 count += 1
         if len(rows) < batch_size:
@@ -783,36 +852,38 @@ def _count_matches(conn, where, params, extra_pred) -> int:
     return count
 
 
-def _all_matching_paths(conn, where, params, extra_pred) -> list[str]:
-    """Full list of current_path values matching where+extra_pred, in
-    current_path order. Only called when a tag/caption filter is active,
-    for the two spots that fundamentally need the whole matching set at
-    once: the viewer's one-off Random button (_pick_random_row) and
+def _all_matching_hashes(conn, where, params, extra_pred) -> list[str]:
+    """Full list of file_hash values matching where+extra_pred, in the
+    grid's chronological order. Only called when a tag/caption filter is
+    active, for the two spots that fundamentally need the whole matching
+    set at once: the viewer's one-off Random button (_pick_random_row) and
     building a random-order slideshow's shuffled sequence
     (_random_order_for) -- both already require a full pass in that case
     (same reasoning as _count_matches above), so this is that one pass,
-    reused/cached by callers rather than repeated."""
-    paths: list[str] = []
+    reused/cached by callers rather than repeated. Returns file_hash
+    (the natural unique/PK identifier) rather than current_path -- every
+    caller already keys off file_hash elsewhere."""
+    hashes: list[str] = []
     last_seen = None
     batch_size = 5000
     while True:
-        sql = f"SELECT file_hash, current_path FROM photos WHERE {where}"
+        sql = f"SELECT file_hash, date_taken FROM photos WHERE {where}"
         p = list(params)
         if last_seen is not None:
-            sql += " AND current_path > ?"
-            p.append(last_seen)
-        sql += " ORDER BY current_path ASC LIMIT ?"
+            sql += f" AND ({_DATE_SORT_EXPR}, file_hash) > (?, ?)"
+            p.extend(last_seen)
+        sql += f" ORDER BY {_DATE_SORT_EXPR} ASC, file_hash ASC LIMIT ?"
         p.append(batch_size)
         rows = conn.execute(sql, p).fetchall()
         if not rows:
             break
         for r in rows:
-            last_seen = r["current_path"]
+            last_seen = (r["date_taken"] or _DATE_SORT_SENTINEL, r["file_hash"])
             if extra_pred(r["file_hash"]):
-                paths.append(r["current_path"])
+                hashes.append(r["file_hash"])
         if len(rows) < batch_size:
             break
-    return paths
+    return hashes
 
 
 def _pick_random_row(conn, where, params, extra_pred):
@@ -828,12 +899,12 @@ def _pick_random_row(conn, where, params, extra_pred):
         if total == 0:
             return None
         offset = random.randrange(total)
-        sql = f"SELECT * FROM photos WHERE {where} ORDER BY current_path LIMIT 1 OFFSET ?"
+        sql = f"SELECT * FROM photos WHERE {where} ORDER BY {_DATE_SORT_EXPR}, file_hash LIMIT 1 OFFSET ?"
         return conn.execute(sql, params + [offset]).fetchone()
-    paths = _all_matching_paths(conn, where, params, extra_pred)
-    if not paths:
+    hashes = _all_matching_hashes(conn, where, params, extra_pred)
+    if not hashes:
         return None
-    return conn.execute("SELECT * FROM photos WHERE current_path = ?", (random.choice(paths),)).fetchone()
+    return conn.execute("SELECT * FROM photos WHERE file_hash = ?", (random.choice(hashes),)).fetchone()
 
 
 def _feistel_permute(index: int, total: int, seed: str, rounds: int = 4) -> int:
@@ -876,7 +947,7 @@ def _feistel_permute(index: int, total: int, seed: str, rounds: int = 4) -> int:
 
 
 # Small bounded cache, keyed by the client-minted slideshow seed, of the
-# shuffled current_path order for a tag/caption-filtered random-order
+# shuffled file_hash order for a tag/caption-filtered random-order
 # slideshow (see /api/nav's mode=random). Only needed when extra_pred is
 # active -- the plain-filter case never touches this, it uses
 # _feistel_permute's O(1)-memory approach instead (see its docstring).
@@ -893,13 +964,13 @@ def _random_order_for(conn, where, params, extra_pred, seed: str) -> list[str]:
         cached = _random_order_cache.get(seed)
     if cached is not None:
         return cached
-    paths = _all_matching_paths(conn, where, params, extra_pred)
-    random.Random(seed).shuffle(paths)
+    hashes = _all_matching_hashes(conn, where, params, extra_pred)
+    random.Random(seed).shuffle(hashes)
     with _random_order_cache_lock:
-        _random_order_cache[seed] = paths
+        _random_order_cache[seed] = hashes
         while len(_random_order_cache) > _RANDOM_ORDER_CACHE_MAX:
             _random_order_cache.pop(next(iter(_random_order_cache)))
-    return paths
+    return hashes
 
 
 def _people_for_hashes(conn: sqlite3.Connection, file_hashes: list[str]) -> dict[str, list[dict]]:
@@ -1063,12 +1134,14 @@ def _row_to_dict(row: sqlite3.Row, conn: sqlite3.Connection, people: list[dict] 
 
 def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
                  after: str | None, before: str | None, extra_pred=None) -> tuple[list[dict], bool, bool]:
-    """Keyset (cursor) pagination on current_path — deliberately not
+    """Keyset (cursor) pagination on the grid's chronological order
+    (_DATE_SORT_EXPR, see its own module-level comment) — deliberately not
     OFFSET-based: OFFSET n costs an O(n) scan on the way to page n, which
     gets slower every page deeper into a 100k+-row table. A cursor lookup
-    stays O(log n) via idx_photos_current_path regardless of how deep the
-    user has paged. `after`/`before` are the current_path of the boundary
-    item from the page the caller already has (exclusive).
+    stays O(log n) via idx_photos_date_taken_sort regardless of how deep
+    the user has paged. `after`/`before` are the file_hash of the boundary
+    item from the page the caller already has (exclusive) — resolved via
+    _resolve_cursor into the actual (sort_key, file_hash) comparison point.
 
     When a Phase 2c tag/caption filter is active (extra_pred not None),
     the same cursor semantics are preserved but satisfied via _scan_matches
@@ -1104,18 +1177,25 @@ def _fetch_page(conn: sqlite3.Connection, where: str, params: list, limit: int,
             for r in rows
         ], has_next, has_prev
     if before is not None:
-        sql = f"SELECT * FROM photos WHERE {where} AND current_path < ? ORDER BY current_path DESC LIMIT ?"
-        rows = conn.execute(sql, params + [before, limit + 1]).fetchall()
+        cursor_key = _resolve_cursor(conn, before)
+        sql = f"SELECT * FROM photos WHERE {where}"
+        p = list(params)
+        if cursor_key is not None:
+            sql += f" AND ({_DATE_SORT_EXPR}, file_hash) < (?, ?)"
+            p.extend(cursor_key)
+        sql += f" ORDER BY {_DATE_SORT_EXPR} DESC, file_hash DESC LIMIT ?"
+        rows = conn.execute(sql, p + [limit + 1]).fetchall()
         has_prev = len(rows) > limit
         rows = list(reversed(rows[:limit]))
         has_next = True  # we came from a page that exists, so there's always something after this one
     else:
+        cursor_key = _resolve_cursor(conn, after)
         sql = f"SELECT * FROM photos WHERE {where}"
         p = list(params)
-        if after is not None:
-            sql += " AND current_path > ?"
-            p.append(after)
-        sql += " ORDER BY current_path ASC LIMIT ?"
+        if cursor_key is not None:
+            sql += f" AND ({_DATE_SORT_EXPR}, file_hash) > (?, ?)"
+            p.extend(cursor_key)
+        sql += f" ORDER BY {_DATE_SORT_EXPR} ASC, file_hash ASC LIMIT ?"
         rows = conn.execute(sql, p + [limit + 1]).fetchall()
         has_next = len(rows) > limit
         rows = rows[:limit]
@@ -1225,9 +1305,10 @@ def api_stats():
 @app.route("/api/photos")
 def api_photos():
     """Grid/browse view: one page of photos matching the current filters,
-    newest-path-first is NOT assumed — ordered by current_path ascending
-    (i.e. roughly by year/month/filename, matching the on-disk layout the
-    user already navigates in Explorer)."""
+    in chronological order (oldest first) by date_taken — see _DATE_SORT_EXPR's
+    module-level comment for the undated-photos-sort-last / tiebreaker
+    details. `after`/`before` cursors are a file_hash (any item's own
+    "file_hash" field), not current_path."""
     _captions_cache.refresh()
     conn = get_db()
     try:
@@ -1246,8 +1327,8 @@ def api_photos():
         "items": items,
         "has_next": has_next,
         "has_prev": has_prev,
-        "next_cursor": items[-1]["current_path"] if items and has_next else None,
-        "prev_cursor": items[0]["current_path"] if items and has_prev else None,
+        "next_cursor": items[-1]["file_hash"] if items and has_next else None,
+        "prev_cursor": items[0]["file_hash"] if items and has_prev else None,
         "total_matching": count,
     })
 
@@ -1260,12 +1341,13 @@ def api_nav():
     applied here too, so a filtered slideshow only ever shows matching
     photos). Two navigation modes:
 
-    - Sequential (default, `dir=next|prev`): cursor is the current_path
+    - Sequential (default, `dir=next|prev`): cursor is the file_hash
       of the photo currently on screen (absent = start from the very
       first match). Intentionally NOT page-based, so stepping past a
       grid page's last photo — or just running a chronological slideshow
       continuously — never dead-ends at a page boundary: each step is
-      one lookup for "the next/previous matching row after this path".
+      one lookup for "the next/previous matching row after this one, in
+      chronological (date_taken) order" — see _DATE_SORT_EXPR.
     - Random (`mode=random&seed=<s>&idx=<i>`), Phase 2c: returns the
       item at position `idx` of a pseudo-random permutation of the
       filtered set keyed by `seed`. Because it's a pure function of
@@ -1294,14 +1376,14 @@ def api_nav():
             elif extra_pred is not None:
                 order = _random_order_for(conn, where, params, extra_pred, seed)
                 row = None if idx >= len(order) else \
-                    conn.execute("SELECT * FROM photos WHERE current_path = ?", (order[idx],)).fetchone()
+                    conn.execute("SELECT * FROM photos WHERE file_hash = ?", (order[idx],)).fetchone()
             else:
                 total = conn.execute(f"SELECT COUNT(*) FROM photos WHERE {where}", params).fetchone()[0]
                 if idx >= total:
                     row = None
                 else:
                     offset = _feistel_permute(idx, total, seed)
-                    sql = f"SELECT * FROM photos WHERE {where} ORDER BY current_path LIMIT 1 OFFSET ?"
+                    sql = f"SELECT * FROM photos WHERE {where} ORDER BY {_DATE_SORT_EXPR}, file_hash LIMIT 1 OFFSET ?"
                     row = conn.execute(sql, params + [offset]).fetchone()
             return jsonify({"item": _row_to_dict(row, conn) if row is not None else None})
 
@@ -1312,18 +1394,21 @@ def api_nav():
                                         want=1, forward=(direction != "prev"))
             row = matches[0] if matches else None
         elif direction == "prev":
-            if cursor is None:
+            cursor_key = _resolve_cursor(conn, cursor)
+            if cursor_key is None:
                 row = None
             else:
-                sql = f"SELECT * FROM photos WHERE {where} AND current_path < ? ORDER BY current_path DESC LIMIT 1"
-                row = conn.execute(sql, params + [cursor]).fetchone()
+                sql = f"SELECT * FROM photos WHERE {where} AND ({_DATE_SORT_EXPR}, file_hash) < (?, ?) " \
+                      f"ORDER BY {_DATE_SORT_EXPR} DESC, file_hash DESC LIMIT 1"
+                row = conn.execute(sql, params + list(cursor_key)).fetchone()
         else:
+            cursor_key = _resolve_cursor(conn, cursor)
             sql = f"SELECT * FROM photos WHERE {where}"
             p = list(params)
-            if cursor is not None:
-                sql += " AND current_path > ?"
-                p.append(cursor)
-            sql += " ORDER BY current_path ASC LIMIT 1"
+            if cursor_key is not None:
+                sql += f" AND ({_DATE_SORT_EXPR}, file_hash) > (?, ?)"
+                p.extend(cursor_key)
+            sql += f" ORDER BY {_DATE_SORT_EXPR} ASC, file_hash ASC LIMIT 1"
             row = conn.execute(sql, p).fetchone()
         item = _row_to_dict(row, conn) if row is not None else None
     finally:

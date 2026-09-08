@@ -261,15 +261,15 @@ def test_nav_respects_new_filters(tmp: Path) -> None:
     resp = client.get("/api/nav?tag=beach&dir=next")
     first = resp.get_json()["item"]
     assert first["file_hash"] == "h1"
-    resp = client.get(f"/api/nav?tag=beach&dir=next&cursor={first['current_path']}")
+    resp = client.get(f"/api/nav?tag=beach&dir=next&cursor={first['file_hash']}")
     second = resp.get_json()["item"]
     assert second["file_hash"] == "h2"
-    resp = client.get(f"/api/nav?tag=beach&dir=next&cursor={second['current_path']}")
+    resp = client.get(f"/api/nav?tag=beach&dir=next&cursor={second['file_hash']}")
     third = resp.get_json()["item"]
     assert third["file_hash"] == "h5"
-    resp = client.get(f"/api/nav?tag=beach&dir=next&cursor={third['current_path']}")
+    resp = client.get(f"/api/nav?tag=beach&dir=next&cursor={third['file_hash']}")
     assert resp.get_json()["item"] is None, "must stop at the end of the FILTERED set, not the whole library"
-    resp = client.get(f"/api/nav?tag=beach&dir=prev&cursor={third['current_path']}")
+    resp = client.get(f"/api/nav?tag=beach&dir=prev&cursor={third['file_hash']}")
     assert resp.get_json()["item"]["file_hash"] == "h2"
     print("  tag-filtered next/prev stays within {h1,h2,h5}, skipping h3/h4/video entirely  OK")
 

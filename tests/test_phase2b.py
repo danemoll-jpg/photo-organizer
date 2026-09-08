@@ -229,13 +229,16 @@ def test_review_tool_api(tmp: Path) -> None:
     print("  video included with is_video/caption/location fields all correct  OK")
 
     # --- keyset pagination: page size 2 across all 4 matching rows ---
-    # Expected current_path order computed from the fixture itself (not
-    # hardcoded) so this doesn't silently assume a particular path-sort
-    # quirk (e.g. the "Video" subfolder sorting before lowercase filenames).
+    # Expected chronological (date_taken) order computed from the fixture's
+    # own date_taken values (not hardcoded) -- a later follow-up session
+    # switched the grid/viewer's walk order from current_path to true
+    # chronological order (see review_tool.py's module docstring); file_hash
+    # is the tiebreaker (see _DATE_SORT_EXPR), not needed here since every
+    # date_taken in this fixture is already distinct.
     expected_order = [h for h, _ in sorted(
-        [("hash_captioned", str(photo_captioned)), ("hash_pending", str(photo_pending)),
-         ("hash_third", str(photo_other_folder)), ("hash_video", str(video_path))],
-        key=lambda t: t[1],
+        [("hash_captioned", "2020-07-01T10:00:00"), ("hash_pending", "2020-07-15T10:00:00"),
+         ("hash_third", "2020-07-20T10:00:00"), ("hash_video", "2020-07-05T10:00:00")],
+        key=lambda t: (t[1], t[0]),
     )]
     resp = client.get("/api/photos?limit=2")
     page1 = resp.get_json()
@@ -246,7 +249,7 @@ def test_review_tool_api(tmp: Path) -> None:
     seen_order = [i["file_hash"] for i in page1["items"]] + [i["file_hash"] for i in page2["items"]]
     assert seen_order == expected_order
     # paging back from page2 with `before` must reproduce page1 exactly
-    resp = client.get(f"/api/photos?limit=2&before={page2['items'][0]['current_path']}")
+    resp = client.get(f"/api/photos?limit=2&before={page2['items'][0]['file_hash']}")
     back = resp.get_json()
     assert [i["file_hash"] for i in back["items"]] == [i["file_hash"] for i in page1["items"]]
     print("  keyset pagination forward/back across a page boundary (video included)  OK")
@@ -269,14 +272,14 @@ def test_review_tool_api(tmp: Path) -> None:
 
     # --- /api/nav: cursor-based step navigation, including reaching the end
     # (walks the full expected_order computed above, so video is exercised
-    # wherever it actually falls in current_path order, not assumed) ---
+    # wherever it actually falls in chronological order, not assumed) ---
     cursor = None
     for expected_hash in expected_order:
         params = f"?dir=next&cursor={cursor}" if cursor else "?dir=next"
         resp = client.get(f"/api/nav{params}")
         item = resp.get_json()["item"]
         assert item["file_hash"] == expected_hash
-        cursor = item["current_path"]
+        cursor = item["file_hash"]
     # one prev step back from the last item must land on the second-to-last
     resp = client.get(f"/api/nav?dir=prev&cursor={cursor}")
     assert resp.get_json()["item"]["file_hash"] == expected_order[-2]

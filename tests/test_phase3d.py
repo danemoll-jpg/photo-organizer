@@ -196,10 +196,10 @@ def test_nav_respects_person_filter(tmp: Path) -> None:
     resp = client.get("/api/nav?person=20&dir=next")
     first = resp.get_json()["item"]
     assert first["file_hash"] == "h2"
-    resp = client.get(f"/api/nav?person=20&dir=next&cursor={first['current_path']}")
+    resp = client.get(f"/api/nav?person=20&dir=next&cursor={first['file_hash']}")
     second = resp.get_json()["item"]
     assert second["file_hash"] == "h3"
-    resp = client.get(f"/api/nav?person=20&dir=next&cursor={second['current_path']}")
+    resp = client.get(f"/api/nav?person=20&dir=next&cursor={second['file_hash']}")
     assert resp.get_json()["item"] is None, "must stop at the end of the person-filtered set"
     print("  person=20 (Bob) next-stepping visits h2 -> h3 -> end, skipping h1/h4/h5  OK")
 
