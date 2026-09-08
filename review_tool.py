@@ -242,15 +242,19 @@ typed name (resolved to an existing person by exact case-insensitive
 match, or a brand-new `people` row created on the spot -- see
 src.people_tags.resolve_or_create_person); "Remove" always takes a
 cluster_id (there's nothing to remove from a name that was never
-tagged). Known scope boundary, not fixed this session: the grid's
-Person/People FILTER (_build_filters' person/people params) still only
-reflects the AUTOMATIC faces/people join, not these overrides -- a
-manually-added person won't yet make a photo match a filter for them, and
-a manually-removed one won't yet be excluded from one. Fixing that would
-mean reworking the People filter's relational-intersection query (Phase
-3g) to be override-aware per person in the list, a bigger, separate piece
-of work than this session's add/remove editing feature -- flagged here
-rather than silently left inconsistent.
+tagged). **Follow-up, same session, at the user's explicit request ("this
+is necessary"): the grid's Person/People FILTER (_build_filters'
+person_ids handling) is now override-aware too**, matching exactly what
+_people_for_hashes DISPLAYS for a photo -- a manually-added person now
+makes a photo match a filter for them, and a manually-removed one is now
+excluded. The `person_ids` clause was reworked from a plain `faces` join
+into a UNION of (automatically-present, non-flagged, not overridden away)
+and (explicitly added via an override), still enforcing Phase 3g's "must
+have ALL requested people" intersection over that combined set rather
+than the raw faces table. Bundled in: the automatic side now also
+excludes not_a_person=1 faces -- a pre-existing gap from Phase 3d
+(predating Phase 3i) where the filter never checked this flag at all,
+fixed alongside since it's the identical correctness goal.
 """
 from __future__ import annotations
 
@@ -444,16 +448,46 @@ def _build_filters(args) -> tuple[str, list]:
     wrongly produce OR semantics -- e.g. person A OR person B, not both):
 
         file_hash IN (
-            SELECT file_hash FROM faces WHERE cluster_id IN (?, ?, ...)
+            SELECT file_hash FROM (
+                SELECT f.file_hash, f.cluster_id FROM faces f
+                WHERE f.cluster_id IN (?, ?, ...) AND f.not_a_person = 0
+                  AND NOT EXISTS (SELECT 1 FROM photo_people_overrides po
+                                  WHERE po.file_hash = f.file_hash AND po.cluster_id = f.cluster_id
+                                    AND po.action = 'remove')
+                UNION
+                SELECT po.file_hash, po.cluster_id FROM photo_people_overrides po
+                WHERE po.cluster_id IN (?, ?, ...) AND po.action = 'add'
+            )
             GROUP BY file_hash HAVING COUNT(DISTINCT cluster_id) = <N>
         )
 
     Grouping by file_hash and requiring exactly N distinct cluster_ids
     matched (N = the number of ids requested) means a photo only qualifies
-    if every requested person has at least one face in it -- a photo with
-    faces for only some of the requested people, or with duplicate faces
-    for the same requested person, is still correctly excluded/not
-    double-counted (COUNT(DISTINCT ...), not COUNT(...)).
+    if every requested person is EFFECTIVELY present in it -- a photo with
+    only some of the requested people, or with duplicate faces for the
+    same requested person, is still correctly excluded/not double-counted
+    (COUNT(DISTINCT ...), not COUNT(...)).
+
+    **Phase 3i follow-up, at the user's explicit request ("this is
+    necessary"): "effectively present" now means the same thing this
+    filter's matching photos actually DISPLAY (_people_for_hashes) --
+    a real, non-flagged face that hasn't been manually overridden away, OR
+    a person manually added via src.people_tags.add_person_to_photo (an
+    override row that isn't backed by any real detected face at all).
+    Before this fix, the filter only ever looked at raw `faces` rows --
+    manually tagging or untagging someone (Phase 3i) changed what a photo
+    DISPLAYED but not whether it matched a Person filter for them, a real
+    inconsistency the user flagged as worth fixing rather than leaving.
+    The inner UNION computes this "effective presence" per (file_hash,
+    cluster_id) before the same GROUP BY/HAVING intersection Phase 3g
+    already used runs over it -- every route that already calls
+    _build_filters (grid, nav, random, stats) picks up override-awareness
+    automatically, no per-route changes needed, same free ride every prior
+    addition to this function got. Also fixed alongside (a pre-existing,
+    Phase 3i-independent gap): the automatic side now excludes
+    not_a_person=1 faces, which this filter never checked before -- a
+    face flagged as a false positive (Phase 3c) could satisfy the filter
+    yet never appear in that same photo's own displayed people list.**
 
     Same reasoning as `location`/`media_type` above for why this belongs
     here rather than in _build_extra_predicate: a real, already-committed
@@ -578,11 +612,45 @@ def _build_filters(args) -> tuple[str, list]:
             seen_ids.add(pid)
             person_ids.append(pid)
     if person_ids:
+        # Phase 3i follow-up: made override-aware, per the user's explicit
+        # "this is necessary" -- a manually add_person_to_photo()'d person
+        # (src/people_tags.py) now correctly makes a photo match this
+        # filter, and a manually remove_person_from_photo()'d one is now
+        # correctly excluded, matching exactly what _people_for_hashes
+        # already DISPLAYS for that photo (the two were inconsistent
+        # before this: a photo could show a person in the grid/viewer via
+        # an override yet never be found by filtering for them, or vice
+        # versa). The inner UNION computes each requested cluster_id's
+        # EFFECTIVE presence per file_hash -- automatically present (a real
+        # non-flagged face) AND NOT overridden away, OR explicitly added --
+        # then the same GROUP BY ... HAVING COUNT(DISTINCT cluster_id) = N
+        # intersection Phase 3g already used enforces "must have ALL
+        # requested people" over that effective set instead of the raw
+        # faces table. Bundled in: the automatic side now also excludes
+        # not_a_person=1 faces (a pre-existing gap from Phase 3d, predating
+        # even Phase 3i -- the filter never checked this, so a face flagged
+        # as a false positive could satisfy the filter yet never appear in
+        # that photo's own displayed people list; fixed here since it's the
+        # same "match what's actually displayed" correctness goal and adds
+        # no real complexity on top of the override-awareness change).
         placeholders = ", ".join(["?"] * len(person_ids))
         clauses.append(
-            f"file_hash IN (SELECT file_hash FROM faces WHERE cluster_id IN ({placeholders}) "
-            f"GROUP BY file_hash HAVING COUNT(DISTINCT cluster_id) = ?)"
+            "file_hash IN ("
+            "  SELECT file_hash FROM ("
+            f"   SELECT f.file_hash AS file_hash, f.cluster_id AS cluster_id FROM faces f"
+            f"   WHERE f.cluster_id IN ({placeholders}) AND f.not_a_person = 0"
+            "     AND NOT EXISTS ("
+            "       SELECT 1 FROM photo_people_overrides po"
+            "       WHERE po.file_hash = f.file_hash AND po.cluster_id = f.cluster_id AND po.action = 'remove'"
+            "     )"
+            "   UNION"
+            f"   SELECT po.file_hash AS file_hash, po.cluster_id AS cluster_id FROM photo_people_overrides po"
+            f"   WHERE po.cluster_id IN ({placeholders}) AND po.action = 'add'"
+            "  )"
+            "  GROUP BY file_hash HAVING COUNT(DISTINCT cluster_id) = ?"
+            ")"
         )
+        params.extend(person_ids)
         params.extend(person_ids)
         params.append(len(person_ids))
     if favorite_by == "__me__":

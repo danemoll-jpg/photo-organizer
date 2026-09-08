@@ -32,6 +32,16 @@ Coverage:
   - The override lookup for a grid page is batched -- exactly ONE query
     per page regardless of page size, same technique test_phase3e.py's/
     test_phase3h.py's own batching proofs used, not assumed.
+  - Follow-up, same session, at the user's explicit request ("this is
+    necessary"): the grid's Person/People FILTER (_build_filters) is now
+    override-aware too, matching exactly what _people_for_hashes DISPLAYS
+    -- manually adding a person to a photo makes it match a filter for
+    them, manually removing one excludes it, and a not_a_person=1-flagged
+    face (a pre-existing, Phase-3i-independent gap) no longer satisfies
+    the filter despite never appearing in that photo's own displayed
+    people list. Also confirms the AND (multi-person) intersection still
+    holds correctly when the two people are found via DIFFERENT means (one
+    automatic, one override).
 
 Usage:
     venv\\Scripts\\python tests\\test_phase3i.py
@@ -384,6 +394,83 @@ def test_overrides_batched_not_per_row(tmp: Path) -> None:
     conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Part 3: the Person/People FILTER, made override-aware at the user's
+# explicit request ("this is necessary")
+# ---------------------------------------------------------------------------
+
+def test_person_filter_is_override_aware(tmp: Path) -> None:
+    print("\n=== Follow-up: _build_filters' person/people params now respect manual overrides ===")
+    rt, dan, csrf, dbp = _setup(tmp)
+
+    # Baseline (pre-existing Phase 3d/3g behavior, must be unaffected):
+    # h1 automatically has Alice (cluster 10) via a real detected face.
+    resp = dan.get("/api/photos?person=10&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h1"}, hashes
+    print("  Baseline: person=10 (Alice) matches only h1 (the real automatic face)  OK")
+
+    # Manually ADD Alice to h2 -- must now match the filter too.
+    resp = _person_action(dan, csrf, "h2", "add", cluster_id=10)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    resp = dan.get("/api/photos?person=10&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h1", "h2"}, hashes
+    print("  Manually adding Alice to h2 -> person=10 now matches {h1, h2}  OK")
+
+    # Manually REMOVE Alice from h1 (automatically present) -- must now be
+    # excluded from the filter despite the real face row still existing.
+    resp = _person_action(dan, csrf, "h1", "remove", cluster_id=10)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    resp = dan.get("/api/photos?person=10&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h2"}, hashes
+    conn = connect(dbp)
+    face_row = conn.execute("SELECT cluster_id FROM faces WHERE file_hash='h1'").fetchone()
+    assert face_row == (10,), "the underlying face row must be untouched by the filter fix"
+    conn.close()
+    print("  Manually removing Alice from h1 -> person=10 now matches only {h2} (real face row untouched)  OK")
+
+    # Multi-person AND, found via DIFFERENT means: h2 has Alice via an
+    # override and a brand-new "Dave" tagged to it too (also override-only)
+    # -- both must be required (Phase 3g's AND semantics), regardless of
+    # which mechanism (automatic vs. override) supplies each person.
+    resp = _person_action(dan, csrf, "h2", "add", name="Dave")
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    conn = connect(dbp)
+    dave_cid = conn.execute("SELECT cluster_id FROM people WHERE assigned_name='Dave'").fetchone()[0]
+    conn.close()
+    resp = dan.get(f"/api/photos?people=10,{dave_cid}&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h2"}, hashes
+    resp = dan.get(f"/api/photos?people={dave_cid}&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert hashes == {"h2"}, "Dave alone (override-only, no real face at all) must still filter correctly"
+    print("  people=10,<Dave> (both override-only on h2) -> AND intersection still correct  OK")
+
+    # not_a_person=1 (Phase 3c, independent of Phase 3i): a flagged face
+    # must not satisfy the filter -- a pre-existing gap fixed alongside.
+    conn = connect(dbp)
+    conn.execute(
+        "INSERT INTO faces (file_hash, bbox_x, bbox_y, bbox_w, bbox_h, embedding, det_score, cluster_id, "
+        "not_a_person, detected_at) VALUES ('h3', 0, 0, 10, 10, ?, 0.9, 10, 1, '2021-06-01T00:00:00')",
+        (b"\x00" * 4,),
+    )
+    conn.commit()
+    conn.close()
+    resp = dan.get("/api/photos?person=10&limit=50")
+    hashes = {i["file_hash"] for i in resp.get_json()["items"]}
+    assert "h3" not in hashes, f"a not_a_person=1 face must not satisfy the filter, got {hashes}"
+    print("  A not_a_person=1-flagged face (h3) does NOT satisfy the filter -- bundled fix confirmed  OK")
+
+    # /api/stats and /api/nav pick up the override-aware filter automatically
+    # too, same "lives in _build_filters, every route gets it for free"
+    # pattern every prior filter here already established.
+    resp = dan.get("/api/stats?person=10")
+    assert resp.get_json()["total_photos"] == 1, resp.get_json()  # only h2 -- h1 removed, h3 flagged not_a_person
+    print("  /api/stats honors the override-aware filter too  OK")
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="photo_organizer_phase3i_"))
     print(f"Working in {tmp}")
@@ -394,6 +481,7 @@ def main() -> None:
         test_bulk_add_remove_person_via_http(tmp)
         test_csrf_and_auth(tmp)
         test_overrides_batched_not_per_row(tmp)
+        test_person_filter_is_override_aware(tmp)
         print("\nALL PHASE 3I TESTS PASSED")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

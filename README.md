@@ -823,10 +823,10 @@ while browsing. A new `photo_people_overrides` table
 — removing an automatically-detected person just hides them from that
 one photo's display, it never reassigns or deletes the real face data.
 
-**Known gap**: the grid's Person/People filter still only searches the
-automatic face data, not these manual overrides — a person you've
-manually added to a photo won't yet make it match a filter for them (and
-vice versa for a manual removal).
+The grid's Person/People filter is override-aware too: a person you've
+manually added to a photo makes it match a filter for them, and a manual
+removal excludes it, exactly matching what that photo's own People row
+displays.
 
 ## Phase 3b — resync folder placement with date_taken
 
