@@ -15,6 +15,10 @@ tests/test_face_detection.py). Covers:
      orphaned-empty-person cleanup).
   4. crop_face_thumbnail's EXIF-orientation handling -- a real correctness
      point (see that function's own docstring), not boilerplate.
+  4b. Phase 3j's load_full_photo_with_bbox -- the opposite ordering
+      (draw-then-rotate rather than crop's crop-then-rotate) needs its own
+      dedicated orientation check; see that function's own docstring for
+      why the ordering has to be reversed.
   5. A smoke test against the REAL data/faces.jsonl this project's own
      Phase 3 Session 1 produced (skipped gracefully if that file doesn't
      exist) -- run against a throwaway temp DB seeded only with the
@@ -52,6 +56,7 @@ from src.face_clustering import (
     list_clusters,
     list_faces_in_cluster,
     load_faces_from_jsonl,
+    load_full_photo_with_bbox,
     merge_people,
     move_faces_to_person,
     run_face_clustering,
@@ -293,6 +298,68 @@ def test_crop_face_thumbnail_orientation(tmp: Path) -> None:
     print(f"  control (no EXIF orientation tag): crop stays an un-rotated 50x50 square  OK")
 
 
+def test_load_full_photo_with_bbox_orientation(tmp: Path) -> None:
+    print("\n=== load_full_photo_with_bbox: highlight box follows the SAME rotation as the photo (Phase 3j) ===")
+    # Same raw sensor-frame setup as test_crop_face_thumbnail_orientation
+    # above, saved as PNG rather than JPEG so the thin drawn outline isn't
+    # smeared by lossy DCT block artifacts right at a sharp color edge.
+    arr = np.full((100, 200, 3), 128, dtype=np.uint8)  # (H, W, 3)
+    arr[10:60, 10:60] = [255, 0, 0]  # red "face" square, same raw bbox face_detection.py would have used
+    img = Image.fromarray(arr, mode="RGB")
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation=6: rotate 90 CW for correct display
+    p = tmp / "rotated_full_photo.png"
+    img.save(p, "PNG", exif=exif.tobytes())
+
+    def red_mask_of(arr_out: np.ndarray) -> np.ndarray:
+        return (arr_out[:, :, 0] > 200) & (arr_out[:, :, 1] < 50) & (arr_out[:, :, 2] < 50)
+
+    def outline_mask_of(arr_out: np.ndarray) -> np.ndarray:
+        return (arr_out[:, :, 0] < 50) & (arr_out[:, :, 1] > 200) & (arr_out[:, :, 2] < 50)
+
+    result = load_full_photo_with_bbox(
+        p, bbox=(10, 10, 50, 50), max_size=(1000, 1000), outline="#00ff00", outline_width=2
+    )
+    arr_out = np.asarray(result.convert("RGB"))
+    red_mask = red_mask_of(arr_out)
+    assert red_mask.any(), "rotated output must still contain the red 'face' region"
+    rows, cols = np.where(red_mask.any(axis=1))[0], np.where(red_mask.any(axis=0))[0]
+    r0, r1, c0, c1 = rows.min(), rows.max(), cols.min(), cols.max()
+    # A ring just outside the (correctly-rotated) red region's own bounding
+    # box must contain the outline color -- proving the highlighted
+    # rectangle actually bounds the rotated face, not some other part of
+    # the photo. If the box had instead been drawn AFTER exif_transpose
+    # (using the raw, un-rotated bbox coordinates on an already-rotated
+    # image), it would land on the wrong axis/region entirely and this
+    # would fail.
+    ring = arr_out[max(0, r0 - 6): r1 + 7, max(0, c0 - 6): c1 + 7]
+    assert outline_mask_of(ring).any(), (
+        "the highlighted outline must appear immediately around the rotated red region -- "
+        "drawing the box before vs. after exif_transpose() must not disagree"
+    )
+    print(f"  red region bbox=({r0},{c0})-({r1},{c1}), outline correctly bounds it after rotation  OK")
+
+    # Control: an unrotated photo -- box lands exactly at the raw bbox, no
+    # dimension swap.
+    p_plain = tmp / "plain_full_photo.png"
+    img.save(p_plain, "PNG")
+    result_plain = load_full_photo_with_bbox(
+        p_plain, bbox=(10, 10, 50, 50), max_size=(1000, 1000), outline="#00ff00", outline_width=2
+    )
+    assert result_plain.size == (200, 100), f"unrotated photo shouldn't change dimensions, got {result_plain.size}"
+    arr_plain = np.asarray(result_plain.convert("RGB"))
+    # (x, y) = (10, 10) is the rectangle's own top-left corner -- part of
+    # both its top and left border.
+    r, g, b = arr_plain[10, 10][:3]
+    assert r < 50 and g > 200 and b < 50, f"rectangle corner should be outline-colored, got ({r},{g},{b})"
+    print("  control (no EXIF orientation tag): box lands exactly at the raw bbox, dimensions unchanged  OK")
+
+    # max_size actually constrains the result -- scaled DOWN, never up.
+    tiny = load_full_photo_with_bbox(p_plain, bbox=(10, 10, 50, 50), max_size=(50, 50))
+    assert max(tiny.size) <= 50, f"result must be scaled to fit max_size, got {tiny.size}"
+    print(f"  max_size correctly caps the result (got {tiny.size} for a max_size=(50,50) cap)  OK")
+
+
 def test_real_faces_jsonl_smoke(tmp: Path) -> None:
     print("\n=== Smoke test against the REAL data/faces.jsonl (Phase 3 Session 1's own output) ===")
     real_faces_path = REPO_ROOT / "data" / "faces.jsonl"
@@ -362,6 +429,7 @@ def main() -> None:
         test_incremental_reclustering_preserves_names(tmp)
         test_manual_split_move_merge(tmp)
         test_crop_face_thumbnail_orientation(tmp)
+        test_load_full_photo_with_bbox_orientation(tmp)
         test_real_faces_jsonl_smoke(tmp)
         print("\nALL PHASE 3 SESSION 2 (FACE CLUSTERING) TESTS PASSED")
     finally:

@@ -321,6 +321,7 @@ from src.face_clustering import (
     list_faces_in_cluster,
     list_not_a_person_faces,
     list_people_for_merge_target,
+    load_full_photo_with_bbox,
     mark_faces_not_a_person,
     merge_people,
     move_faces_to_person,
@@ -3189,6 +3190,14 @@ class FaceLabelingWindow(tk.Toplevel):
         # Tk itself only holds a C-level handle and the image silently goes
         # blank the moment Python garbage-collects its last reference.
         self._photo_refs: list[ImageTk.PhotoImage] = []
+        # Phase 3j: hover-preview state (see _on_face_hover_enter/_leave).
+        # A single pending `after()` job id and a single open tooltip
+        # Toplevel at a time -- moving the mouse from one thumbnail
+        # straight to another must cancel the first's pending job/close its
+        # tooltip before scheduling the next, or stale previews would pile
+        # up.
+        self._hover_after_id: str | None = None
+        self._hover_tooltip: tk.Toplevel | None = None
 
         # Phase 3c filter state -- purely UI-layer, per the spec ("must
         # never affect the underlying data, clustering, or which faces are
@@ -3506,6 +3515,10 @@ class FaceLabelingWindow(tk.Toplevel):
             widget.destroy()
         self._photo_refs.clear()
         self._face_check_vars.clear()
+        # Rebuilding the grid (page change, cluster switch, reload) destroys
+        # every widget a pending hover job/tooltip might reference -- cancel
+        # both so a stale after() callback can't fire against a dead widget.
+        self._cancel_hover_preview()
 
         total = len(self._current_faces)
         page_count = max(1, (total + self.FACES_PER_PAGE - 1) // self.FACES_PER_PAGE)
@@ -3531,6 +3544,14 @@ class FaceLabelingWindow(tk.Toplevel):
                 command=lambda fid=face.face_id, v=var: self._on_face_toggle(fid, v),
             )
             cb.grid(row=i // self.THUMB_COLS, column=i % self.THUMB_COLS, padx=3, pady=3)
+            # Phase 3j: double-click opens the full original photo with this
+            # face's bbox highlighted (the actual requirement); hovering
+            # shows a small delayed preview of the same thing (the
+            # nice-to-have -- see _on_face_hover_enter's docstring for why
+            # it's debounced rather than instant).
+            cb.bind("<Double-Button-1>", lambda e, f=face: self._on_face_double_click(f))
+            cb.bind("<Enter>", lambda e, f=face, w=cb: self._on_face_hover_enter(f, w))
+            cb.bind("<Leave>", lambda e: self._on_face_hover_leave())
 
         if total == 0:
             self.page_label.configure(text="No faces.")
@@ -3541,6 +3562,90 @@ class FaceLabelingWindow(tk.Toplevel):
         self.prev_page_btn.configure(state="normal" if self._face_page > 0 else "disabled")
         self.next_page_btn.configure(state="normal" if self._face_page < page_count - 1 else "disabled")
         self._update_selection_count()
+
+    # ----------------------------------------------- Phase 3j: full photo
+    def _popup_max_size(self) -> tuple[int, int]:
+        """A reasonable window size to scale the full photo to fit within --
+        not full native resolution (per spec), but not a fixed small
+        constant either, since this dashboard can run on very different
+        screens. 75% of the actual screen, floored so it's never
+        unreasonably tiny."""
+        return (
+            max(500, int(self.winfo_screenwidth() * 0.75)),
+            max(400, int(self.winfo_screenheight() * 0.75)),
+        )
+
+    def _on_face_double_click(self, face) -> None:
+        """The actual Phase 3j requirement: opens the full original photo a
+        face crop came from, in a new window, with that specific face's
+        bbox highlighted -- so a too-tight crop (a baby/toddler, an awkward
+        angle, a group shot) can be identified with real context. Reuses
+        crop_face_thumbnail's own PIL loading approach via
+        src.face_clustering.load_full_photo_with_bbox (no second
+        image-loading path); purely a viewing aid, nothing here writes to
+        the DB or the file."""
+        try:
+            img = load_full_photo_with_bbox(face.current_path, face.bbox, max_size=self._popup_max_size())
+        except Exception as exc:
+            messagebox.showerror(
+                "Can't open photo",
+                f"Couldn't load the original photo for this face:\n{face.current_path}\n\n{exc}",
+                parent=self,
+            )
+            return
+
+        win = tk.Toplevel(self)
+        win.title(Path(face.current_path).name)
+        photo = ImageTk.PhotoImage(img)
+        # Same ImageTk gotcha as self._photo_refs above -- stash a reference
+        # on the window itself so it survives for the window's own
+        # lifetime, independent of this method's local scope.
+        win._photo_ref = photo
+        ttk.Label(win, image=photo).pack()
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(4, 8))
+        win.transient(self)
+        win.focus_set()
+
+    def _cancel_hover_preview(self) -> None:
+        if self._hover_after_id is not None:
+            self.after_cancel(self._hover_after_id)
+            self._hover_after_id = None
+        if self._hover_tooltip is not None:
+            self._hover_tooltip.destroy()
+            self._hover_tooltip = None
+
+    def _on_face_hover_enter(self, face, widget: tk.Widget) -> None:
+        """Nice-to-have half of Phase 3j: after a short pause on one
+        thumbnail (debounced via after() -- not instant, so sweeping the
+        mouse across the grid doesn't decode a full photo per thumbnail
+        passed over), pop up a small non-interactive preview of the same
+        full-photo-with-highlighted-bbox double-click already opens. This
+        stays cleanly separable from the double-click requirement -- if
+        anything about it were fragile, it could be deleted without
+        touching that code path at all."""
+        self._cancel_hover_preview()
+        self._hover_after_id = self.after(350, lambda: self._show_hover_preview(face, widget))
+
+    def _on_face_hover_leave(self) -> None:
+        self._cancel_hover_preview()
+
+    def _show_hover_preview(self, face, widget: tk.Widget) -> None:
+        self._hover_after_id = None
+        try:
+            img = load_full_photo_with_bbox(face.current_path, face.bbox, max_size=(420, 420))
+        except Exception:
+            return  # silent -- a hover preview failing shouldn't interrupt anything; double-click still reports the real error
+
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)  # borderless -- reads as a tooltip, not a window
+        tip.attributes("-topmost", True)
+        x = widget.winfo_rootx() + widget.winfo_width() + 8
+        y = widget.winfo_rooty()
+        tip.geometry(f"+{x}+{y}")
+        photo = ImageTk.PhotoImage(img)
+        tip._photo_ref = photo
+        tk.Label(tip, image=photo, borderwidth=2, relief="solid").pack()
+        self._hover_tooltip = tip
 
     def _on_prev_page(self) -> None:
         if self._face_page > 0:
@@ -3898,6 +4003,7 @@ class FaceLabelingWindow(tk.Toplevel):
         self.reload()
 
     def _on_close(self) -> None:
+        self._cancel_hover_preview()
         self.conn.close()
         self.destroy()
 

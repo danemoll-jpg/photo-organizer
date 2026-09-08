@@ -87,7 +87,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from .config import Config
 
@@ -963,3 +963,50 @@ def crop_face_thumbnail(path: str | Path, bbox: tuple[int, int, int, int], size:
     crop = ImageOps.exif_transpose(crop)
     crop.thumbnail((size, size))
     return crop
+
+
+def load_full_photo_with_bbox(
+    path: str | Path,
+    bbox: tuple[int, int, int, int],
+    max_size: tuple[int, int] = (1200, 900),
+    outline: str = "#ff2d55",
+    outline_width: int = 4,
+) -> Image.Image:
+    """Phase 3j: loads the SAME original photo crop_face_thumbnail() crops
+    from, but full-frame with a rectangle drawn around one specific face's
+    bbox -- for FaceLabelingWindow's "view full photo for context" feature
+    (photo-organizer-spec.md's Phase 3j section). A tight face crop is
+    sometimes not enough to confidently identify who someone is (a baby/
+    toddler, an awkward angle, a group photo where the crop alone doesn't
+    show who's standing next to whom); this gives the labeler the whole
+    scene with the specific face called out.
+
+    Coordinate-frame note -- same underlying fact as crop_face_thumbnail's
+    own docstring, but the opposite ordering is required here: bbox is in
+    the RAW, un-EXIF-rotated pixel frame face_detection.py actually
+    detected against. crop_face_thumbnail crops first (in that raw frame)
+    and rotates the small resulting crop afterward. Here we instead need
+    the WHOLE photo rotated upright for a human to look at, so the
+    rectangle must be drawn onto the image *before* exif_transpose() runs --
+    drawing it after would place a raw-frame box onto an already-rotated
+    image and it would land in the wrong spot (or on the wrong axis
+    entirely for a 90/270-degree rotation). Drawing then rotating moves the
+    box consistently with the photo's own pixels, exactly like cropping
+    then rotating already does for the tight-crop case.
+
+    Uses the same Image.open()/PIL loading approach as crop_face_thumbnail
+    (no second image-loading path) and never touches the file itself --
+    this is a read-only viewing aid, not an edit.
+
+    max_size is a (width, height) cap the result is scaled DOWN to fit
+    within (never scaled up) -- a full 12MP+ original isn't shown at native
+    resolution, consistent with every other thumbnail in this project.
+    """
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        x, y, w, h = bbox
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([x, y, x + w, y + h], outline=outline, width=outline_width)
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail(max_size)
+        return img
