@@ -3447,9 +3447,23 @@ class FaceLabelingWindow(tk.Toplevel):
         change (no prev_key passed, e.g. the trace/command callbacks below)
         instead tries to preserve whatever's CURRENTLY selected, so typing
         into "Hide groups smaller than" doesn't blow away an in-progress
-        selection every keystroke."""
+        selection every keystroke.
+
+        Also restores the listbox's scroll position across the rebuild --
+        real usability complaint: Tk's Listbox resets its scroll to the top
+        on any delete(0, "end") + re-insert, regardless of whether the
+        previously-selected item still exists. Barely noticeable when the
+        selected cluster survives the refresh in roughly the same spot, but
+        jarring for the common real workflow of working down the list and
+        merging/clearing a cluster's faces entirely -- that cluster
+        disappears from the list AND the view used to snap back to the top,
+        losing your place after every single one."""
         if prev_key is None:
             prev_key = self._display_key(self._selected_index)
+        try:
+            prev_view_top = self.cluster_listbox.yview()[0]
+        except tk.TclError:
+            prev_view_top = 0.0
 
         try:
             min_size = max(0, int(self.min_size_var.get()))
@@ -3488,6 +3502,13 @@ class FaceLabelingWindow(tk.Toplevel):
                     self._selected_index = i
                     self.cluster_listbox.selection_set(i)
                     break
+
+        # Restored regardless of whether the previous selection still
+        # exists -- see the docstring above. Harmless (a no-op look) when
+        # nothing actually scrolled; the fix that matters is the case where
+        # the selected cluster just vanished from the list entirely.
+        self.cluster_listbox.yview_moveto(prev_view_top)
+
         self._load_selected_cluster()
 
     def _on_cluster_selected(self, event=None) -> None:
