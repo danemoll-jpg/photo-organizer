@@ -833,13 +833,21 @@ def list_faces_in_cluster(conn: sqlite3.Connection, cluster_id: int | None) -> l
     other unclustered face, but belongs to its own dedicated bucket -- see
     list_not_a_person_faces) -- filtered unconditionally, not just for the
     cluster_id IS NULL branch, as a defensive guard in case a real cluster_id
-    row is ever left inconsistent."""
+    row is ever left inconsistent.
+
+    Ordered chronologically by the photo's own date_taken (per the user's
+    own request, for FaceLabelingWindow's thumbnail grid) -- date_taken is
+    ISO 8601 TEXT (schema.sql), which sorts correctly as a plain string
+    comparison. A NULL date_taken (unsorted/undated photo) sorts LAST
+    rather than SQLite's own ASC-sorts-NULL-first default, via the
+    `(ph.date_taken IS NULL)` boolean-as-0/1 leading sort key; face_id is a
+    stable final tiebreaker for same-date (or all-NULL) rows."""
     where = "f.cluster_id IS NULL" if cluster_id is None else "f.cluster_id = ?"
     params = () if cluster_id is None else (cluster_id,)
     rows = conn.execute(
         "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score "
         f"FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash WHERE {where} AND f.not_a_person = 0 "
-        "ORDER BY f.face_id",
+        "ORDER BY (ph.date_taken IS NULL), ph.date_taken, f.face_id",
         params,
     ).fetchall()
     return [
@@ -855,11 +863,14 @@ def count_not_a_person(conn: sqlite3.Connection) -> int:
 def list_not_a_person_faces(conn: sqlite3.Connection) -> list[FaceRecord]:
     """The dedicated bucket for Phase 3c-flagged false positives -- shown by
     FaceLabelingWindow only behind its "Show marked-as-not-a-person" toggle,
-    off by default, per the spec's "hidden from view by default" requirement."""
+    off by default, per the spec's "hidden from view by default" requirement.
+    Chronological ordering, same rationale/NULL-handling as
+    list_faces_in_cluster() above, for consistency across every bucket the
+    same thumbnail grid can display."""
     rows = conn.execute(
         "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score "
         "FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash "
-        "WHERE f.not_a_person = 1 ORDER BY f.face_id"
+        "WHERE f.not_a_person = 1 ORDER BY (ph.date_taken IS NULL), ph.date_taken, f.face_id"
     ).fetchall()
     return [
         FaceRecord(face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6], det_score=r[7])
