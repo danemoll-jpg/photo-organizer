@@ -325,6 +325,7 @@ from src.face_clustering import (
     mark_faces_not_a_person,
     merge_people,
     move_faces_to_person,
+    rank_clusters_by_similarity,
     remove_faces_from_cluster,
     restore_faces_from_undo,
     set_person_auto_match_locked,
@@ -3098,6 +3099,173 @@ class DashboardApp:
         self.log_text.configure(state="disabled")
 
 
+class SuggestField:
+    """A small, self-contained autocomplete widget: a ttk.Entry backed by
+    a hand-built floating suggestion popup (a borderless Toplevel holding
+    a Listbox this class positions/fills/shows/hides itself). Factored out
+    of FaceLabelingWindow's original Target-person field so a second field
+    (the "Sort by likely match to" tool) could reuse it instead of
+    copy-pasting the whole thing a second time -- this project's own
+    established rule (see review_tool.py's JS attachSuggestionDropdown,
+    reused across five+ filter fields there for the identical reason).
+
+    Built to fix three specific, real complaints ttk.Combobox's own
+    built-in dropdown couldn't be made to handle well:
+      1. Hard to select the whole line to retype -> <FocusIn> selects all
+         existing text (via after(1, ...), since the triggering click
+         would otherwise place the cursor after the selection ran).
+      2. The filtered list didn't show without manually pulling the
+         dropdown open -> the popup opens/updates on every keystroke AND
+         on focus-in alone, no manual pulldown ever needed.
+      3. Picking the wrong suggestion left you stuck showing only that
+         one entry -> filtering always recomputes from the FULL candidate
+         list (set_items), never from whatever was previously shown, so
+         clicking back in (select-all, per #1) and typing again always
+         reaches every real option again.
+
+    `items` (via set_items) is a list of (key, label) pairs the field
+    offers. The actually-chosen value is resolved by EXACT label match
+    (resolve_key), never by list-widget index, which stops meaning
+    anything the instant filtering narrows the visible list. A
+    `_suggestions_enabled` flag distinguishes a PROGRAMMATIC text change
+    (set_text_programmatic -- switching context, refreshing after an
+    edit, picking a suggestion) from genuine live typing, since both set
+    the identical underlying StringVar and the var's own trace can't
+    otherwise tell them apart -- without it, a programmatic update would
+    pop the suggestion window open uninvited every time."""
+
+    def __init__(self, master: tk.Widget, owner: tk.Misc, width: int = 34):
+        self.owner = owner  # parent for the popup Toplevel -- any live Tk window works
+        self.var = tk.StringVar()
+        self.entry = ttk.Entry(master, textvariable=self.var, width=width)
+        self._items: list[tuple[object, str]] = []
+        self._suggest_items: list[tuple[object, str]] = []  # matches currently shown, parallel to the popup listbox's rows
+        self._popup: tk.Toplevel | None = None
+        self._listbox: tk.Listbox | None = None
+        self._suggestions_enabled = True
+
+        self.var.trace_add("write", self._on_text_changed)
+        self.entry.bind("<FocusIn>", self._on_focus_in)
+        self.entry.bind("<FocusOut>", self._on_suggest_focus_out)
+        self.entry.bind("<Down>", self._on_arrow_down)
+        self.entry.bind("<Escape>", lambda e: self.hide())
+
+    def set_items(self, items: list[tuple[object, str]]) -> None:
+        self._items = items
+
+    def get_text(self) -> str:
+        return self.var.get()
+
+    def resolve_key(self):
+        """Exact label match against the full candidate list -- returns
+        the matching key, or None if the current text doesn't exactly
+        match a real option (nothing chosen yet, or a half-typed name)."""
+        text = self.var.get()
+        for key, label in self._items:
+            if label == text:
+                return key
+        return None
+
+    def set_text_programmatic(self, text: str) -> None:
+        self._suggestions_enabled = False
+        self.var.set(text)
+        self._suggestions_enabled = True
+        self.hide()
+
+    def hide(self) -> None:
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.withdraw()
+
+    def destroy(self) -> None:
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.destroy()
+
+    # ---------------------------------------------------------- internal
+    def _on_text_changed(self, *_args) -> None:
+        if not self._suggestions_enabled:
+            return  # a programmatic set (see set_text_programmatic), not the user typing
+        typed = self.var.get().strip().lower()
+        matches = self._items if not typed else [
+            (key, label) for key, label in self._items if typed in label.lower()
+        ]
+        self._suggest_items = matches
+        if matches:
+            self._show(matches)
+        else:
+            self.hide()
+
+    def _on_focus_in(self, event=None) -> None:
+        self.entry.after(1, lambda: self.entry.select_range(0, "end"))
+        # Show the current candidate list right away, not just after the
+        # first keystroke -- lets browsing happen by clicking in alone.
+        self._on_text_changed()
+
+    def _on_arrow_down(self, event=None) -> str | None:
+        """Pressing Down while typing moves keyboard focus into the
+        suggestion popup itself, so it can be arrow-navigated + committed
+        with Enter -- a keyboard-only fallback alongside clicking."""
+        if self._popup is not None and self._popup.winfo_exists() and self._listbox.size() > 0:
+            self._listbox.focus_set()
+            self._listbox.selection_clear(0, "end")
+            self._listbox.selection_set(0)
+            self._listbox.activate(0)
+            return "break"
+        return None
+
+    def _on_suggest_focus_out(self, event=None) -> None:
+        # Delayed so a click landing on the suggestion popup (which also
+        # blurs the entry) has a chance to actually register as a pick
+        # BEFORE this decides whether to close the popup -- closing
+        # immediately would eat the click that was supposed to choose
+        # something (the classic dropdown-loses-focus-before-the-click-
+        # lands bug).
+        self.entry.after(150, self._maybe_hide)
+
+    def _maybe_hide(self) -> None:
+        if self._popup is None or not self._popup.winfo_exists():
+            return
+        focused = self.entry.focus_get()
+        if focused is self._listbox:
+            return  # focus moved INTO the popup (e.g. via arrow-down) -- keep it open
+        self.hide()
+
+    def _show(self, matches: list[tuple[object, str]]) -> None:
+        if self._popup is None or not self._popup.winfo_exists():
+            popup = tk.Toplevel(self.owner)
+            popup.withdraw()
+            popup.overrideredirect(True)  # a borderless popup, not a real window -- reads as part of the field
+            popup.attributes("-topmost", True)
+            lb = tk.Listbox(popup, activestyle="dotbox", exportselection=False)
+            lb.pack(fill="both", expand=True)
+            lb.bind("<ButtonRelease-1>", self._on_suggestion_chosen)
+            lb.bind("<Return>", self._on_suggestion_chosen)
+            lb.bind("<Escape>", lambda e: (self.hide(), self.entry.focus_set()))
+            lb.bind("<FocusOut>", self._on_suggest_focus_out)
+            self._popup = popup
+            self._listbox = lb
+        popup = self._popup
+        lb = self._listbox
+        lb.delete(0, "end")
+        for _, label in matches:
+            lb.insert("end", label)
+        visible_rows = min(10, len(matches))
+        lb.configure(height=visible_rows)
+        x = self.entry.winfo_rootx()
+        y = self.entry.winfo_rooty() + self.entry.winfo_height()
+        width = max(self.entry.winfo_width(), 260)
+        popup.geometry(f"{width}x{visible_rows * 18}+{x}+{y}")
+        popup.deiconify()
+
+    def _on_suggestion_chosen(self, event=None) -> None:
+        sel = self._listbox.curselection()
+        if not sel or sel[0] >= len(self._suggest_items):
+            return
+        _, label = self._suggest_items[sel[0]]
+        self.set_text_programmatic(label)
+        self.entry.focus_set()
+        self.entry.select_range(0, "end")
+
+
 class FaceLabelingWindow(tk.Toplevel):
     """Phase 3 Session 2's interactive labeling UI (photo-organizer-spec.md's
     Phase 3 section, user's explicit choice to live here rather than in
@@ -3187,34 +3355,21 @@ class FaceLabelingWindow(tk.Toplevel):
         self._selected_face_ids: set[int] = set()
         self._face_check_vars: dict[int, tk.BooleanVar] = {}
         # Follow-up session, direct user request ("keep the dropdown on the
-        # same name when switching [between] clusters" + typeahead): the
-        # Target-person field's full (unfiltered) candidate list, as
-        # (cluster_id, label) pairs -- see _populate_target_combo(). The
-        # selected target is resolved by exact label match against THIS
-        # list (_resolve_target_cluster_id), never by list-widget index.
+        # same name when switching [between] clusters" + typeahead, later
+        # rebuilt as a proper SuggestField after real usability feedback):
+        # the Target-person field's full (unfiltered) candidate list, as
+        # (cluster_id, label) pairs -- see _populate_target_combo(). Kept
+        # here (not just inside self.target_field) since a few call sites
+        # still want the raw list, e.g. to build label_by_cid lookups.
         self._all_targets: list[tuple[int, str]] = []
-        # Second follow-up, direct user feedback that ttk.Combobox's own
-        # dropdown was "a little buggy": hard to select-all the existing
-        # text to retype, the filtered list never showed without manually
-        # pulling the arrow down, and picking the wrong entry left you
-        # stuck showing only that one choice. Replaced with a plain Entry
-        # (self.target_entry, built in _build_ui) plus a custom floating
-        # suggestion popup this class manages directly -- see
-        # _show_target_suggestions/_hide_target_suggestions/
-        # _on_target_text_changed for the real, from-scratch autocomplete
-        # this project's own review_tool.py already uses in JS
-        # (attachSuggestionDropdown) for the identical reason: a native
-        # dropdown widget's built-in popup behavior can't be made to do
-        # this reliably, a fully custom one can.
-        # _target_suggestions_enabled is the mechanism that keeps
-        # PROGRAMMATIC text changes (switching clusters, a local edit,
-        # picking a suggestion) from re-triggering/reopening the popup the
-        # same way live typing does -- both paths set the same StringVar,
-        # so without this flag they'd be indistinguishable to the trace.
-        self._target_suggest_items: list[tuple[int, str]] = []  # matches currently shown, parallel to the popup listbox's rows
-        self._target_suggest_popup: tk.Toplevel | None = None
-        self._target_suggest_listbox: tk.Listbox | None = None
-        self._target_suggestions_enabled: bool = True
+        # Follow-up session, direct user request ("any way to get [small
+        # groups] to chain?"): which person (if any) the left list is
+        # currently sorted by likely-match-similarity to, instead of
+        # face_count -- see _rebuild_display_list(). Tracked separately so
+        # switching to a NEW rank target can reset the scroll to the top
+        # (a totally different order deserves a fresh view), while picking
+        # the SAME one again (e.g. after a local edit) doesn't.
+        self._last_rank_target_cid: int | None = None
         # Must keep a live Python reference to every ImageTk.PhotoImage --
         # Tk itself only holds a C-level handle and the image silently goes
         # blank the moment Python garbage-collects its last reference.
@@ -3323,6 +3478,32 @@ class FaceLabelingWindow(tk.Toplevel):
             foreground="#666666", font=("Segoe UI", 8),
             wraplength=220, justify="left",
         ).pack(anchor="w", pady=(2, 4))
+
+        # Follow-up session, direct user request ("so many small groups
+        # <=12 that are usually my wife or daughter... any way to get
+        # those to chain?"): investigated auto-merging these automatically
+        # and found the real data doesn't support it safely (individual
+        # per-face similarity for likely-genuine small-cluster matches
+        # typically tops out around 0.5, well below any threshold this
+        # project would trust unsupervised -- see CLAUDE.md's real
+        # history of contamination from over-lenient thresholds). This is
+        # the safer answer: a human-reviewed RANKING, not an automatic
+        # merge -- picking a person here re-sorts the list below by
+        # likely-match similarity to them instead of face_count, with the
+        # score shown, so real candidates can be reviewed and approved by
+        # hand (existing Merge button) instead of hunting through
+        # thousands of clusters in size order. See
+        # src/face_clustering.py::rank_clusters_by_similarity and
+        # _rebuild_display_list()'s own comment for the full reasoning.
+        rank_frame = ttk.Frame(left)
+        rank_frame.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(rank_frame, text="Sort by likely match to:").pack(anchor="w")
+        rank_input_row = ttk.Frame(rank_frame)
+        rank_input_row.pack(fill="x")
+        self.rank_field = SuggestField(rank_input_row, owner=self, width=22)
+        self.rank_field.entry.pack(side="left")
+        self.rank_field.var.trace_add("write", lambda *_: self._rebuild_display_list())
+        ttk.Button(rank_input_row, text="Clear", command=self._on_clear_rank_target).pack(side="left", padx=(4, 0))
 
         list_row = ttk.Frame(left)
         list_row.pack(fill="both", expand=True, padx=6, pady=6)
@@ -3449,37 +3630,16 @@ class FaceLabelingWindow(tk.Toplevel):
         action_bar2 = ttk.Frame(right)
         action_bar2.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Label(action_bar2, text="Target person:").pack(side="left")
-        self.target_var = tk.StringVar()
-        # Second follow-up session, direct user feedback that the earlier
-        # ttk.Combobox-based typeahead was "a little buggy" in three
-        # specific, real ways -- fixed by replacing it with a plain Entry
-        # plus a hand-built floating suggestion popup this class fully
-        # controls (see the state comment in __init__ and
-        # _show_target_suggestions/_on_target_text_changed below):
-        #   1. "Hard to select the whole line to type" -> <FocusIn> below
-        #      selects all existing text, so clicking in and just typing
-        #      immediately replaces it (real Entry widgets don't do this
-        #      by default; a deliberate binding is needed).
-        #   2. "Don't see the filter until you pull down the dropdown" ->
-        #      the popup opens/updates automatically on every keystroke,
-        #      no manual pulldown needed, and also on focus-in so browsing
-        #      is possible before typing anything.
-        #   3. "Pick the wrong name, stuck with just that one" -> the
-        #      popup always filters from self._all_targets (the FULL
-        #      candidate list), never from whatever was previously shown,
-        #      so clicking back in (which selects-all per #1) and typing
-        #      again always re-opens the full set of real options.
-        # The actual selected target is still resolved by exact label
-        # match (_resolve_target_cluster_id), not by what's merely typed,
-        # so a half-typed name that doesn't match anyone real is correctly
-        # treated as "nothing chosen yet," not a fabricated target.
-        self.target_entry = ttk.Entry(action_bar2, textvariable=self.target_var, width=34)
-        self.target_entry.pack(side="left", padx=(6, 6))
-        self.target_var.trace_add("write", self._on_target_text_changed)
-        self.target_entry.bind("<FocusIn>", self._on_target_entry_focus_in)
-        self.target_entry.bind("<FocusOut>", self._on_target_suggest_focus_out)
-        self.target_entry.bind("<Down>", self._on_target_entry_arrow_down)
-        self.target_entry.bind("<Escape>", lambda e: self._hide_target_suggestions())
+        # Second follow-up session, direct user feedback that an earlier
+        # ttk.Combobox-based typeahead was "a little buggy" -- rebuilt as
+        # a SuggestField (see its own class docstring for the full
+        # reasoning/fix list). The actual selected target is resolved by
+        # exact label match (self.target_field.resolve_key()), not by
+        # what's merely typed, so a half-typed name that doesn't match
+        # anyone real is correctly treated as "nothing chosen yet," not a
+        # fabricated target.
+        self.target_field = SuggestField(action_bar2, owner=self, width=34)
+        self.target_field.entry.pack(side="left", padx=(6, 6))
         ttk.Button(action_bar2, text="Move Selected Faces Here", command=self._on_move).pack(side="left")
         ttk.Button(action_bar2, text="Merge This Whole Group Here", command=self._on_merge).pack(
             side="left", padx=(6, 0)
@@ -3496,6 +3656,10 @@ class FaceLabelingWindow(tk.Toplevel):
         prev_key = self._display_key(self._selected_index)
         self._clusters = list_clusters(self.conn)
         self._not_a_person_count = count_not_a_person(self.conn)
+        # Named people only, same reasoning as the Target-person field --
+        # keeps this window's "rank" candidate list current as new people
+        # get named/merged over time.
+        self.rank_field.set_items(list_people_for_merge_target(self.conn, exclude_cluster_id=None))
         self._rebuild_display_list(prev_key=prev_key)
 
     def _display_key_for(self, kind: str, payload) -> tuple:
@@ -3549,7 +3713,23 @@ class FaceLabelingWindow(tk.Toplevel):
         jarring for the common real workflow of working down the list and
         merging/clearing a cluster's faces entirely -- that cluster
         disappears from the list AND the view used to snap back to the top,
-        losing your place after every single one."""
+        losing your place after every single one.
+
+        Follow-up session, direct user request ("so many small groups
+        <=12 that are usually my wife or daughter... any way to get those
+        to chain?"): investigated auto-merging small unnamed clusters into
+        an established person automatically and found the real data
+        doesn't support it safely -- individual per-face similarity for
+        genuinely-matching small clusters typically tops out well below
+        any threshold this project would trust for an unsupervised merge
+        (see CLAUDE.md's own real history of contamination from
+        over-lenient thresholds). The safer answer, and the ONE exception
+        to "no DB query here" above: when self.rank_field has a person
+        picked, every other cluster gets a similarity score (one cheap
+        query + matmul, src.face_clustering.rank_clusters_by_similarity)
+        and the list is sorted by it instead of face_count, so the best
+        real candidates surface first for a human to review and approve
+        by hand (existing Merge button) -- never an automatic merge."""
         if prev_key is None:
             prev_key = self._display_key(self._selected_index)
         try:
@@ -3563,8 +3743,15 @@ class FaceLabelingWindow(tk.Toplevel):
             min_size = 0  # mid-edit/blank entry -- show everything rather than erroring
         hide_named = self.hide_named_var.get()
 
+        rank_target_cid = self.rank_field.resolve_key()
+        similarities: dict[int, float] = {}
+        if rank_target_cid is not None:
+            similarities = rank_clusters_by_similarity(self.conn, rank_target_cid)
+
         display: list[tuple[str, object]] = []
         for c in self._clusters:
+            if c.cluster_id == rank_target_cid:
+                continue  # ranking a person against themselves is meaningless
             if c.cluster_id is None:
                 # "(Unclustered)" -- per spec, always visible, these filters don't apply to it.
                 display.append(("cluster", c))
@@ -3575,6 +3762,12 @@ class FaceLabelingWindow(tk.Toplevel):
                 continue
             display.append(("cluster", c))
 
+        if rank_target_cid is not None:
+            display.sort(
+                key=lambda item: similarities.get(item[1].cluster_id, -1.0) if item[0] == "cluster" else -1.0,
+                reverse=True,
+            )
+
         if self.show_not_a_person_var.get() and self._not_a_person_count > 0:
             display.append(("not_a_person", self._not_a_person_count))
 
@@ -3583,7 +3776,9 @@ class FaceLabelingWindow(tk.Toplevel):
         for kind, payload in self._display:
             if kind == "cluster":
                 lock_prefix = "\U0001F512 " if payload.auto_match_locked else ""
-                label = f"{lock_prefix}{payload.assigned_name or '(unnamed)'} — {payload.face_count} face(s)"
+                sim = similarities.get(payload.cluster_id) if rank_target_cid is not None and payload.cluster_id is not None else None
+                sim_prefix = f"{sim * 100:.0f}%  " if sim is not None else ""
+                label = f"{sim_prefix}{lock_prefix}{payload.assigned_name or '(unnamed)'} — {payload.face_count} face(s)"
             else:
                 label = f"(Marked as not a person) — {payload} face(s)"
             self.cluster_listbox.insert("end", label)
@@ -3600,7 +3795,17 @@ class FaceLabelingWindow(tk.Toplevel):
         # exists -- see the docstring above. Harmless (a no-op look) when
         # nothing actually scrolled; the fix that matters is the case where
         # the selected cluster just vanished from the list entirely.
-        self.cluster_listbox.yview_moveto(prev_view_top)
+        # EXCEPT when the rank target just changed to a genuinely
+        # different person (or was picked/cleared): the whole order is now
+        # different, so preserving an old scroll fraction would land
+        # somewhere meaningless -- jump to the top (the best matches)
+        # instead. Not triggered by an unrelated refresh with the SAME
+        # rank target still active (a local edit, a filter tweak).
+        if rank_target_cid != self._last_rank_target_cid:
+            self.cluster_listbox.yview_moveto(0.0)
+        else:
+            self.cluster_listbox.yview_moveto(prev_view_top)
+        self._last_rank_target_cid = rank_target_cid
 
         if reload_current_page:
             self._load_selected_cluster()
@@ -3624,7 +3829,7 @@ class FaceLabelingWindow(tk.Toplevel):
             self._current_faces = []
             self.name_var.set("")
             self._all_targets = []
-            self._set_target_text_programmatic("")
+            self.target_field.set_text_programmatic("")
             self._update_lock_checkbox(None)
             self._face_page = 0
             self._render_face_page()
@@ -3641,7 +3846,7 @@ class FaceLabelingWindow(tk.Toplevel):
             self.name_var.set("")
             self._current_faces = list_not_a_person_faces(self.conn)
             self._all_targets = []
-            self._set_target_text_programmatic("")
+            self.target_field.set_text_programmatic("")
             self._update_lock_checkbox(None)
         else:
             summary = payload
@@ -4056,33 +4261,6 @@ class FaceLabelingWindow(tk.Toplevel):
         self._not_a_person_count = count_not_a_person(self.conn)
         self._rebuild_display_list(prev_key=prev_key, reload_current_page=False)
 
-    def _resolve_target_cluster_id(self) -> int | None:
-        """Resolves the Target-person field's CURRENT TEXT to a cluster_id
-        by exact label match against self._all_targets (the full,
-        unfiltered candidate list) -- never by list-widget index, which
-        stops meaning anything the moment the suggestion popup is showing
-        a filtered subset. Returns None if the text doesn't exactly match
-        a real target (nothing chosen yet, or a half-typed name)."""
-        text = self.target_var.get()
-        for cid, label in self._all_targets:
-            if label == text:
-                return cid
-        return None
-
-    def _set_target_text_programmatic(self, text: str) -> None:
-        """Sets the Target-person field's text as CODE, not as the user
-        typing -- switching clusters, a local edit refresh, or picking a
-        suggestion from the popup. self._target_suggestions_enabled is
-        what tells _on_target_text_changed (the var's trace) to ignore
-        this particular change rather than treating it as a fresh keystroke
-        and reopening/re-filtering the popup around it -- both paths set
-        the exact same StringVar, so without this flag they'd look
-        identical to the trace."""
-        self._target_suggestions_enabled = False
-        self.target_var.set(text)
-        self._target_suggestions_enabled = True
-        self._hide_target_suggestions()
-
     def _populate_target_combo(self, exclude_cluster_id) -> None:
         """(Re)computes the Target-person field's full candidate list --
         called both when switching to look at a DIFFERENT cluster
@@ -4102,122 +4280,23 @@ class FaceLabelingWindow(tk.Toplevel):
         previous selection, or it's no longer offered here (most commonly
         because it IS the newly-selected cluster itself, excluded from its
         own target list)."""
-        prev_cid = self._resolve_target_cluster_id()
+        prev_cid = self.target_field.resolve_key()
         self._all_targets = list_people_for_merge_target(self.conn, exclude_cluster_id=exclude_cluster_id)
+        self.target_field.set_items(self._all_targets)
         label_by_cid = {cid: label for cid, label in self._all_targets}
         if prev_cid is not None and prev_cid in label_by_cid:
-            self._set_target_text_programmatic(label_by_cid[prev_cid])
+            self.target_field.set_text_programmatic(label_by_cid[prev_cid])
         elif self._all_targets:
-            self._set_target_text_programmatic(self._all_targets[0][1])
+            self.target_field.set_text_programmatic(self._all_targets[0][1])
         else:
-            self._set_target_text_programmatic("")
+            self.target_field.set_text_programmatic("")
 
-    # ------------------------------------ Target-person suggestion popup
-    # Second follow-up session, direct user feedback that ttk.Combobox's
-    # own dropdown was "a little buggy" -- see the three numbered
-    # complaints in _build_ui's comment above the Entry widget, and the
-    # class-level state comment in __init__. This is a small, from-scratch
-    # autocomplete (an Entry + a borderless Toplevel holding a Listbox
-    # this class positions/fills/shows/hides itself), the same underlying
-    # idea as review_tool.py's own JS attachSuggestionDropdown -- a native
-    # dropdown widget's built-in popup mechanics can't reliably be made to
-    # auto-open-while-typing and stay browsable-after-a-wrong-pick; a
-    # fully custom one can, because this class controls every part of it.
-    def _on_target_text_changed(self, *_args) -> None:
-        if not self._target_suggestions_enabled:
-            return  # a programmatic set (see _set_target_text_programmatic), not the user typing
-        typed = self.target_var.get().strip().lower()
-        matches = self._all_targets if not typed else [
-            (cid, label) for cid, label in self._all_targets if typed in label.lower()
-        ]
-        self._target_suggest_items = matches
-        if matches:
-            self._show_target_suggestions(matches)
-        else:
-            self._hide_target_suggestions()
-
-    def _on_target_entry_focus_in(self, event=None) -> None:
-        # Complaint #1 ("hard to select the whole line to type"): select
-        # all existing text so the user can just start typing to replace
-        # it, the way a real search box behaves. Scheduled via after(1,...)
-        # since the click that produced this focus event would otherwise
-        # place the cursor AFTER our selection ran, undoing it immediately.
-        self.target_entry.after(1, lambda: self.target_entry.select_range(0, "end"))
-        # Also show the current candidate list right away, not just after
-        # the first keystroke -- lets the user browse by clicking in alone.
-        self._on_target_text_changed()
-
-    def _on_target_entry_arrow_down(self, event=None) -> str | None:
-        """Pressing Down while typing moves keyboard focus into the
-        suggestion popup itself, so it can be arrow-navigated + committed
-        with Enter -- a keyboard-only fallback alongside clicking a
-        suggestion with the mouse."""
-        if self._target_suggest_popup is not None and self._target_suggest_popup.winfo_exists() \
-                and self._target_suggest_listbox.size() > 0:
-            self._target_suggest_listbox.focus_set()
-            self._target_suggest_listbox.selection_clear(0, "end")
-            self._target_suggest_listbox.selection_set(0)
-            self._target_suggest_listbox.activate(0)
-            return "break"
-        return None
-
-    def _on_target_suggest_focus_out(self, event=None) -> None:
-        # Delayed so a click landing on the suggestion popup (which also
-        # blurs the entry) has a chance to actually register as a pick
-        # BEFORE this decides whether to close the popup -- closing
-        # immediately on focus-out would eat the click that was supposed
-        # to choose something (the classic dropdown-loses-focus-before-
-        # the-click-lands bug).
-        self.after(150, self._maybe_hide_target_suggestions)
-
-    def _maybe_hide_target_suggestions(self) -> None:
-        if self._target_suggest_popup is None or not self._target_suggest_popup.winfo_exists():
-            return
-        focused = self.focus_get()
-        if focused is self._target_suggest_listbox:
-            return  # focus moved INTO the popup (e.g. via arrow-down) -- keep it open
-        self._hide_target_suggestions()
-
-    def _show_target_suggestions(self, matches: list[tuple[int, str]]) -> None:
-        if self._target_suggest_popup is None or not self._target_suggest_popup.winfo_exists():
-            popup = tk.Toplevel(self)
-            popup.withdraw()
-            popup.overrideredirect(True)  # a borderless popup, not a real window -- reads as part of the field
-            popup.attributes("-topmost", True)
-            lb = tk.Listbox(popup, activestyle="dotbox", exportselection=False)
-            lb.pack(fill="both", expand=True)
-            lb.bind("<ButtonRelease-1>", self._on_target_suggestion_chosen)
-            lb.bind("<Return>", self._on_target_suggestion_chosen)
-            lb.bind("<Escape>", lambda e: (self._hide_target_suggestions(), self.target_entry.focus_set()))
-            lb.bind("<FocusOut>", self._on_target_suggest_focus_out)
-            self._target_suggest_popup = popup
-            self._target_suggest_listbox = lb
-        popup = self._target_suggest_popup
-        lb = self._target_suggest_listbox
-        lb.delete(0, "end")
-        for _, label in matches:
-            lb.insert("end", label)
-        visible_rows = min(10, len(matches))
-        lb.configure(height=visible_rows)
-        x = self.target_entry.winfo_rootx()
-        y = self.target_entry.winfo_rooty() + self.target_entry.winfo_height()
-        width = max(self.target_entry.winfo_width(), 260)
-        popup.geometry(f"{width}x{visible_rows * 18}+{x}+{y}")
-        popup.deiconify()
-
-    def _hide_target_suggestions(self) -> None:
-        if self._target_suggest_popup is not None and self._target_suggest_popup.winfo_exists():
-            self._target_suggest_popup.withdraw()
-
-    def _on_target_suggestion_chosen(self, event=None) -> None:
-        lb = self._target_suggest_listbox
-        sel = lb.curselection()
-        if not sel or sel[0] >= len(self._target_suggest_items):
-            return
-        _, label = self._target_suggest_items[sel[0]]
-        self._set_target_text_programmatic(label)
-        self.target_entry.focus_set()
-        self.target_entry.select_range(0, "end")
+    def _on_clear_rank_target(self) -> None:
+        # set_text_programmatic() still fires the var's own write trace
+        # (which _rebuild_display_list() is attached to in _build_ui) --
+        # it only suppresses SuggestField's OWN internal suggestion-popup
+        # trace, so no separate explicit call is needed here.
+        self.rank_field.set_text_programmatic("")
 
     def _update_lock_checkbox(self, summary) -> None:
         """Reflects the currently selected cluster's auto_match_locked
@@ -4477,11 +4556,11 @@ class FaceLabelingWindow(tk.Toplevel):
                 "them normally.",
             )
             return
-        dest_cid = self._resolve_target_cluster_id()
+        dest_cid = self.target_field.resolve_key()
         if dest_cid is None:
             messagebox.showinfo("Face Labeling", "Choose a target person first (type a name or pick from the dropdown).")
             return
-        dest_label = self.target_var.get()
+        dest_label = self.target_field.get_text()
         if not self._confirm_if_selection_spans_pages(f'move the selected faces to "{dest_label}"'):
             return
         face_ids = sorted(self._selected_face_ids)
@@ -4506,11 +4585,11 @@ class FaceLabelingWindow(tk.Toplevel):
                 '"Move Selected Faces Here" instead.',
             )
             return
-        target_cid = self._resolve_target_cluster_id()
+        target_cid = self.target_field.resolve_key()
         if target_cid is None:
             messagebox.showinfo("Face Labeling", "Choose a target person first (type a name or pick from the dropdown).")
             return
-        target_label = self.target_var.get()
+        target_label = self.target_field.get_text()
         if not messagebox.askyesno(
             "Face Labeling",
             f"Merge this whole group ({summary.face_count} face(s)) into the selected person?\n\n"
@@ -4578,10 +4657,10 @@ class FaceLabelingWindow(tk.Toplevel):
         if self._face_poll_after_id is not None:
             self.after_cancel(self._face_poll_after_id)
             self._face_poll_after_id = None
-        # Explicit, even though self.destroy() below would cascade to this
-        # child Toplevel anyway -- cheap and removes any doubt.
-        if self._target_suggest_popup is not None and self._target_suggest_popup.winfo_exists():
-            self._target_suggest_popup.destroy()
+        # Explicit, even though self.destroy() below would cascade to these
+        # child Toplevels anyway -- cheap and removes any doubt.
+        self.target_field.destroy()
+        self.rank_field.destroy()
         self.conn.close()
         self.destroy()
 

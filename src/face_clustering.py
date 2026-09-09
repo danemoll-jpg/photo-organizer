@@ -985,6 +985,47 @@ def list_people_for_merge_target(conn: sqlite3.Connection, exclude_cluster_id: i
     return out
 
 
+def rank_clusters_by_similarity(conn: sqlite3.Connection, target_cluster_id: int) -> dict[int, float]:
+    """Cosine similarity of every OTHER person's centroid to the given
+    target person's centroid. Powers FaceLabelingWindow's "Sort by likely
+    match to" tool -- a real, direct user request ("so many small groups
+    <=12 that are usually my wife or daughter... any way to get those to
+    chain?") that turned out NOT to be safely automatable: investigating
+    against the real DB found individual per-face similarity for likely-
+    genuine small-cluster matches typically topping out in the 0.45-0.55
+    range against an established person's centroid -- well below any
+    threshold this project would trust for an UNSUPERVISED merge, given
+    its own real history of contamination from over-lenient thresholds
+    (see CLAUDE.md). This is the safer answer: a human-reviewed RANKING,
+    never an automatic merge -- it only orders/labels the existing browse
+    list so a person can review their best candidates first instead of
+    hunting through thousands of clusters in size order, still approving
+    every merge by hand with the existing Merge button. Never writes
+    anything to the DB.
+
+    Returns {cluster_id: similarity}, one entry per person with a
+    representative_embedding, EXCLUDING the target itself. Cheap even at
+    thousands of people: one query + one vectorized matrix multiply, no
+    per-cluster round trip."""
+    target_row = conn.execute(
+        "SELECT representative_embedding FROM people WHERE cluster_id = ?", (target_cluster_id,)
+    ).fetchone()
+    if target_row is None or target_row[0] is None:
+        return {}
+    target_v = blob_to_vec(target_row[0]).astype(np.float32)
+    rows = conn.execute(
+        "SELECT cluster_id, representative_embedding FROM people "
+        "WHERE representative_embedding IS NOT NULL AND cluster_id != ?",
+        (target_cluster_id,),
+    ).fetchall()
+    if not rows:
+        return {}
+    ids = [r[0] for r in rows]
+    mat = np.stack([blob_to_vec(r[1]) for r in rows]).astype(np.float32)
+    sims = mat @ target_v
+    return {cid: float(sim) for cid, sim in zip(ids, sims)}
+
+
 # --------------------------------------------------------- thumbnail crop
 
 def crop_face_thumbnail(path: str | Path, bbox: tuple[int, int, int, int], size: int = 128, margin: float = 0.25) -> Image.Image:

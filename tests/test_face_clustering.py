@@ -61,6 +61,7 @@ from src.face_clustering import (
     load_full_photo_with_bbox,
     merge_people,
     move_faces_to_person,
+    rank_clusters_by_similarity,
     run_face_clustering,
     set_person_auto_match_locked,
     set_person_name,
@@ -335,6 +336,52 @@ def test_auto_match_locked_migration(tmp: Path) -> None:
     set_person_auto_match_locked(conn, 1, True)
     assert conn.execute("SELECT auto_match_locked FROM people WHERE cluster_id = 1").fetchone() == (1,)
     print("  auto_match_locked added + backfilled to 0 on migration, set_person_auto_match_locked works post-migration  OK")
+    conn.close()
+
+
+def test_rank_clusters_by_similarity(tmp: Path) -> None:
+    print("\n=== rank_clusters_by_similarity: FaceLabelingWindow's 'Sort by likely match to' backend (follow-up session) ===")
+    dbp, conn = _fresh_db(tmp, "rank_similarity.db")
+
+    e1 = np.zeros(EMBEDDING_DIM, dtype=np.float32); e1[0] = 1.0
+    orth = np.zeros(EMBEDDING_DIM, dtype=np.float32); orth[1] = 1.0
+
+    def add_person(name, centroid, face_count=1):
+        blob = vec_to_blob(centroid) if centroid is not None else None
+        cur = conn.execute(
+            "INSERT INTO people (assigned_name, face_count, representative_embedding) VALUES (?, ?, ?)",
+            (name, face_count, blob),
+        )
+        return cur.lastrowid
+
+    target_id = add_person("Target", e1)
+    close_id = add_person(None, _embedding_at_cosine(e1, orth, 0.85))
+    mid_id = add_person("Someone Else", _embedding_at_cosine(e1, orth, 0.40))
+    far_id = add_person(None, _embedding_at_cosine(e1, orth, 0.05))
+    no_embedding_id = add_person(None, None)  # simulates a person with no centroid computed yet
+    conn.commit()
+
+    sims = rank_clusters_by_similarity(conn, target_id)
+    assert target_id not in sims, "the target itself must never appear in its own ranking"
+    assert no_embedding_id not in sims, "a person with no representative_embedding must be silently excluded, not error"
+    assert set(sims.keys()) == {close_id, mid_id, far_id}
+    assert abs(sims[close_id] - 0.85) < 1e-4, f"expected ~0.85, got {sims[close_id]}"
+    assert abs(sims[mid_id] - 0.40) < 1e-4, f"expected ~0.40, got {sims[mid_id]}"
+    assert abs(sims[far_id] - 0.05) < 1e-4, f"expected ~0.05, got {sims[far_id]}"
+    ranked = sorted(sims.items(), key=lambda kv: -kv[1])
+    assert [cid for cid, _ in ranked] == [close_id, mid_id, far_id], f"expected close->mid->far order, got {ranked}"
+    print(f"  exact cosine similarities recovered (0.85/0.40/0.05), correctly ordered, target+no-embedding-person excluded  OK")
+
+    # A person with no representative_embedding at all as the TARGET
+    # itself (e.g. an empty/orphaned row somehow) must return an empty
+    # dict, not raise.
+    empty_result = rank_clusters_by_similarity(conn, no_embedding_id)
+    assert empty_result == {}, f"expected empty dict for a target with no centroid, got {empty_result}"
+    print("  a target person with no representative_embedding returns an empty ranking, doesn't raise  OK")
+
+    # A nonexistent cluster_id must also return an empty dict gracefully.
+    assert rank_clusters_by_similarity(conn, 999999) == {}
+    print("  a nonexistent target cluster_id returns an empty ranking, doesn't raise  OK")
     conn.close()
 
 
@@ -623,6 +670,7 @@ def main() -> None:
         test_face_match_existing_threshold_decoupled_from_dbscan(tmp)
         test_auto_match_locked_excluded_from_matching(tmp)
         test_auto_match_locked_migration(tmp)
+        test_rank_clusters_by_similarity(tmp)
         test_incremental_reclustering_preserves_names(tmp)
         test_manual_split_move_merge(tmp)
         test_crop_face_thumbnail_orientation(tmp)
