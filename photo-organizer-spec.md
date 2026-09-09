@@ -463,3 +463,36 @@ Context: user is spending real time paging through detections that aren't faces 
 
 **Explicitly out of scope:**
 - Any change to the drop-folder pipeline (Phase 5) — user has explicitly tabled that for now, stay focused on face-recognition quality this session.
+
+## Phase 3l — URGENT: new small clusters get flooded with matches before they can be locked; add a systemic minimum-sample-size safeguard
+
+**Context:** Creating a brand-new named cluster from just 2 photos (a pet), the user was unable to set `auto_match_locked` at creation time — only after — and before they could lock it, 1,947 remaining unclustered faces got matched against it. This is the exact same root-cause mechanism just diagnosed and confirmed for "Joeanne Sanders" (1 photo) and cluster 6367 (5 photos) in the immediately prior session: a weak, small-sample centroid is an easy magnet at the current `face_match_existing_threshold=0.55`. The user is now asking the deeper, well-motivated question: why does the system allow a 2-photo centroid to attract matches at all, rather than only relying on someone remembering to manually lock it after the fact?
+
+**Requirements:**
+
+**Part 1 — Investigate the actual trigger, for real, before fixing anything.** Reproduce the exact sequence: does naming/creating a new person via Split immediately trigger matching against the rest of the unclustered pool as a side effect, or did something else (e.g. a separate `cluster-faces` run, or a re-clustering pass with different timing than expected) cause the 1,947-face flood? Confirm the real mechanism rather than assuming.
+
+**Part 2 — Immediate UX fix: allow locking a cluster AT CREATION TIME, not only afterward.** When creating a new named person via Split (or any other creation path), the user must be able to set `auto_match_locked=True` as part of that same action — before any automatic matching against it can happen, not as a race against a background process.
+
+**Part 3 — The deeper, systemic fix the user is really asking for: a minimum-sample-size gate on automatic matching, independent of the manual lock flag.** A cluster below some minimum face count (a real, configurable threshold — investigate what a sensible default is, likely in the low single digits to ~5, but base this on real evidence the way `face_cluster_similarity_threshold` was tuned, not a guess) should be automatically excluded from being a matching target during `cluster-faces`, regardless of whether the user remembered to lock it. This is a general safeguard, not a special case — it would have prevented all three incidents found so far (Joeanne Sanders, cluster 6367, and this new pet case) without depending on human memory each time. `auto_match_locked` remains a separate, still-useful manual override (for clusters that legitimately have decent sample size but the user still wants frozen) — this is additive, not a replacement for it.
+
+**Explicitly out of scope:**
+- Any change to the drop-folder pipeline (Phase 5) — still tabled.
+- Retroactively re-evaluating already-named clusters against a new minimum-size threshold — this only needs to affect future matching decisions going forward, not force a re-audit of every existing person.
+
+## Phase 3m — Four small FaceLabelingWindow improvements, bundled with Phase 3l's session
+
+**Part 4 — Show the photo's date on the full-photo view (Phase 3j follow-up).** The double-click "view full source photo" popup should also display that photo's `date_taken` alongside the image, not just the image and bounding-box highlight.
+
+**Part 5 — Fix warning-dialog parenting.** Warning/message dialogs raised from `FaceLabelingWindow` currently pop over to / steal focus on the main Dashboard window instead of staying associated with the labeling window itself, where the user is actually working. Every dialog invoked from `FaceLabelingWindow` (`messagebox.showwarning`/`showerror`/`askyesno`/etc.) must be explicitly parented to the `FaceLabelingWindow` Toplevel instance, not left to default to the root/dashboard window.
+
+**Part 6 — Right-click context menu on face thumbnails**, with three actions, each reusing an existing function rather than new logic:
+- "Remove from Cluster" — reuses Phase 3f's existing action
+- "Mark as Not a Person" — reuses Phase 3c's existing action
+- "Assign to Target Person" — reuses the existing move-to-person logic, using whatever person is currently selected in the Target field
+- Applies to the current checkbox selection if the right-clicked face is part of it; otherwise applies to just the right-clicked face alone (standard right-click convention) — must be intuitively clear to the user which face(s) an action will affect, don't leave this ambiguous.
+
+**Part 7 — A "hide unnamed clusters" filter**, complementing (not replacing) the existing "hide already-named people" toggle from Phase 3c. Where that toggle hides named people (to focus on what's left to label), this new one does the inverse: shows only clusters that already have a real assigned name — useful for reviewing/managing people already labeled without scrolling past everything still unnamed. Both filters should be able to coexist as independent options.
+
+**Explicitly out of scope:**
+- Any change to Phase 3l's own scope — this is bundled into the same session purely for efficiency (same file), not a redesign of anything Phase 3l is doing.
