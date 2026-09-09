@@ -108,6 +108,11 @@ def _migrate(conn: sqlite3.Connection, logger: logging.Logger) -> None:
         ("representative_embedding", "BLOB"),
         ("face_count", "INTEGER NOT NULL DEFAULT 0"),
         ("updated_at", "TEXT"),
+        # Follow-up session: "lock from automatic matching" -- see
+        # schema.sql's comment on people.auto_match_locked. Defaults to 0
+        # for every pre-existing row, which is exactly right: nothing was
+        # ever locked before this column existed.
+        ("auto_match_locked", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if col not in people_cols:
             conn.execute(f"ALTER TABLE people ADD COLUMN {col} {ddl}")

@@ -187,7 +187,24 @@ CREATE TABLE IF NOT EXISTS people (
     notes                    TEXT,
     representative_embedding BLOB,                 -- running mean of every currently-assigned face's embedding, L2-renormalized (float32.tobytes())
     face_count               INTEGER NOT NULL DEFAULT 0,  -- denormalized count of faces.cluster_id = this row's cluster_id -- kept in sync by every mutating operation in src/face_clustering.py, never trust it blindly elsewhere without re-deriving if that invariant is ever in doubt
-    updated_at                TEXT                  -- ISO 8601, last time membership/centroid changed (name-only edits don't bump this)
+    updated_at                TEXT,                 -- ISO 8601, last time membership/centroid changed (name-only edits don't bump this)
+    -- Follow-up session, direct user request: real incident naming pet
+    -- clusters (cats) after seeing them attract "all kinds of crap" once
+    -- face_match_existing_threshold made matching against EXISTING people
+    -- more lenient -- a real, foreseeable risk that's much worse for a
+    -- non-human face embedding (ArcFace was never trained on cats, so
+    -- their centroid is far less discriminative and attracts more false
+    -- positives at a looser threshold than a real human's does). 1 = this
+    -- person's centroid is skipped ENTIRELY by run_face_clustering()'s
+    -- Step 1 "match against existing people" pass (src/face_clustering.py)
+    -- -- never a candidate for automatic assignment again, no matter how
+    -- similar a new face looks. Does NOT affect manual assignment in the
+    -- labeling UI (Move/Merge Selected Faces Here) -- the user's own
+    -- words were "lock those off to automatic matching and just selecting
+    -- them myself," so a locked person must stay a normal, selectable
+    -- Move/Merge target. Reversible, same philosophy as faces.not_a_person/
+    -- photos.excluded -- never a delete.
+    auto_match_locked        INTEGER NOT NULL DEFAULT 0
 );
 
 -- Phase 2f: manual-edit audit trail for review_tool.py's new edit endpoints.

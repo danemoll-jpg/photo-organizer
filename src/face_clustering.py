@@ -247,8 +247,20 @@ def _recompute_person_centroid(conn: sqlite3.Connection, cluster_id: int) -> Non
 
 
 def _load_existing_centroids(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
+    """Every named/unnamed person's centroid, used by run_face_clustering()'s
+    Step 1 to match new candidate faces against EXISTING people --
+    EXCEPT a person flagged auto_match_locked (see schema.sql's own
+    comment): real incident, a lenient face_match_existing_threshold made
+    two pet ("cat") clusters attract "all kinds of crap" once matching
+    against them got easier, since ArcFace's embeddings (trained on human
+    faces) are far less discriminative for a non-human face -- locking a
+    person out of this step entirely is the fix the user asked for
+    ("lock those off to automatic matching and just selecting them
+    myself"), leaving manual Move/Merge assignment in the labeling UI
+    completely unaffected (this function is ONLY ever used here)."""
     rows = conn.execute(
-        "SELECT cluster_id, representative_embedding FROM people WHERE representative_embedding IS NOT NULL"
+        "SELECT cluster_id, representative_embedding FROM people "
+        "WHERE representative_embedding IS NOT NULL AND auto_match_locked = 0"
     ).fetchall()
     if not rows:
         return [], np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
@@ -782,14 +794,15 @@ class ClusterSummary:
     sample_file_hash: str | None
     sample_bbox: tuple[int, int, int, int] | None
     sample_path: str | None
+    auto_match_locked: bool = False  # see people.auto_match_locked's schema.sql comment; always False for "(Unclustered)"
 
 
 def list_clusters(conn: sqlite3.Connection, include_unclustered: bool = True) -> list[ClusterSummary]:
     """Named/unnamed real people first (largest group first -- the ones
     most worth a labeler's time), an "(Unclustered)" pseudo-group last."""
     out: list[ClusterSummary] = []
-    for cluster_id, name, notes, face_count in conn.execute(
-        "SELECT cluster_id, assigned_name, notes, face_count FROM people "
+    for cluster_id, name, notes, face_count, locked in conn.execute(
+        "SELECT cluster_id, assigned_name, notes, face_count, auto_match_locked FROM people "
         "WHERE face_count > 0 ORDER BY face_count DESC"
     ).fetchall():
         sample = conn.execute(
@@ -798,7 +811,7 @@ def list_clusters(conn: sqlite3.Connection, include_unclustered: bool = True) ->
             "WHERE f.cluster_id = ? LIMIT 1",
             (cluster_id,),
         ).fetchone()
-        out.append(_cluster_summary(cluster_id, name, notes, face_count, sample))
+        out.append(_cluster_summary(cluster_id, name, notes, face_count, sample, bool(locked)))
 
     if include_unclustered:
         # not_a_person = 0: a Phase 3c-flagged face is pulled out of the
@@ -819,7 +832,7 @@ def list_clusters(conn: sqlite3.Connection, include_unclustered: bool = True) ->
     return out
 
 
-def _cluster_summary(cluster_id, name, notes, face_count, sample) -> ClusterSummary:
+def _cluster_summary(cluster_id, name, notes, face_count, sample, auto_match_locked=False) -> ClusterSummary:
     return ClusterSummary(
         cluster_id=cluster_id,
         assigned_name=name,
@@ -829,7 +842,19 @@ def _cluster_summary(cluster_id, name, notes, face_count, sample) -> ClusterSumm
         sample_file_hash=sample[1] if sample else None,
         sample_bbox=(sample[2], sample[3], sample[4], sample[5]) if sample else None,
         sample_path=sample[6] if sample else None,
+        auto_match_locked=auto_match_locked,
     )
+
+
+def set_person_auto_match_locked(conn: sqlite3.Connection, cluster_id: int, locked: bool) -> None:
+    """Toggles people.auto_match_locked -- see its schema.sql comment for
+    the full reasoning. Reversible (never a delete), same philosophy as
+    faces.not_a_person/photos.excluded. Deliberately does NOT touch
+    representative_embedding/face_count -- locking/unlocking a person from
+    future automatic matching has no effect on who's currently assigned to
+    them."""
+    conn.execute("UPDATE people SET auto_match_locked = ? WHERE cluster_id = ?", (1 if locked else 0, cluster_id))
+    conn.commit()
 
 
 @dataclass

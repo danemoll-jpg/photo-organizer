@@ -327,6 +327,7 @@ from src.face_clustering import (
     move_faces_to_person,
     remove_faces_from_cluster,
     restore_faces_from_undo,
+    set_person_auto_match_locked,
     set_person_name,
     snapshot_before_merge,
     snapshot_faces_for_undo,
@@ -3324,6 +3325,25 @@ class FaceLabelingWindow(tk.Toplevel):
         self.name_var = tk.StringVar()
         ttk.Entry(header, textvariable=self.name_var, width=30).pack(side="left", padx=(6, 6))
         ttk.Button(header, text="Save Name", command=self._on_save_name).pack(side="left")
+        # Follow-up session, direct user request: real incident naming pet
+        # ("cat") clusters and finding them attracting "all kinds of crap"
+        # once face_match_existing_threshold made matching against
+        # EXISTING people more lenient (much riskier for a non-human face
+        # embedding than a real person's). Locking a person here removes
+        # them ENTIRELY from run_face_clustering()'s automatic-matching
+        # step (src/face_clustering.py::_load_existing_centroids) --
+        # deliberately does NOT affect manual assignment (Move/Merge
+        # Selected Faces Here), per the user's own words ("just selecting
+        # them myself"). Disabled/cleared for "(Unclustered)"/the
+        # not-a-person bucket/nothing-selected -- see
+        # _update_lock_checkbox() -- locking only makes sense for a real
+        # named/unnamed PERSON.
+        self.lock_auto_match_var = tk.BooleanVar(value=False)
+        self.lock_auto_match_cb = ttk.Checkbutton(
+            header, text="Lock automatic matching", variable=self.lock_auto_match_var,
+            command=self._on_toggle_auto_match_lock,
+        )
+        self.lock_auto_match_cb.pack(side="left", padx=(10, 0))
         # URGENT follow-up session: kept in the always-visible header (not
         # tucked into action_bar1 below) so it's reachable regardless of
         # which cluster/view is currently loaded -- the whole point is
@@ -3525,7 +3545,8 @@ class FaceLabelingWindow(tk.Toplevel):
         self.cluster_listbox.delete(0, "end")
         for kind, payload in self._display:
             if kind == "cluster":
-                label = f"{payload.assigned_name or '(unnamed)'} — {payload.face_count} face(s)"
+                lock_prefix = "\U0001F512 " if payload.auto_match_locked else ""
+                label = f"{lock_prefix}{payload.assigned_name or '(unnamed)'} — {payload.face_count} face(s)"
             else:
                 label = f"(Marked as not a person) — {payload} face(s)"
             self.cluster_listbox.insert("end", label)
@@ -3568,6 +3589,7 @@ class FaceLabelingWindow(tk.Toplevel):
             self._all_targets = []
             self.target_combo["values"] = []
             self.target_var.set("")
+            self._update_lock_checkbox(None)
             self._face_page = 0
             self._render_face_page()
             return
@@ -3585,6 +3607,7 @@ class FaceLabelingWindow(tk.Toplevel):
             self._all_targets = []
             self.target_combo["values"] = []
             self.target_var.set("")
+            self._update_lock_checkbox(None)
         else:
             summary = payload
             self.name_var.set(summary.assigned_name or "" if summary.cluster_id is not None else "")
@@ -3595,6 +3618,7 @@ class FaceLabelingWindow(tk.Toplevel):
             # selected (by cluster_id identity) if it's still a valid
             # target here.
             self._populate_target_combo(exclude_cluster_id=summary.cluster_id)
+            self._update_lock_checkbox(summary)
 
         self._face_page = 0
         self._render_face_page()
@@ -4063,6 +4087,34 @@ class FaceLabelingWindow(tk.Toplevel):
         else:
             matches = [(cid, label) for cid, label in self._all_targets if typed in label.lower()]
         self.target_combo["values"] = [label for _, label in matches]
+
+    def _update_lock_checkbox(self, summary) -> None:
+        """Reflects the currently selected cluster's auto_match_locked
+        state in the header checkbox -- disabled entirely for
+        "(Unclustered)"/the not-a-person bucket/nothing selected, since
+        locking only makes sense for a real named/unnamed PERSON (a stable
+        cluster_id a future automatic run could actually route new faces
+        to)."""
+        if summary is None or summary.cluster_id is None:
+            self.lock_auto_match_var.set(False)
+            self.lock_auto_match_cb.configure(state="disabled")
+        else:
+            self.lock_auto_match_var.set(summary.auto_match_locked)
+            self.lock_auto_match_cb.configure(state="normal")
+
+    def _on_toggle_auto_match_lock(self) -> None:
+        summary = self._current_summary()
+        if summary is None or summary.cluster_id is None:
+            # Shouldn't be reachable -- the checkbox is disabled for these
+            # cases -- but guard anyway rather than writing to a
+            # nonexistent/pseudo cluster_id.
+            self.lock_auto_match_var.set(False)
+            return
+        set_person_auto_match_locked(self.conn, summary.cluster_id, self.lock_auto_match_var.get())
+        # Refreshes the left list's own label (the lock emoji prefix) --
+        # doesn't touch the right-hand page, same as every other
+        # local-edit refresh in this window.
+        self._refresh_left_list_after_local_edit()
 
     def _remove_faces_from_current_view(self, face_ids: set[int]) -> None:
         """Applied after Split/Move/Remove-from-Cluster/Mark/Un-mark --

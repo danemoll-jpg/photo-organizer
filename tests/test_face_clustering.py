@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -61,6 +62,7 @@ from src.face_clustering import (
     merge_people,
     move_faces_to_person,
     run_face_clustering,
+    set_person_auto_match_locked,
     set_person_name,
     vec_to_blob,
 )
@@ -225,6 +227,114 @@ def test_face_match_existing_threshold_decoupled_from_dbscan(tmp: Path) -> None:
     alice_count_after_run2 = conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0]
     assert alice_count_after_run2 == 4, f"Alice should have grown to 4 faces, got {alice_count_after_run2}"
     print("  matching-against-existing-people got more lenient WITHOUT loosening new-cluster (chaining) risk  OK")
+    conn.close()
+
+
+def test_auto_match_locked_excluded_from_matching(tmp: Path) -> None:
+    print("\n=== people.auto_match_locked: a locked person is skipped entirely by automatic matching (follow-up session) ===")
+    dbp, conn = _fresh_db(tmp, "auto_match_locked.db")
+
+    # "Cat": an existing person, locked from automatic matching -- the
+    # real scenario this was built for (a pet cluster attracting "all
+    # kinds of crap" once face_match_existing_threshold made matching
+    # against existing people more lenient).
+    e1 = np.zeros(EMBEDDING_DIM, dtype=np.float32); e1[0] = 1.0
+    conn.execute("INSERT INTO people (cluster_id, assigned_name, face_count, auto_match_locked) VALUES (1, 'Cat', 0, 1)")
+    conn.commit()
+    for j in range(3):
+        fh = f"cat_{j}"
+        _insert_photo(conn, fh, f"E:\\Pics\\cat_{j}.jpg")
+        _insert_face(conn, fh, e1.copy(), cluster_id=1)
+    _recompute_person_centroid(conn, 1)
+
+    # A new candidate at VERY high similarity (0.99) to Cat's centroid --
+    # would obviously match her under any normal threshold. min_samples=2
+    # so it's still eligible to form its own new cluster if left unmatched.
+    _insert_photo(conn, "candidate", "E:\\Pics\\candidate.jpg")
+    _insert_face(conn, "candidate", _embedding_at_cosine(e1, np.roll(e1, 1), 0.99))
+
+    cfg = _make_cfg(dbp, face_cluster_similarity_threshold=0.65, face_cluster_min_samples=2)
+    stats = run_face_clustering(cfg, conn, _logger)
+    print(f"  locked: {stats.summary()}")
+    assert stats.matched_existing == 0, "a LOCKED person must never receive an automatic match, no matter how similar"
+    row = conn.execute("SELECT cluster_id FROM faces WHERE file_hash = 'candidate'").fetchone()
+    assert row[0] != 1, "the candidate must NOT have been assigned to the locked cluster"
+    cat_count = conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0]
+    assert cat_count == 3, "the locked person's face_count must be completely unchanged"
+    print("  Cat (locked) received zero automatic matches despite a 0.99-similar candidate  OK")
+
+    # Un-locking must restore normal matching behavior on the NEXT run.
+    conn.execute("UPDATE faces SET cluster_id = NULL WHERE file_hash = 'candidate'")
+    conn.commit()
+    set_person_auto_match_locked(conn, 1, False)
+    stats2 = run_face_clustering(cfg, conn, _logger)
+    print(f"  unlocked: {stats2.summary()}")
+    assert stats2.matched_existing == 1, "after unlocking, the same candidate must match normally"
+    row2 = conn.execute("SELECT cluster_id FROM faces WHERE file_hash = 'candidate'").fetchone()
+    assert row2[0] == 1
+    print("  un-locking restores normal automatic matching  OK")
+
+    # Manual assignment must work identically regardless of the lock --
+    # the user's own explicit requirement ("just selecting them myself").
+    set_person_auto_match_locked(conn, 1, True)
+    _insert_photo(conn, "manual_add", "E:\\Pics\\manual_add.jpg")
+    manual_fid = _insert_face(conn, "manual_add", e1.copy(), cluster_id=None)
+    move_faces_to_person(conn, [manual_fid], 1)
+    assert manual_fid in {f.face_id for f in list_faces_in_cluster(conn, 1)}
+    print("  manual Move/Merge assignment into a LOCKED person still works normally  OK")
+
+    clusters = list_clusters(conn, include_unclustered=False)
+    cat_summary = next(c for c in clusters if c.cluster_id == 1)
+    assert cat_summary.auto_match_locked is True, "ClusterSummary must surface the locked flag for the UI"
+    conn.close()
+
+
+def test_auto_match_locked_migration(tmp: Path) -> None:
+    print("\n=== Migration: a pre-existing people table gets auto_match_locked added, backfilled to 0 ===")
+    dbp = tmp / "premigration_lock.db"
+    conn = sqlite3.connect(dbp)
+    # Hand-built shape mirroring people/faces/photos immediately BEFORE this
+    # session (i.e. WITH not_a_person/det_score but WITHOUT
+    # auto_match_locked) -- never a fresh schema.sql-created fixture, same
+    # discipline as test_phase3c.py's own migration test.
+    conn.executescript(
+        """
+        CREATE TABLE photos (
+            file_hash TEXT PRIMARY KEY, current_path TEXT, original_path TEXT, filename TEXT,
+            file_size INTEGER, file_mtime REAL, date_taken TEXT, date_taken_year INTEGER,
+            date_taken_month INTEGER, date_source TEXT, status TEXT, processed_at TEXT,
+            phase1_verified INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE people (
+            cluster_id INTEGER PRIMARY KEY, assigned_name TEXT, notes TEXT,
+            representative_embedding BLOB, face_count INTEGER NOT NULL DEFAULT 0, updated_at TEXT
+        );
+        CREATE TABLE faces (
+            face_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL REFERENCES photos(file_hash) ON DELETE CASCADE,
+            bbox_x INTEGER NOT NULL, bbox_y INTEGER NOT NULL, bbox_w INTEGER NOT NULL, bbox_h INTEGER NOT NULL,
+            embedding BLOB NOT NULL, det_score REAL, not_a_person INTEGER NOT NULL DEFAULT 0,
+            cluster_id INTEGER REFERENCES people(cluster_id) ON DELETE SET NULL,
+            detected_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute("INSERT INTO people (cluster_id, assigned_name, face_count) VALUES (1, 'Cat', 3)")
+    conn.commit()
+    cols_before = {row[1] for row in conn.execute("PRAGMA table_info(people)")}
+    assert "auto_match_locked" not in cols_before
+    conn.close()
+
+    init_db(dbp, logger=_logger)
+    conn = connect(dbp)
+    cols_after = {row[1] for row in conn.execute("PRAGMA table_info(people)")}
+    assert "auto_match_locked" in cols_after, "init_db()/_migrate() must add auto_match_locked to an existing people table"
+    row = conn.execute("SELECT auto_match_locked FROM people WHERE cluster_id = 1").fetchone()
+    assert row == (0,), f"pre-existing person row must backfill to auto_match_locked=0 (never locked before), got {row}"
+    # And the newly-migrated column must actually work post-migration.
+    set_person_auto_match_locked(conn, 1, True)
+    assert conn.execute("SELECT auto_match_locked FROM people WHERE cluster_id = 1").fetchone() == (1,)
+    print("  auto_match_locked added + backfilled to 0 on migration, set_person_auto_match_locked works post-migration  OK")
     conn.close()
 
 
@@ -511,6 +621,8 @@ def main() -> None:
     try:
         test_synthetic_clean_clustering(tmp)
         test_face_match_existing_threshold_decoupled_from_dbscan(tmp)
+        test_auto_match_locked_excluded_from_matching(tmp)
+        test_auto_match_locked_migration(tmp)
         test_incremental_reclustering_preserves_names(tmp)
         test_manual_split_move_merge(tmp)
         test_crop_face_thumbnail_orientation(tmp)
