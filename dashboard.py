@@ -326,6 +326,7 @@ from src.face_clustering import (
     merge_people,
     move_faces_to_person,
     rank_clusters_by_similarity,
+    rank_faces_by_similarity,
     remove_faces_from_cluster,
     restore_faces_from_undo,
     set_person_auto_match_locked,
@@ -3350,6 +3351,18 @@ class FaceLabelingWindow(tk.Toplevel):
         self._current_view: str | None = None  # "cluster" | "not_a_person" | None (nothing selected)
         self._selected_index: int | None = None
         self._current_faces: list = []  # list[FaceRecord] -- the WHOLE cluster, not just the visible page
+        # Follow-up session, direct user request ("could I use a face
+        # likeness sorting against the large cluster?"): _current_faces_base
+        # is the canonical fetch straight from list_faces_in_cluster/
+        # list_not_a_person_faces (chronological order) -- _current_faces is
+        # derived from it by _apply_face_sort(), either an identity copy (no
+        # sort target chosen) or reordered by descending likeness to
+        # self.face_sort_field's target. Kept separate so changing/clearing
+        # the sort target is instant (just a re-sort of already-fetched
+        # data) rather than a fresh DB round trip, and so a mutating action
+        # (_remove_faces_from_current_view) has one obvious place to keep
+        # both lists in sync.
+        self._current_faces_base: list = []
         self._face_page: int = 0  # URGENT fix: which FACES_PER_PAGE-sized slice of _current_faces is rendered
         self._undo_stack: list[dict] = []  # see MAX_UNDO comment above and _on_undo()
         self._selected_face_ids: set[int] = set()
@@ -3553,6 +3566,27 @@ class FaceLabelingWindow(tk.Toplevel):
         self.undo_label = ttk.Label(header, text="Nothing to undo yet.", foreground="#666666")
         self.undo_label.pack(side="right", padx=(0, 10))
 
+        # Follow-up session, direct user request ("could I use a face
+        # likeness sorting against the large cluster?"): the left panel's
+        # "Sort by likely match to" only reorders which CLUSTER shows up
+        # first -- it never touches the order of individual face thumbnails
+        # once you've clicked into one. This is the same idea one level
+        # down: pick a named person and the faces in whatever group is
+        # CURRENTLY OPEN (most usefully "(Unclustered)", now tens of
+        # thousands of faces after Phase 3k's resets) re-sort by descending
+        # likeness to them instead of chronological order, so real matches
+        # surface on page 1 instead of being buried dozens of pages deep.
+        # Same reused SuggestField component, same "human reviews and
+        # approves by hand, nothing auto-merges" posture as the left
+        # panel's tool -- see src/face_clustering.py::rank_faces_by_similarity.
+        face_sort_frame = ttk.Frame(right)
+        face_sort_frame.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(face_sort_frame, text="Sort faces by likeness to:").pack(side="left")
+        self.face_sort_field = SuggestField(face_sort_frame, owner=self, width=22)
+        self.face_sort_field.entry.pack(side="left", padx=(6, 0))
+        self.face_sort_field.var.trace_add("write", lambda *_: self._on_face_sort_changed())
+        ttk.Button(face_sort_frame, text="Clear", command=self._on_clear_face_sort).pack(side="left", padx=(4, 0))
+
         thumb_outer = ttk.Frame(right)
         thumb_outer.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.thumb_canvas = tk.Canvas(thumb_outer, highlightthickness=0)
@@ -3660,6 +3694,7 @@ class FaceLabelingWindow(tk.Toplevel):
         # keeps this window's "rank" candidate list current as new people
         # get named/merged over time.
         self.rank_field.set_items(list_people_for_merge_target(self.conn, exclude_cluster_id=None))
+        self.face_sort_field.set_items(list_people_for_merge_target(self.conn, exclude_cluster_id=None))
         self._rebuild_display_list(prev_key=prev_key)
 
     def _display_key_for(self, kind: str, payload) -> tuple:
@@ -3750,7 +3785,16 @@ class FaceLabelingWindow(tk.Toplevel):
 
         display: list[tuple[str, object]] = []
         for c in self._clusters:
-            if c.cluster_id == rank_target_cid:
+            # Real pre-existing bug, found while building the "Sort faces by
+            # likeness to" follow-up: `rank_target_cid` is None when no rank
+            # target is chosen (the default, most-common state every time
+            # this window opens), and "(Unclustered)"'s own cluster_id is
+            # ALSO None -- a bare `c.cluster_id == rank_target_cid` matched
+            # Unclustered by accident and skipped it before ever reaching
+            # the "always visible" check just below, hiding it from the
+            # left list entirely whenever no rank target was active. Must
+            # gate on rank_target_cid actually being set before comparing.
+            if rank_target_cid is not None and c.cluster_id == rank_target_cid:
                 continue  # ranking a person against themselves is meaningless
             if c.cluster_id is None:
                 # "(Unclustered)" -- per spec, always visible, these filters don't apply to it.
@@ -3817,21 +3861,31 @@ class FaceLabelingWindow(tk.Toplevel):
 
     def _load_selected_cluster(self) -> None:
         """Fetches the WHOLE cluster's face list (a plain DB query -- cheap
-        even at 61k+ rows, no image I/O here) and resets to page 0.
-        Rendering itself is _render_face_page()'s job -- see the
-        FACES_PER_PAGE comment on the class docstring for why this is split
-        out rather than looping over every face here like it used to."""
+        even at 61k+ rows, no image I/O here) into self._current_faces_base
+        and resets to page 0. Rendering itself is _render_face_page()'s job
+        -- see the FACES_PER_PAGE comment on the class docstring for why
+        this is split out rather than looping over every face here like it
+        used to.
+
+        Follow-up session, direct user request: whatever "Sort faces by
+        likeness to" target is currently chosen in self.face_sort_field
+        deliberately PERSISTS across switching to a different cluster/
+        bucket here (same precedent as the Target-person field already
+        keeping its own selection across cluster switches) -- _apply_face_
+        sort() re-derives self._current_faces from the freshly-fetched base
+        list using whatever that target still is, with no extra code needed
+        to "remember" it."""
         self._selected_face_ids.clear()
 
         idx = self._selected_index
         if idx is None or idx >= len(self._display):
             self._current_view = None
-            self._current_faces = []
+            self._current_faces_base = []
             self.name_var.set("")
             self._all_targets = []
             self.target_field.set_text_programmatic("")
             self._update_lock_checkbox(None)
-            self._face_page = 0
+            self._apply_face_sort()
             self._render_face_page()
             return
 
@@ -3844,14 +3898,14 @@ class FaceLabelingWindow(tk.Toplevel):
             # are the actual enforcement of "un-mark first, then split/move
             # normally" rather than a disabled widget here.
             self.name_var.set("")
-            self._current_faces = list_not_a_person_faces(self.conn)
+            self._current_faces_base = list_not_a_person_faces(self.conn)
             self._all_targets = []
             self.target_field.set_text_programmatic("")
             self._update_lock_checkbox(None)
         else:
             summary = payload
             self.name_var.set(summary.assigned_name or "" if summary.cluster_id is not None else "")
-            self._current_faces = list_faces_in_cluster(self.conn, summary.cluster_id)
+            self._current_faces_base = list_faces_in_cluster(self.conn, summary.cluster_id)
             # Direct user request: keep the Target dropdown on the same
             # name when switching BETWEEN clusters, not just within one --
             # _populate_target_combo() preserves whatever's currently
@@ -3860,8 +3914,44 @@ class FaceLabelingWindow(tk.Toplevel):
             self._populate_target_combo(exclude_cluster_id=summary.cluster_id)
             self._update_lock_checkbox(summary)
 
-        self._face_page = 0
+        self._apply_face_sort()
         self._render_face_page()
+
+    def _apply_face_sort(self) -> None:
+        """Derives self._current_faces (the list _render_face_page() actually
+        paginates) from self._current_faces_base (the canonical DB fetch,
+        chronological -- see list_faces_in_cluster/list_not_a_person_faces)
+        plus whatever "Sort faces by likeness to" target self.face_sort_field
+        currently resolves to, if any. Never re-queries the base list --
+        only reorders what's already been fetched, so picking/clearing a
+        sort target is instant with no new DB round trip for the face list
+        itself (rank_faces_by_similarity is the one extra query, only run
+        when a real target is chosen). Always resets to page 0: a
+        completely different order deserves a fresh view, same reasoning
+        as the left list's own rank-target-changed behavior."""
+        target_cid = self.face_sort_field.resolve_key()
+        if target_cid is None:
+            self._current_faces = list(self._current_faces_base)
+        else:
+            face_ids = [f.face_id for f in self._current_faces_base]
+            sims = rank_faces_by_similarity(self.conn, face_ids, target_cid)
+            self._current_faces = sorted(
+                self._current_faces_base, key=lambda f: sims.get(f.face_id, -1.0), reverse=True
+            )
+        self._face_page = 0
+
+    def _on_face_sort_changed(self) -> None:
+        """Trace callback for face_sort_field -- re-derives display order
+        from the already-fetched base list (no DB refetch of the face list
+        itself) and re-renders from page 0."""
+        self._apply_face_sort()
+        self._render_face_page()
+
+    def _on_clear_face_sort(self) -> None:
+        # set_text_programmatic() still fires the var's own write trace
+        # (same as _on_clear_rank_target above) -- no separate explicit
+        # call needed here.
+        self.face_sort_field.set_text_programmatic("")
 
     def _render_face_page(self) -> None:
         """Renders only the current FACES_PER_PAGE-sized slice of
@@ -3932,9 +4022,10 @@ class FaceLabelingWindow(tk.Toplevel):
         end = min(start + self.FACES_PER_PAGE, total)
         page_faces = self._current_faces[start:end]
 
+        sort_suffix = " — sorted by likeness" if total > 0 and self.face_sort_field.resolve_key() is not None else ""
         self._face_page_label_base = (
             "No faces." if total == 0
-            else f"Showing {start + 1}-{end} of {total} face(s) — page {self._face_page + 1}/{page_count}"
+            else f"Showing {start + 1}-{end} of {total} face(s) — page {self._face_page + 1}/{page_count}{sort_suffix}"
         )
         self._face_loading_total = len(page_faces)
         self._face_loading_done = 0
@@ -4352,6 +4443,11 @@ class FaceLabelingWindow(tk.Toplevel):
         if not face_ids:
             return
         self._current_faces = [f for f in self._current_faces if f.face_id not in face_ids]
+        # Keep the canonical base list in sync too -- otherwise a later
+        # sort-target change/clear (_apply_face_sort) would re-derive
+        # self._current_faces from a stale base list that still includes
+        # faces that have since left this view.
+        self._current_faces_base = [f for f in self._current_faces_base if f.face_id not in face_ids]
         self._selected_face_ids -= face_ids
         self._remove_faces_from_rendered_page(face_ids)
         if self._current_view == "cluster":

@@ -1026,6 +1026,59 @@ def rank_clusters_by_similarity(conn: sqlite3.Connection, target_cluster_id: int
     return {cid: float(sim) for cid, sim in zip(ids, sims)}
 
 
+def rank_faces_by_similarity(
+    conn: sqlite3.Connection, face_ids: list[int], target_cluster_id: int
+) -> dict[int, float]:
+    """The per-FACE counterpart to rank_clusters_by_similarity above (which
+    ranks whole people/clusters against each other, never individual faces
+    within one). Direct follow-up to the Phase 3k session that reset two
+    false-positive-magnet clusters ("Joeanne Sanders", and the residual
+    1,375-face unnamed cluster) back to "(Unclustered)" -- with tens of
+    thousands of faces now sitting there in plain chronological order
+    (list_faces_in_cluster's own ordering), a real person's likely matches
+    could be buried dozens of pages deep. This only reorders an
+    already-fetched face list for DISPLAY in FaceLabelingWindow's "Sort
+    faces by likeness to" control -- it never writes anything, never
+    touches cluster_id, same "a human reviews and approves by hand, never
+    an automatic merge" posture as rank_clusters_by_similarity.
+
+    Both a face's own embedding (insightface's normed_embedding, already
+    L2-normalized at detection time -- see face_detection.py and
+    _dbscan_cosine's own comment) and a person's representative_embedding
+    (also L2-renormalized, per schema.sql) are unit vectors already, so a
+    plain dot product IS cosine similarity here -- no extra normalization
+    needed.
+
+    Returns {face_id: similarity} for whichever of the given face_ids
+    still exist and have an embedding (a since-vanished face_id is simply
+    absent from the result, not an error). Chunked the same way
+    _source_clusters_of is (see _SQL_VARIABLE_CHUNK) since a caller's
+    face_ids list can be tens of thousands long -- e.g. the whole
+    "(Unclustered)" bucket."""
+    if not face_ids:
+        return {}
+    target_row = conn.execute(
+        "SELECT representative_embedding FROM people WHERE cluster_id = ?", (target_cluster_id,)
+    ).fetchone()
+    if target_row is None or target_row[0] is None:
+        return {}
+    target_v = blob_to_vec(target_row[0]).astype(np.float32)
+
+    out: dict[int, float] = {}
+    for i in range(0, len(face_ids), _SQL_VARIABLE_CHUNK):
+        chunk = face_ids[i : i + _SQL_VARIABLE_CHUNK]
+        rows = conn.execute(
+            f"SELECT face_id, embedding FROM faces WHERE face_id IN ({_in_clause(len(chunk))})", chunk
+        ).fetchall()
+        if not rows:
+            continue
+        ids = [r[0] for r in rows]
+        mat = np.stack([blob_to_vec(r[1]) for r in rows]).astype(np.float32)
+        sims = mat @ target_v
+        out.update({fid: float(sim) for fid, sim in zip(ids, sims)})
+    return out
+
+
 # --------------------------------------------------------- thumbnail crop
 
 def crop_face_thumbnail(path: str | Path, bbox: tuple[int, int, int, int], size: int = 128, margin: float = 0.25) -> Image.Image:

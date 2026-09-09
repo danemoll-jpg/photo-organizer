@@ -62,6 +62,7 @@ from src.face_clustering import (
     merge_people,
     move_faces_to_person,
     rank_clusters_by_similarity,
+    rank_faces_by_similarity,
     run_face_clustering,
     set_person_auto_match_locked,
     set_person_name,
@@ -382,6 +383,85 @@ def test_rank_clusters_by_similarity(tmp: Path) -> None:
     # A nonexistent cluster_id must also return an empty dict gracefully.
     assert rank_clusters_by_similarity(conn, 999999) == {}
     print("  a nonexistent target cluster_id returns an empty ranking, doesn't raise  OK")
+
+
+def test_rank_faces_by_similarity(tmp: Path) -> None:
+    print("\n=== rank_faces_by_similarity: FaceLabelingWindow's 'Sort faces by likeness to' backend (Phase 3k follow-up) ===")
+    dbp, conn = _fresh_db(tmp, "rank_faces_similarity.db")
+
+    e1 = np.zeros(EMBEDDING_DIM, dtype=np.float32); e1[0] = 1.0
+    orth = np.zeros(EMBEDDING_DIM, dtype=np.float32); orth[1] = 1.0
+
+    target_id = conn.execute(
+        "INSERT INTO people (assigned_name, face_count, representative_embedding) VALUES ('Target', 1, ?)",
+        (vec_to_blob(e1),),
+    ).lastrowid
+    no_embedding_id = conn.execute(
+        "INSERT INTO people (assigned_name, face_count, representative_embedding) VALUES ('NoCentroid', 0, NULL)"
+    ).lastrowid
+    conn.commit()
+
+    # Individual, UNCLUSTERED faces (the real "(Unclustered)" bucket
+    # scenario) at exact known similarities to the target's centroid --
+    # exact construction, not tuned noise, so the test can assert precise
+    # values rather than "roughly higher/lower."
+    face_ids = {}
+    for label, cos_sim in [("close", 0.85), ("mid", 0.40), ("far", 0.05)]:
+        fh = f"face_{label}"
+        _insert_photo(conn, fh, f"E:\\Pics\\{fh}.jpg")
+        face_ids[label] = _insert_face(conn, fh, _embedding_at_cosine(e1, orth, cos_sim))
+
+    sims = rank_faces_by_similarity(conn, list(face_ids.values()), target_id)
+    assert set(sims.keys()) == set(face_ids.values())
+    assert abs(sims[face_ids["close"]] - 0.85) < 1e-4, f"expected ~0.85, got {sims[face_ids['close']]}"
+    assert abs(sims[face_ids["mid"]] - 0.40) < 1e-4, f"expected ~0.40, got {sims[face_ids['mid']]}"
+    assert abs(sims[face_ids["far"]] - 0.05) < 1e-4, f"expected ~0.05, got {sims[face_ids['far']]}"
+    ranked = sorted(sims.items(), key=lambda kv: -kv[1])
+    assert [fid for fid, _ in ranked] == [face_ids["close"], face_ids["mid"], face_ids["far"]], \
+        f"expected close->mid->far order, got {ranked}"
+    print("  exact per-face cosine similarities recovered (0.85/0.40/0.05), correctly ordered  OK")
+
+    # Only asking about a SUBSET of face_ids must only return that subset --
+    # this is exactly how FaceLabelingWindow calls it (the currently-viewed
+    # group's face_ids only, never every face in the DB).
+    subset = rank_faces_by_similarity(conn, [face_ids["close"], face_ids["far"]], target_id)
+    assert set(subset.keys()) == {face_ids["close"], face_ids["far"]}
+    print("  only the requested face_ids are scored, not every face in the DB  OK")
+
+    # A face_id that doesn't exist must be silently absent, not an error.
+    partial = rank_faces_by_similarity(conn, [face_ids["mid"], 999999], target_id)
+    assert set(partial.keys()) == {face_ids["mid"]}
+    print("  a nonexistent face_id is silently absent from the result, doesn't raise  OK")
+
+    # A target person with no representative_embedding returns {}, not an error.
+    assert rank_faces_by_similarity(conn, list(face_ids.values()), no_embedding_id) == {}
+    print("  a target with no representative_embedding returns an empty ranking, doesn't raise  OK")
+
+    # A nonexistent target cluster_id must also return {} gracefully.
+    assert rank_faces_by_similarity(conn, list(face_ids.values()), 999999) == {}
+    print("  a nonexistent target cluster_id returns an empty ranking, doesn't raise  OK")
+
+    # Empty face_ids list -- no query at all, just {}.
+    assert rank_faces_by_similarity(conn, [], target_id) == {}
+    print("  an empty face_ids list returns an empty ranking, doesn't raise  OK")
+
+    # Chunking correctness (same SQL-bound-parameter concern _source_clusters_of
+    # already hit for real at 61,676 faces -- see CLAUDE.md's URGENT session):
+    # a face_ids list well beyond one query's worth of bound parameters must
+    # still return every one of them, correctly scored.
+    rng = np.random.default_rng(3)
+    many_ids = []
+    for i in range(1200):
+        fh = f"bulk_{i}"
+        _insert_photo(conn, fh, f"E:\\Pics\\{fh}.jpg")
+        emb = e1 + rng.normal(scale=0.3, size=EMBEDDING_DIM).astype(np.float32)
+        emb = (emb / np.linalg.norm(emb)).astype(np.float32)
+        many_ids.append(_insert_face(conn, fh, emb))
+    many_sims = rank_faces_by_similarity(conn, many_ids, target_id)
+    assert set(many_sims.keys()) == set(many_ids), \
+        f"expected all 1200 face_ids scored across chunked queries, got {len(many_sims)}"
+    print(f"  {len(many_ids)} face_ids (beyond one query's bound-parameter chunk) all correctly scored  OK")
+    conn.close()
     conn.close()
 
 
@@ -671,6 +751,7 @@ def main() -> None:
         test_auto_match_locked_excluded_from_matching(tmp)
         test_auto_match_locked_migration(tmp)
         test_rank_clusters_by_similarity(tmp)
+        test_rank_faces_by_similarity(tmp)
         test_incremental_reclustering_preserves_names(tmp)
         test_manual_split_move_merge(tmp)
         test_crop_face_thumbnail_orientation(tmp)
