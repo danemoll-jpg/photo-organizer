@@ -3190,13 +3190,31 @@ class FaceLabelingWindow(tk.Toplevel):
         # same name when switching [between] clusters" + typeahead): the
         # Target-person field's full (unfiltered) candidate list, as
         # (cluster_id, label) pairs -- see _populate_target_combo(). The
-        # combobox's own "values" is the currently FILTERED subset shown in
-        # the dropdown as the user types (_filter_target_combo), so the
         # selected target is resolved by exact label match against THIS
-        # list (_resolve_target_cluster_id), never by combobox index --
-        # filtering makes index alignment meaningless the instant anything's
-        # been typed.
+        # list (_resolve_target_cluster_id), never by list-widget index.
         self._all_targets: list[tuple[int, str]] = []
+        # Second follow-up, direct user feedback that ttk.Combobox's own
+        # dropdown was "a little buggy": hard to select-all the existing
+        # text to retype, the filtered list never showed without manually
+        # pulling the arrow down, and picking the wrong entry left you
+        # stuck showing only that one choice. Replaced with a plain Entry
+        # (self.target_entry, built in _build_ui) plus a custom floating
+        # suggestion popup this class manages directly -- see
+        # _show_target_suggestions/_hide_target_suggestions/
+        # _on_target_text_changed for the real, from-scratch autocomplete
+        # this project's own review_tool.py already uses in JS
+        # (attachSuggestionDropdown) for the identical reason: a native
+        # dropdown widget's built-in popup behavior can't be made to do
+        # this reliably, a fully custom one can.
+        # _target_suggestions_enabled is the mechanism that keeps
+        # PROGRAMMATIC text changes (switching clusters, a local edit,
+        # picking a suggestion) from re-triggering/reopening the popup the
+        # same way live typing does -- both paths set the same StringVar,
+        # so without this flag they'd be indistinguishable to the trace.
+        self._target_suggest_items: list[tuple[int, str]] = []  # matches currently shown, parallel to the popup listbox's rows
+        self._target_suggest_popup: tk.Toplevel | None = None
+        self._target_suggest_listbox: tk.Listbox | None = None
+        self._target_suggestions_enabled: bool = True
         # Must keep a live Python reference to every ImageTk.PhotoImage --
         # Tk itself only holds a C-level handle and the image silently goes
         # blank the moment Python garbage-collects its last reference.
@@ -3432,17 +3450,36 @@ class FaceLabelingWindow(tk.Toplevel):
         action_bar2.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Label(action_bar2, text="Target person:").pack(side="left")
         self.target_var = tk.StringVar()
-        # Follow-up session, direct user request ("give the ability to
-        # start typing so I don't have to scroll as much"): editable, not
-        # state="readonly" -- typing live-filters the dropdown's own values
-        # (see _filter_target_combo) rather than requiring a scroll through
-        # every person. The actual selected target is resolved by exact
-        # label match (_resolve_target_cluster_id), not by what's merely
-        # typed, so a half-typed name that doesn't match anyone real is
-        # correctly treated as "nothing chosen yet," not a fabricated target.
-        self.target_combo = ttk.Combobox(action_bar2, textvariable=self.target_var, width=32)
-        self.target_combo.pack(side="left", padx=(6, 6))
-        self.target_var.trace_add("write", self._filter_target_combo)
+        # Second follow-up session, direct user feedback that the earlier
+        # ttk.Combobox-based typeahead was "a little buggy" in three
+        # specific, real ways -- fixed by replacing it with a plain Entry
+        # plus a hand-built floating suggestion popup this class fully
+        # controls (see the state comment in __init__ and
+        # _show_target_suggestions/_on_target_text_changed below):
+        #   1. "Hard to select the whole line to type" -> <FocusIn> below
+        #      selects all existing text, so clicking in and just typing
+        #      immediately replaces it (real Entry widgets don't do this
+        #      by default; a deliberate binding is needed).
+        #   2. "Don't see the filter until you pull down the dropdown" ->
+        #      the popup opens/updates automatically on every keystroke,
+        #      no manual pulldown needed, and also on focus-in so browsing
+        #      is possible before typing anything.
+        #   3. "Pick the wrong name, stuck with just that one" -> the
+        #      popup always filters from self._all_targets (the FULL
+        #      candidate list), never from whatever was previously shown,
+        #      so clicking back in (which selects-all per #1) and typing
+        #      again always re-opens the full set of real options.
+        # The actual selected target is still resolved by exact label
+        # match (_resolve_target_cluster_id), not by what's merely typed,
+        # so a half-typed name that doesn't match anyone real is correctly
+        # treated as "nothing chosen yet," not a fabricated target.
+        self.target_entry = ttk.Entry(action_bar2, textvariable=self.target_var, width=34)
+        self.target_entry.pack(side="left", padx=(6, 6))
+        self.target_var.trace_add("write", self._on_target_text_changed)
+        self.target_entry.bind("<FocusIn>", self._on_target_entry_focus_in)
+        self.target_entry.bind("<FocusOut>", self._on_target_suggest_focus_out)
+        self.target_entry.bind("<Down>", self._on_target_entry_arrow_down)
+        self.target_entry.bind("<Escape>", lambda e: self._hide_target_suggestions())
         ttk.Button(action_bar2, text="Move Selected Faces Here", command=self._on_move).pack(side="left")
         ttk.Button(action_bar2, text="Merge This Whole Group Here", command=self._on_merge).pack(
             side="left", padx=(6, 0)
@@ -3587,8 +3624,7 @@ class FaceLabelingWindow(tk.Toplevel):
             self._current_faces = []
             self.name_var.set("")
             self._all_targets = []
-            self.target_combo["values"] = []
-            self.target_var.set("")
+            self._set_target_text_programmatic("")
             self._update_lock_checkbox(None)
             self._face_page = 0
             self._render_face_page()
@@ -3605,8 +3641,7 @@ class FaceLabelingWindow(tk.Toplevel):
             self.name_var.set("")
             self._current_faces = list_not_a_person_faces(self.conn)
             self._all_targets = []
-            self.target_combo["values"] = []
-            self.target_var.set("")
+            self._set_target_text_programmatic("")
             self._update_lock_checkbox(None)
         else:
             summary = payload
@@ -4024,20 +4059,32 @@ class FaceLabelingWindow(tk.Toplevel):
     def _resolve_target_cluster_id(self) -> int | None:
         """Resolves the Target-person field's CURRENT TEXT to a cluster_id
         by exact label match against self._all_targets (the full,
-        unfiltered candidate list) -- never by combobox index. Index-based
-        lookup broke the instant typeahead filtering existed (see
-        _filter_target_combo): the visible dropdown's own indices stop
-        lining up with the full candidate list the moment anything's been
-        typed. Returns None if the text doesn't exactly match a real
-        target (nothing chosen yet, or a half-typed name)."""
+        unfiltered candidate list) -- never by list-widget index, which
+        stops meaning anything the moment the suggestion popup is showing
+        a filtered subset. Returns None if the text doesn't exactly match
+        a real target (nothing chosen yet, or a half-typed name)."""
         text = self.target_var.get()
         for cid, label in self._all_targets:
             if label == text:
                 return cid
         return None
 
+    def _set_target_text_programmatic(self, text: str) -> None:
+        """Sets the Target-person field's text as CODE, not as the user
+        typing -- switching clusters, a local edit refresh, or picking a
+        suggestion from the popup. self._target_suggestions_enabled is
+        what tells _on_target_text_changed (the var's trace) to ignore
+        this particular change rather than treating it as a fresh keystroke
+        and reopening/re-filtering the popup around it -- both paths set
+        the exact same StringVar, so without this flag they'd look
+        identical to the trace."""
+        self._target_suggestions_enabled = False
+        self.target_var.set(text)
+        self._target_suggestions_enabled = True
+        self._hide_target_suggestions()
+
     def _populate_target_combo(self, exclude_cluster_id) -> None:
-        """(Re)computes the Target-person dropdown's full candidate list --
+        """(Re)computes the Target-person field's full candidate list --
         called both when switching to look at a DIFFERENT cluster
         (_load_selected_cluster) and after a local edit changes someone's
         face count (_remove_faces_from_current_view). Either way, whichever
@@ -4059,34 +4106,118 @@ class FaceLabelingWindow(tk.Toplevel):
         self._all_targets = list_people_for_merge_target(self.conn, exclude_cluster_id=exclude_cluster_id)
         label_by_cid = {cid: label for cid, label in self._all_targets}
         if prev_cid is not None and prev_cid in label_by_cid:
-            self.target_var.set(label_by_cid[prev_cid])
+            self._set_target_text_programmatic(label_by_cid[prev_cid])
         elif self._all_targets:
-            self.target_var.set(self._all_targets[0][1])
+            self._set_target_text_programmatic(self._all_targets[0][1])
         else:
-            self.target_var.set("")
-        # Setting target_var above fires _filter_target_combo via its own
-        # trace (typing and a programmatic set look identical to a
-        # StringVar), which would otherwise leave the dropdown showing only
-        # the ONE entry that happens to self-match the text just set --
-        # reset to the FULL list explicitly afterward, so opening the
-        # dropdown right after a cluster switch/local edit shows every real
-        # option, not just whichever one is currently selected.
-        self.target_combo["values"] = [label for _, label in self._all_targets]
+            self._set_target_text_programmatic("")
 
-    def _filter_target_combo(self, *_args) -> None:
-        """Direct user request: live-filters the Target-person dropdown's
-        own values to whatever's currently typed, so a real match is a few
-        keystrokes away instead of a scroll through everyone -- fired on
-        every keystroke via self.target_var's trace. Only ever touches the
-        dropdown's "values" (what the popup offers), never the entry's own
-        text (self.target_var, already whatever was just typed) -- so
-        typing is never fought or overwritten mid-keystroke."""
+    # ------------------------------------ Target-person suggestion popup
+    # Second follow-up session, direct user feedback that ttk.Combobox's
+    # own dropdown was "a little buggy" -- see the three numbered
+    # complaints in _build_ui's comment above the Entry widget, and the
+    # class-level state comment in __init__. This is a small, from-scratch
+    # autocomplete (an Entry + a borderless Toplevel holding a Listbox
+    # this class positions/fills/shows/hides itself), the same underlying
+    # idea as review_tool.py's own JS attachSuggestionDropdown -- a native
+    # dropdown widget's built-in popup mechanics can't reliably be made to
+    # auto-open-while-typing and stay browsable-after-a-wrong-pick; a
+    # fully custom one can, because this class controls every part of it.
+    def _on_target_text_changed(self, *_args) -> None:
+        if not self._target_suggestions_enabled:
+            return  # a programmatic set (see _set_target_text_programmatic), not the user typing
         typed = self.target_var.get().strip().lower()
-        if not typed:
-            matches = self._all_targets
+        matches = self._all_targets if not typed else [
+            (cid, label) for cid, label in self._all_targets if typed in label.lower()
+        ]
+        self._target_suggest_items = matches
+        if matches:
+            self._show_target_suggestions(matches)
         else:
-            matches = [(cid, label) for cid, label in self._all_targets if typed in label.lower()]
-        self.target_combo["values"] = [label for _, label in matches]
+            self._hide_target_suggestions()
+
+    def _on_target_entry_focus_in(self, event=None) -> None:
+        # Complaint #1 ("hard to select the whole line to type"): select
+        # all existing text so the user can just start typing to replace
+        # it, the way a real search box behaves. Scheduled via after(1,...)
+        # since the click that produced this focus event would otherwise
+        # place the cursor AFTER our selection ran, undoing it immediately.
+        self.target_entry.after(1, lambda: self.target_entry.select_range(0, "end"))
+        # Also show the current candidate list right away, not just after
+        # the first keystroke -- lets the user browse by clicking in alone.
+        self._on_target_text_changed()
+
+    def _on_target_entry_arrow_down(self, event=None) -> str | None:
+        """Pressing Down while typing moves keyboard focus into the
+        suggestion popup itself, so it can be arrow-navigated + committed
+        with Enter -- a keyboard-only fallback alongside clicking a
+        suggestion with the mouse."""
+        if self._target_suggest_popup is not None and self._target_suggest_popup.winfo_exists() \
+                and self._target_suggest_listbox.size() > 0:
+            self._target_suggest_listbox.focus_set()
+            self._target_suggest_listbox.selection_clear(0, "end")
+            self._target_suggest_listbox.selection_set(0)
+            self._target_suggest_listbox.activate(0)
+            return "break"
+        return None
+
+    def _on_target_suggest_focus_out(self, event=None) -> None:
+        # Delayed so a click landing on the suggestion popup (which also
+        # blurs the entry) has a chance to actually register as a pick
+        # BEFORE this decides whether to close the popup -- closing
+        # immediately on focus-out would eat the click that was supposed
+        # to choose something (the classic dropdown-loses-focus-before-
+        # the-click-lands bug).
+        self.after(150, self._maybe_hide_target_suggestions)
+
+    def _maybe_hide_target_suggestions(self) -> None:
+        if self._target_suggest_popup is None or not self._target_suggest_popup.winfo_exists():
+            return
+        focused = self.focus_get()
+        if focused is self._target_suggest_listbox:
+            return  # focus moved INTO the popup (e.g. via arrow-down) -- keep it open
+        self._hide_target_suggestions()
+
+    def _show_target_suggestions(self, matches: list[tuple[int, str]]) -> None:
+        if self._target_suggest_popup is None or not self._target_suggest_popup.winfo_exists():
+            popup = tk.Toplevel(self)
+            popup.withdraw()
+            popup.overrideredirect(True)  # a borderless popup, not a real window -- reads as part of the field
+            popup.attributes("-topmost", True)
+            lb = tk.Listbox(popup, activestyle="dotbox", exportselection=False)
+            lb.pack(fill="both", expand=True)
+            lb.bind("<ButtonRelease-1>", self._on_target_suggestion_chosen)
+            lb.bind("<Return>", self._on_target_suggestion_chosen)
+            lb.bind("<Escape>", lambda e: (self._hide_target_suggestions(), self.target_entry.focus_set()))
+            lb.bind("<FocusOut>", self._on_target_suggest_focus_out)
+            self._target_suggest_popup = popup
+            self._target_suggest_listbox = lb
+        popup = self._target_suggest_popup
+        lb = self._target_suggest_listbox
+        lb.delete(0, "end")
+        for _, label in matches:
+            lb.insert("end", label)
+        visible_rows = min(10, len(matches))
+        lb.configure(height=visible_rows)
+        x = self.target_entry.winfo_rootx()
+        y = self.target_entry.winfo_rooty() + self.target_entry.winfo_height()
+        width = max(self.target_entry.winfo_width(), 260)
+        popup.geometry(f"{width}x{visible_rows * 18}+{x}+{y}")
+        popup.deiconify()
+
+    def _hide_target_suggestions(self) -> None:
+        if self._target_suggest_popup is not None and self._target_suggest_popup.winfo_exists():
+            self._target_suggest_popup.withdraw()
+
+    def _on_target_suggestion_chosen(self, event=None) -> None:
+        lb = self._target_suggest_listbox
+        sel = lb.curselection()
+        if not sel or sel[0] >= len(self._target_suggest_items):
+            return
+        _, label = self._target_suggest_items[sel[0]]
+        self._set_target_text_programmatic(label)
+        self.target_entry.focus_set()
+        self.target_entry.select_range(0, "end")
 
     def _update_lock_checkbox(self, summary) -> None:
         """Reflects the currently selected cluster's auto_match_locked
@@ -4447,6 +4578,10 @@ class FaceLabelingWindow(tk.Toplevel):
         if self._face_poll_after_id is not None:
             self.after_cancel(self._face_poll_after_id)
             self._face_poll_after_id = None
+        # Explicit, even though self.destroy() below would cascade to this
+        # child Toplevel anyway -- cheap and removes any doubt.
+        if self._target_suggest_popup is not None and self._target_suggest_popup.winfo_exists():
+            self._target_suggest_popup.destroy()
         self.conn.close()
         self.destroy()
 
