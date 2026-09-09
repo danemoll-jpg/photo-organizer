@@ -44,10 +44,13 @@ The design actually used here is INCREMENTAL, not a from-scratch re-cluster:
    what's actually in the DB.
 3. On each clustering run, every not-yet-clustered face is first compared
    against every EXISTING person's centroid (cosine similarity). A match
-   above face_cluster_similarity_threshold reuses that person's cluster_id
-   -- this is how a newly-detected photo of an already-named person gets
-   folded into their existing group instead of forming a disconnected
-   duplicate cluster.
+   above face_cluster_similarity_threshold (or the separate, optionally
+   more lenient Config.face_match_existing_threshold, when set -- see its
+   own comment for why matching against an already-confirmed person is a
+   lower-risk place to be lenient than forming a brand new cluster is)
+   reuses that person's cluster_id -- this is how a newly-detected photo
+   of an already-named person gets folded into their existing group
+   instead of forming a disconnected duplicate cluster.
 4. Only the faces that don't match anyone existing get DBSCAN'd among
    themselves (cosine distance, via a faiss neighbor graph -- see
    _dbscan_cosine below) to discover BRAND NEW people the library hasn't
@@ -340,6 +343,17 @@ def run_face_clustering(
     stats = ClusterStats()
     threshold = cfg.face_cluster_similarity_threshold
     min_samples = cfg.face_cluster_min_samples
+    # Follow-up session, direct user feedback: a separate, optionally more
+    # lenient threshold for "does this new face match an EXISTING,
+    # already-confirmed person" -- see Config.face_match_existing_threshold's
+    # own comment for the full reasoning (a false match here is low-risk
+    # and easy to fix by hand; a false match in DBSCAN's new-cluster step
+    # below is exactly the chaining problem the 0.65 default exists to
+    # prevent). Defaults to `threshold` itself -- None means "no override,
+    # keep today's exact behavior."
+    match_threshold = cfg.face_match_existing_threshold
+    if match_threshold is None:
+        match_threshold = threshold
 
     stats.excluded_low_confidence = conn.execute(
         "SELECT COUNT(*) FROM faces WHERE cluster_id IS NULL AND not_a_person = 0 "
@@ -381,7 +395,7 @@ def run_face_clustering(
         sims = embeddings @ existing_mat.T  # (n_faces, n_people), both sides already L2-normalized -> cosine similarity
         best_person_idx = np.argmax(sims, axis=1)
         best_sim = sims[np.arange(len(face_ids)), best_person_idx]
-        matched_mask = best_sim >= threshold
+        matched_mask = best_sim >= match_threshold
 
         newly_matched: dict[int, list[int]] = {}
         unmatched_idx = []

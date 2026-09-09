@@ -184,3 +184,19 @@ face_model_pack: "buffalo_l"
 face_min_det_score: 0.5
 face_cluster_similarity_threshold: 0.65
 face_cluster_min_samples: 4
+#
+# face_match_existing_threshold (follow-up session, direct user feedback --
+# real already-named people not getting recognized as often as expected):
+# an OPTIONAL, separate, more lenient threshold used ONLY for "does this new
+# face match an EXISTING, already-confirmed person" -- DBSCAN's new-cluster
+# formation above always keeps using face_cluster_similarity_threshold
+# unchanged, so lowering this can't reintroduce the chaining problem that
+# threshold exists to prevent. A false match here is low-risk (one bad
+# photo under a real person's name, easy to spot/fix by hand via "Remove
+# Selected from Cluster" in the labeling UI) -- unlike a false match in
+# brand-new cluster formation. Commented out (defaults to None, i.e. today's
+# exact behavior, same value for both jobs) since the right value is a
+# per-library tuning choice -- uncomment and pick a value below
+# face_cluster_similarity_threshold once you've seen real match-rate
+# numbers for your own named people (see src/config.py's own comment).
+# face_match_existing_threshold: 0.55

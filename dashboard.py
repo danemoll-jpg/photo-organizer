@@ -3232,6 +3232,13 @@ class FaceLabelingWindow(tk.Toplevel):
         self._face_load_stop: threading.Event = threading.Event()
         self._face_thumb_queue: "queue.Queue[tuple]" = queue.Queue()
         self._face_widgets: dict[int, tk.Checkbutton] = {}
+        # Ordered face_ids actually rendered on the current page right now
+        # -- kept in sync by _remove_faces_from_rendered_page() as faces
+        # get resolved off of it in place, WITHOUT ever re-slicing a fresh
+        # page's worth from self._current_faces (that re-slicing is exactly
+        # what used to backfill the page with faces pulled up from further
+        # down the list after every mutation -- see that method's docstring).
+        self._page_face_ids: list[int] = []
         self._face_loading_total: int = 0
         self._face_loading_done: int = 0
         self._face_page_label_base: str = "No faces."
@@ -3433,7 +3440,7 @@ class FaceLabelingWindow(tk.Toplevel):
         kind, payload = self._display[index]
         return self._display_key_for(kind, payload)
 
-    def _rebuild_display_list(self, prev_key=None) -> None:
+    def _rebuild_display_list(self, prev_key=None, reload_current_page: bool = True) -> None:
         """Phase 3c: rebuilds self._display from self._clusters/
         self._not_a_person_count (already in memory -- no DB query here)
         applying the min-size and hide-already-named filters, plus the
@@ -3441,6 +3448,15 @@ class FaceLabelingWindow(tk.Toplevel):
         display-layer operation: never changes clustering, cluster_id
         assignment, or which faces belong to which person -- see the spec's
         own explicit requirement on this.
+
+        reload_current_page (real usability fix, a later follow-up
+        session): False skips the final _load_selected_cluster() call --
+        used by _refresh_left_list_after_local_edit() to refresh the left
+        list's labels/counts (and preserve/re-find the current selection
+        and scroll position, all unchanged below) WITHOUT re-fetching and
+        re-paginating the right-hand page, which is what used to bounce a
+        big cluster back to page 1 after every single mutation. See
+        _remove_faces_from_current_view's docstring for the full story.
 
         prev_key, when given (only by reload()), is used to try to keep the
         same logical selection across a DB refetch. A bare filter-widget
@@ -3509,7 +3525,8 @@ class FaceLabelingWindow(tk.Toplevel):
         # the selected cluster just vanished from the list entirely.
         self.cluster_listbox.yview_moveto(prev_view_top)
 
-        self._load_selected_cluster()
+        if reload_current_page:
+            self._load_selected_cluster()
 
     def _on_cluster_selected(self, event=None) -> None:
         sel = self.cluster_listbox.curselection()
@@ -3617,6 +3634,7 @@ class FaceLabelingWindow(tk.Toplevel):
         self._photo_refs.clear()
         self._face_check_vars.clear()
         self._face_widgets.clear()
+        self._page_face_ids.clear()
         # Rebuilding the grid (page change, cluster switch, reload) destroys
         # every widget a pending hover job/tooltip might reference -- cancel
         # both so a stale after() callback can't fire against a dead widget.
@@ -3664,6 +3682,7 @@ class FaceLabelingWindow(tk.Toplevel):
             cb.bind("<Enter>", lambda e, f=face, w=cb: self._on_face_hover_enter(f, w))
             cb.bind("<Leave>", lambda e: self._on_face_hover_leave())
             self._face_widgets[face.face_id] = cb
+            self._page_face_ids.append(face.face_id)
 
         self._update_page_status_label()
         self.prev_page_btn.configure(state="normal" if self._face_page > 0 else "disabled")
@@ -3734,6 +3753,59 @@ class FaceLabelingWindow(tk.Toplevel):
         if self._face_loading_total and self._face_loading_done < self._face_loading_total:
             text += f"  (loading {self._face_loading_done}/{self._face_loading_total} thumbnail(s)...)"
         self.page_label.configure(text=text)
+
+    def _remove_faces_from_rendered_page(self, face_ids: set[int]) -> None:
+        """The actual fix for "the page keeps getting filled up, I never
+        make strides" (direct user feedback): removes exactly the given
+        faces from the page ALREADY ON SCREEN, closing the gap by
+        re-gridding whatever's left -- unlike _render_face_page(), this
+        never re-slices a fresh FACES_PER_PAGE-sized window from
+        self._current_faces, so the page only ever SHRINKS as faces are
+        resolved off of it (Split/Move/Remove/Mark). New content only
+        ever appears once the user explicitly turns the page, re-selects
+        the cluster, or clears this page down to nothing (see below) --
+        never as an unrequested side effect of taking an action.
+
+        Called by _remove_faces_from_current_view AFTER self._current_faces
+        has already been filtered -- this only touches the widget grid/
+        self._page_face_ids, the DB-backed master list is handled there."""
+        removed_any = False
+        for fid in face_ids:
+            widget = self._face_widgets.pop(fid, None)
+            if widget is not None:
+                widget.destroy()
+                removed_any = True
+            self._face_check_vars.pop(fid, None)
+        if not removed_any:
+            return
+        self._page_face_ids = [fid for fid in self._page_face_ids if fid in self._face_widgets]
+
+        if not self._page_face_ids:
+            # This page is now fully cleared -- a natural, expected moment
+            # to show whatever's next (or "No faces." if the group itself
+            # is now empty too), not something to linger on. A full
+            # _render_face_page() re-slice here is fine/correct: it's an
+            # explicit consequence of just finishing this exact page, not
+            # an unrequested backfill triggered by a partial removal.
+            self._render_face_page()
+            return
+
+        # Re-grid the survivors in row-major order to close the gap left
+        # behind by the removed widgets -- the actual "no backfill" fix.
+        for i, fid in enumerate(self._page_face_ids):
+            self._face_widgets[fid].grid(row=i // self.THUMB_COLS, column=i % self.THUMB_COLS, padx=3, pady=3)
+
+        total = len(self._current_faces)
+        page_count = max(1, (total + self.FACES_PER_PAGE - 1) // self.FACES_PER_PAGE)
+        self._face_page = max(0, min(self._face_page, page_count - 1))
+        self._face_page_label_base = (
+            f"{len(self._page_face_ids)} face(s) remaining on this page — "
+            f"page {self._face_page + 1}/{page_count} ({total} total left in this group)"
+        )
+        self._update_page_status_label()
+        self.prev_page_btn.configure(state="normal" if self._face_page > 0 else "disabled")
+        self.next_page_btn.configure(state="normal" if self._face_page < page_count - 1 else "disabled")
+        self._update_selection_count()
 
     # ----------------------------------------------- Phase 3j: full photo
     def _popup_max_size(self) -> tuple[int, int]:
@@ -3890,6 +3962,77 @@ class FaceLabelingWindow(tk.Toplevel):
         kind, payload = self._display[idx]
         return payload if kind == "cluster" else None
 
+    # ------------------------------------ optimistic in-place view updates
+    def _refresh_left_list_after_local_edit(self) -> None:
+        """Refreshes cluster summaries/counts in the left list (so a
+        face_count label doesn't go stale after a mutation) WITHOUT
+        touching the right-hand page/grid -- used after a mutation whose
+        effect on the CURRENTLY VIEWED page has already been applied
+        locally (see _remove_faces_from_current_view), so the user's
+        place/page/scroll position in a large cluster is never lost to a
+        mutation that only moved a handful of faces out of thousands."""
+        prev_key = self._display_key(self._selected_index)
+        self._clusters = list_clusters(self.conn)
+        self._not_a_person_count = count_not_a_person(self.conn)
+        self._rebuild_display_list(prev_key=prev_key, reload_current_page=False)
+
+    def _refresh_target_combo(self, exclude_cluster_id) -> None:
+        """Recomputes the Target-person dropdown's values (so a stale face
+        count doesn't linger after a Move/Split/Merge changes someone's
+        total) while preserving whichever target the user currently has
+        selected, by cluster_id identity rather than by label text (the
+        label's own face count is exactly what just changed, so matching
+        by text would fail the instant it's most needed) -- so repeatedly
+        moving faces to the same person doesn't require re-picking them
+        from the dropdown after every single move, unlike the old
+        _load_selected_cluster()-based refresh which always reset this to
+        index 0."""
+        old_idx = self.target_combo.current()
+        old_target_cid = self._merge_target_ids[old_idx] if 0 <= old_idx < len(self._merge_target_ids) else None
+        targets = list_people_for_merge_target(self.conn, exclude_cluster_id=exclude_cluster_id)
+        self._merge_target_ids = [t[0] for t in targets]
+        self.target_combo["values"] = [t[1] for t in targets]
+        if old_target_cid is not None and old_target_cid in self._merge_target_ids:
+            self.target_combo.current(self._merge_target_ids.index(old_target_cid))
+        elif targets:
+            self.target_combo.current(0)
+        else:
+            self.target_combo.set("")
+
+    def _remove_faces_from_current_view(self, face_ids: set[int]) -> None:
+        """Applied after Split/Move/Remove-from-Cluster/Mark/Un-mark --
+        actions that move the given faces OUT of whatever's currently
+        shown (a real cluster, or a bucket).
+
+        Real usability fix, direct user feedback: every one of these used
+        to call reload(), which re-fetches the WHOLE cluster from the DB
+        and resets to page 0 -- fine for a small cluster, but on a large
+        one (thousands of faces) this silently backfills the current page
+        with faces pulled up from further down the list and bounces the
+        view back to page 1 every single time, making it feel like no
+        progress is ever being made even though faces genuinely are being
+        resolved one action at a time.
+
+        This instead updates the in-memory view directly: the current
+        page only ever SHRINKS as faces are resolved off of it (Split them
+        out, Move them elsewhere, etc.) -- new content only ever appears
+        once the user explicitly turns the page or re-selects the
+        cluster, never as an unrequested side effect of taking an action.
+        The left list's counts and the Target-person dropdown (whose face
+        counts also just changed) are still kept fresh -- see
+        _refresh_left_list_after_local_edit/_refresh_target_combo -- just
+        without touching the right-hand page/scroll state."""
+        if not face_ids:
+            return
+        self._current_faces = [f for f in self._current_faces if f.face_id not in face_ids]
+        self._selected_face_ids -= face_ids
+        self._remove_faces_from_rendered_page(face_ids)
+        if self._current_view == "cluster":
+            summary = self._current_summary()
+            if summary is not None:
+                self._refresh_target_combo(exclude_cluster_id=summary.cluster_id)
+        self._refresh_left_list_after_local_edit()
+
     # -------------------------------------------------- safety + undo
     def _confirm_if_selection_spans_pages(self, action_desc: str) -> bool:
         """Returns True if the caller should proceed, False if the user
@@ -4001,7 +4144,12 @@ class FaceLabelingWindow(tk.Toplevel):
             "old_notes": summary.notes,
         })
         set_person_name(self.conn, summary.cluster_id, name, summary.notes)
-        self.reload()
+        # Renaming doesn't move any faces, so the right-hand page is still
+        # exactly correct as-is -- only the left list's own label (which
+        # shows the name) needs refreshing. A full reload() here would
+        # needlessly bounce you back to page 0 if you'd paged into a big
+        # cluster before naming it.
+        self._refresh_left_list_after_local_edit()
 
     def _on_split(self) -> None:
         if not self._selected_face_ids:
@@ -4030,7 +4178,7 @@ class FaceLabelingWindow(tk.Toplevel):
         messagebox.showinfo(
             "Face Labeling", f"Created a new person (cluster {new_cid}) with {len(face_ids)} face(s)."
         )
-        self.reload()
+        self._remove_faces_from_current_view(set(face_ids))
 
     def _on_remove_from_cluster(self) -> None:
         """Phase 3f: "half of Split" -- sends the selected faces back to
@@ -4068,7 +4216,7 @@ class FaceLabelingWindow(tk.Toplevel):
         messagebox.showinfo(
             "Face Labeling", f'Removed {len(face_ids)} face(s) from this cluster -- sent back to "(Unclustered)".'
         )
-        self.reload()
+        self._remove_faces_from_current_view(set(face_ids))
 
     def _on_move(self) -> None:
         if not self._selected_face_ids:
@@ -4092,7 +4240,7 @@ class FaceLabelingWindow(tk.Toplevel):
         face_ids = sorted(self._selected_face_ids)
         self._push_faces_undo(f'Move {len(face_ids)} face(s) to "{dest_label}"', face_ids)
         move_faces_to_person(self.conn, face_ids, dest_cid)
-        self.reload()
+        self._remove_faces_from_current_view(set(face_ids))
 
     def _on_merge(self) -> None:
         if self._current_view == "not_a_person":
@@ -4150,7 +4298,7 @@ class FaceLabelingWindow(tk.Toplevel):
         face_ids = sorted(self._selected_face_ids)
         self._push_faces_undo(f"Mark {len(face_ids)} face(s) as not a person", face_ids)
         mark_faces_not_a_person(self.conn, face_ids)
-        self.reload()
+        self._remove_faces_from_current_view(set(face_ids))
 
     def _on_unmark_not_a_person(self) -> None:
         """Reverses a "Mark as Not a Person" flag. Only meaningful while
@@ -4172,7 +4320,7 @@ class FaceLabelingWindow(tk.Toplevel):
         face_ids = sorted(self._selected_face_ids)
         self._push_faces_undo(f"Un-mark {len(face_ids)} face(s)", face_ids)
         unmark_faces_not_a_person(self.conn, face_ids)
-        self.reload()
+        self._remove_faces_from_current_view(set(face_ids))
 
     def _on_close(self) -> None:
         self._cancel_hover_preview()

@@ -189,6 +189,28 @@ class Config:
     face_min_det_score: float = 0.5
     face_cluster_similarity_threshold: float = 0.65
     face_cluster_min_samples: int = 4
+    # Follow-up session, direct user feedback ("it should recognize us
+    # better since it's identified us plenty of times"): confirmed the
+    # complaint is real, not just a feeling -- the comment above already
+    # documents that "Juliana Moll" (a growing child) only self-matches her
+    # OWN existing centroid 45% of the time at threshold=0.65. Root cause:
+    # ONE threshold was doing two different jobs with two different real
+    # risk profiles -- (a) "should this new face join an EXISTING, already
+    # human-confirmed person" (a false match here is low-risk: it's one bad
+    # photo under a real person's name, easy to spot and fix by hand via
+    # "Remove Selected from Cluster") and (b) "should DBSCAN group two
+    # never-before-seen faces into a brand new person" (a false match here
+    # is exactly the chaining problem the 0.45->0.65 retune above exists to
+    # prevent -- a lenient value here directly regrows the mega-cluster).
+    # `face_match_existing_threshold` decouples them: when set, it replaces
+    # ONLY job (a) above -- run_face_clustering()'s DBSCAN eps for job (b)
+    # keeps using face_cluster_similarity_threshold unchanged, so lowering
+    # this can't reintroduce chaining risk for genuinely new/unmatched
+    # faces. Defaults to None (falls back to face_cluster_similarity_
+    # threshold, i.e. today's exact behavior) -- a real value is a
+    # deliberate per-library tuning choice for the user to make after
+    # seeing real match-rate numbers, not something to guess at here.
+    face_match_existing_threshold: float | None = None
 
     # --- derived, absolute paths ---
     @property
@@ -305,6 +327,7 @@ def load_config(path: Path | None = None) -> Config:
         # real-data-backed reasoning.
         face_cluster_similarity_threshold=raw.get("face_cluster_similarity_threshold", 0.65),
         face_cluster_min_samples=raw.get("face_cluster_min_samples", 4),
+        face_match_existing_threshold=raw.get("face_match_existing_threshold"),
     )
 
 

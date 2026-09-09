@@ -51,6 +51,7 @@ from src.face_clustering import (
     EMBEDDING_DIM,
     ClusterStats,
     LoadStats,
+    _recompute_person_centroid,
     create_person_from_faces,
     crop_face_thumbnail,
     list_clusters,
@@ -141,6 +142,89 @@ def test_synthetic_clean_clustering(tmp: Path) -> None:
     assert len(clusters) == 3
     assert {c.face_count for c in clusters} == {5, 5, 5}
     print(f"  3 clusters of 5 faces each, none merged/split incorrectly  OK")
+    conn.close()
+
+
+def _embedding_at_cosine(base: np.ndarray, orth: np.ndarray, cos_sim: float) -> np.ndarray:
+    """A unit vector at EXACTLY the given cosine similarity to `base`,
+    using `orth` (a vector orthonormal to `base`) as the other axis --
+    lets a test assert an exact, non-flaky similarity value instead of
+    tuning random noise and hoping it lands close enough."""
+    theta = np.arccos(np.clip(cos_sim, -1.0, 1.0))
+    return (np.cos(theta) * base + np.sin(theta) * orth).astype(np.float32)
+
+
+def test_face_match_existing_threshold_decoupled_from_dbscan(tmp: Path) -> None:
+    print("\n=== Config.face_match_existing_threshold: decoupled from DBSCAN's new-cluster eps (follow-up session) ===")
+    dbp, conn = _fresh_db(tmp, "decoupled_threshold.db")
+    rng = np.random.default_rng(7)
+
+    # Two orthonormal axis pairs so the two scenarios below (matching an
+    # EXISTING person vs. two brand-new candidates finding each other)
+    # don't accidentally interact.
+    e1 = np.zeros(EMBEDDING_DIM, dtype=np.float32); e1[0] = 1.0
+    o1 = np.zeros(EMBEDDING_DIM, dtype=np.float32); o1[1] = 1.0
+    e2 = np.zeros(EMBEDDING_DIM, dtype=np.float32); e2[2] = 1.0
+    o2 = np.zeros(EMBEDDING_DIM, dtype=np.float32); o2[3] = 1.0
+
+    # Alice: an existing, already-named person, 3 faces exactly at e1 (her
+    # centroid is therefore exactly e1 after recomputation). The `people`
+    # row must exist BEFORE any face references its cluster_id (FK).
+    conn.execute("INSERT INTO people (cluster_id, assigned_name, face_count) VALUES (1, 'Alice', 0)")
+    conn.commit()
+    for j in range(3):
+        fh = f"alice_{j}"
+        _insert_photo(conn, fh, f"E:\\Pics\\alice_{j}.jpg")
+        _insert_face(conn, fh, e1.copy(), cluster_id=1)
+    _recompute_person_centroid(conn, 1)
+
+    # A new, unclustered candidate at cosine=0.58 to Alice's centroid --
+    # BELOW the strict 0.65 default, ABOVE a more lenient 0.55.
+    _insert_photo(conn, "alice_new", "E:\\Pics\\alice_new.jpg")
+    _insert_face(conn, "alice_new", _embedding_at_cosine(e1, o1, 0.58))
+
+    # Two brand-new, never-before-seen candidates, mutually at the SAME
+    # cosine=0.58 to each other -- a stand-in for "two photos of some new
+    # person DBSCAN might chain together" if the lenient threshold were
+    # (wrongly) also applied to new-cluster formation.
+    _insert_photo(conn, "new_b1", "E:\\Pics\\new_b1.jpg")
+    _insert_face(conn, "new_b1", e2.copy())
+    _insert_photo(conn, "new_b2", "E:\\Pics\\new_b2.jpg")
+    _insert_face(conn, "new_b2", _embedding_at_cosine(e2, o2, 0.58))
+
+    # --- Run 1: default behavior (face_match_existing_threshold unset) ---
+    cfg_default = _make_cfg(dbp, face_cluster_similarity_threshold=0.65, face_cluster_min_samples=2)
+    stats1 = run_face_clustering(cfg_default, conn, _logger)
+    print(f"  default (no override): {stats1.summary()}")
+    assert stats1.matched_existing == 0, "at the strict 0.65 threshold, the 0.58-similar candidate must NOT match Alice"
+    assert stats1.new_clusters_formed == 0, "new_b1/new_b2 at 0.58 similarity must NOT form a new cluster at eps=0.35"
+    assert stats1.remained_unclustered == 3
+    alice_count_after_run1 = conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0]
+    assert alice_count_after_run1 == 3, "Alice's count must be unchanged -- nothing matched her"
+
+    # Reset the three candidates back to unclustered for a clean second run
+    # (run_face_clustering only ever touches cluster_id IS NULL rows, so
+    # a real second run with different config needs them un-clustered
+    # again -- this mirrors "the user changes the config and re-runs").
+    conn.execute("UPDATE faces SET cluster_id = NULL WHERE file_hash IN ('alice_new', 'new_b1', 'new_b2')")
+    conn.commit()
+
+    # --- Run 2: face_match_existing_threshold=0.55, DBSCAN eps unchanged ---
+    cfg_lenient_match = _make_cfg(
+        dbp, face_cluster_similarity_threshold=0.65, face_cluster_min_samples=2,
+        face_match_existing_threshold=0.55,
+    )
+    stats2 = run_face_clustering(cfg_lenient_match, conn, _logger)
+    print(f"  face_match_existing_threshold=0.55: {stats2.summary()}")
+    assert stats2.matched_existing == 1, "with the lenient match threshold, the 0.58-similar candidate MUST now match Alice"
+    assert stats2.new_clusters_formed == 0, \
+        "new_b1/new_b2 must STILL not cluster together -- DBSCAN's eps must stay governed by the STRICT threshold, unaffected"
+    assert stats2.remained_unclustered == 2, "new_b1/new_b2 correctly remain unclustered candidates"
+    row = conn.execute("SELECT cluster_id FROM faces WHERE file_hash = 'alice_new'").fetchone()
+    assert row[0] == 1, "alice_new must have joined Alice's real cluster_id, not a new one"
+    alice_count_after_run2 = conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0]
+    assert alice_count_after_run2 == 4, f"Alice should have grown to 4 faces, got {alice_count_after_run2}"
+    print("  matching-against-existing-people got more lenient WITHOUT loosening new-cluster (chaining) risk  OK")
     conn.close()
 
 
@@ -426,6 +510,7 @@ def main() -> None:
     print(f"Working in {tmp}")
     try:
         test_synthetic_clean_clustering(tmp)
+        test_face_match_existing_threshold_decoupled_from_dbscan(tmp)
         test_incremental_reclustering_preserves_names(tmp)
         test_manual_split_move_merge(tmp)
         test_crop_face_thumbnail_orientation(tmp)

@@ -649,7 +649,36 @@ correctness requirement the design center on (see
 clustered), `face_cluster_similarity_threshold` (0.65 — cosine similarity
 floor for "same person," used both for the centroid match and as DBSCAN's
 neighbor radius), `face_cluster_min_samples` (4 — DBSCAN's min group size to
-form a brand-new person).
+form a brand-new person), `face_match_existing_threshold` (optional, unset
+by default — a separate, optionally more lenient threshold used ONLY for
+matching a new face against an EXISTING, already-named person; DBSCAN's
+new-cluster formation always keeps using `face_cluster_similarity_threshold`
+unchanged, so lowering this can't reintroduce the chaining risk described
+below — see the next follow-up entry for why this exists).
+
+**Follow-up session, direct user feedback ("it should recognize us better
+— it's identified us plenty of times"): `face_match_existing_threshold`
+decouples two jobs one threshold used to do.** Confirmed the complaint was
+real, not just a feeling — this library's own real "Juliana Moll" cluster
+(a growing child) only self-matches her OWN existing centroid 45% of the
+time at the current 0.65 threshold (see the entry below). The reason ONE
+threshold was wrong for both jobs: matching a new face against an
+EXISTING, already-human-confirmed person is low-risk if wrong (one bad
+photo under a real name, easy to spot and fix by hand via "Remove Selected
+from Cluster" in the labeling window) — a completely different risk
+profile from DBSCAN grouping two never-before-seen faces into a brand new
+person, which is exactly the chaining problem the 0.65 default exists to
+prevent. Set `face_match_existing_threshold` (e.g. `0.55`) in `config.yaml`
+to make ONLY the "match an existing person" step more lenient; leave it
+unset to keep today's exact behavior (same value for both jobs). A
+dedicated test (`tests/test_face_clustering.py::
+test_face_match_existing_threshold_decoupled_from_dbscan`) proves the
+decoupling holds: a borderline-similarity face correctly starts matching
+an existing person once this is set lower, while two equally
+borderline-similar BRAND NEW faces still correctly fail to cluster
+together, since DBSCAN's own eps never moved. Not applied to the real
+config — picking and applying a real value is the user's own call, same
+posture as every other clustering-parameter change in this project.
 
 **URGENT-fix follow-up session: these two were retuned from their original
 0.45/2 (this project's own earlier small-sample tuning, 39 groups from 767
