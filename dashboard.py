@@ -3185,7 +3185,17 @@ class FaceLabelingWindow(tk.Toplevel):
         self._undo_stack: list[dict] = []  # see MAX_UNDO comment above and _on_undo()
         self._selected_face_ids: set[int] = set()
         self._face_check_vars: dict[int, tk.BooleanVar] = {}
-        self._merge_target_ids: list[int] = []
+        # Follow-up session, direct user request ("keep the dropdown on the
+        # same name when switching [between] clusters" + typeahead): the
+        # Target-person field's full (unfiltered) candidate list, as
+        # (cluster_id, label) pairs -- see _populate_target_combo(). The
+        # combobox's own "values" is the currently FILTERED subset shown in
+        # the dropdown as the user types (_filter_target_combo), so the
+        # selected target is resolved by exact label match against THIS
+        # list (_resolve_target_cluster_id), never by combobox index --
+        # filtering makes index alignment meaningless the instant anything's
+        # been typed.
+        self._all_targets: list[tuple[int, str]] = []
         # Must keep a live Python reference to every ImageTk.PhotoImage --
         # Tk itself only holds a C-level handle and the image silently goes
         # blank the moment Python garbage-collects its last reference.
@@ -3402,8 +3412,17 @@ class FaceLabelingWindow(tk.Toplevel):
         action_bar2.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Label(action_bar2, text="Target person:").pack(side="left")
         self.target_var = tk.StringVar()
-        self.target_combo = ttk.Combobox(action_bar2, textvariable=self.target_var, state="readonly", width=32)
+        # Follow-up session, direct user request ("give the ability to
+        # start typing so I don't have to scroll as much"): editable, not
+        # state="readonly" -- typing live-filters the dropdown's own values
+        # (see _filter_target_combo) rather than requiring a scroll through
+        # every person. The actual selected target is resolved by exact
+        # label match (_resolve_target_cluster_id), not by what's merely
+        # typed, so a half-typed name that doesn't match anyone real is
+        # correctly treated as "nothing chosen yet," not a fabricated target.
+        self.target_combo = ttk.Combobox(action_bar2, textvariable=self.target_var, width=32)
         self.target_combo.pack(side="left", padx=(6, 6))
+        self.target_var.trace_add("write", self._filter_target_combo)
         ttk.Button(action_bar2, text="Move Selected Faces Here", command=self._on_move).pack(side="left")
         ttk.Button(action_bar2, text="Merge This Whole Group Here", command=self._on_merge).pack(
             side="left", padx=(6, 0)
@@ -3546,8 +3565,9 @@ class FaceLabelingWindow(tk.Toplevel):
             self._current_view = None
             self._current_faces = []
             self.name_var.set("")
+            self._all_targets = []
             self.target_combo["values"] = []
-            self._merge_target_ids = []
+            self.target_var.set("")
             self._face_page = 0
             self._render_face_page()
             return
@@ -3562,18 +3582,19 @@ class FaceLabelingWindow(tk.Toplevel):
             # normally" rather than a disabled widget here.
             self.name_var.set("")
             self._current_faces = list_not_a_person_faces(self.conn)
+            self._all_targets = []
             self.target_combo["values"] = []
-            self._merge_target_ids = []
+            self.target_var.set("")
         else:
             summary = payload
             self.name_var.set(summary.assigned_name or "" if summary.cluster_id is not None else "")
             self._current_faces = list_faces_in_cluster(self.conn, summary.cluster_id)
-
-            targets = list_people_for_merge_target(self.conn, exclude_cluster_id=summary.cluster_id)
-            self._merge_target_ids = [t[0] for t in targets]
-            self.target_combo["values"] = [t[1] for t in targets]
-            if targets:
-                self.target_combo.current(0)
+            # Direct user request: keep the Target dropdown on the same
+            # name when switching BETWEEN clusters, not just within one --
+            # _populate_target_combo() preserves whatever's currently
+            # selected (by cluster_id identity) if it's still a valid
+            # target here.
+            self._populate_target_combo(exclude_cluster_id=summary.cluster_id)
 
         self._face_page = 0
         self._render_face_page()
@@ -3976,28 +3997,72 @@ class FaceLabelingWindow(tk.Toplevel):
         self._not_a_person_count = count_not_a_person(self.conn)
         self._rebuild_display_list(prev_key=prev_key, reload_current_page=False)
 
-    def _refresh_target_combo(self, exclude_cluster_id) -> None:
-        """Recomputes the Target-person dropdown's values (so a stale face
-        count doesn't linger after a Move/Split/Merge changes someone's
-        total) while preserving whichever target the user currently has
-        selected, by cluster_id identity rather than by label text (the
-        label's own face count is exactly what just changed, so matching
-        by text would fail the instant it's most needed) -- so repeatedly
-        moving faces to the same person doesn't require re-picking them
-        from the dropdown after every single move, unlike the old
-        _load_selected_cluster()-based refresh which always reset this to
-        index 0."""
-        old_idx = self.target_combo.current()
-        old_target_cid = self._merge_target_ids[old_idx] if 0 <= old_idx < len(self._merge_target_ids) else None
-        targets = list_people_for_merge_target(self.conn, exclude_cluster_id=exclude_cluster_id)
-        self._merge_target_ids = [t[0] for t in targets]
-        self.target_combo["values"] = [t[1] for t in targets]
-        if old_target_cid is not None and old_target_cid in self._merge_target_ids:
-            self.target_combo.current(self._merge_target_ids.index(old_target_cid))
-        elif targets:
-            self.target_combo.current(0)
+    def _resolve_target_cluster_id(self) -> int | None:
+        """Resolves the Target-person field's CURRENT TEXT to a cluster_id
+        by exact label match against self._all_targets (the full,
+        unfiltered candidate list) -- never by combobox index. Index-based
+        lookup broke the instant typeahead filtering existed (see
+        _filter_target_combo): the visible dropdown's own indices stop
+        lining up with the full candidate list the moment anything's been
+        typed. Returns None if the text doesn't exactly match a real
+        target (nothing chosen yet, or a half-typed name)."""
+        text = self.target_var.get()
+        for cid, label in self._all_targets:
+            if label == text:
+                return cid
+        return None
+
+    def _populate_target_combo(self, exclude_cluster_id) -> None:
+        """(Re)computes the Target-person dropdown's full candidate list --
+        called both when switching to look at a DIFFERENT cluster
+        (_load_selected_cluster) and after a local edit changes someone's
+        face count (_remove_faces_from_current_view). Either way, whichever
+        target is currently selected is preserved BY CLUSTER_ID IDENTITY,
+        not by label text (a label's own face count is exactly what a
+        local edit just changed, and switching clusters changes which
+        person is even excluded from the list) -- two real, direct user
+        complaints this fixes: repeatedly moving faces to the same person
+        no longer requires re-picking them after every move, AND paging
+        through many small clusters while always sending outliers to the
+        same target no longer requires re-picking them after every single
+        cluster switch either.
+
+        Falls back to the first available target only when there wasn't a
+        previous selection, or it's no longer offered here (most commonly
+        because it IS the newly-selected cluster itself, excluded from its
+        own target list)."""
+        prev_cid = self._resolve_target_cluster_id()
+        self._all_targets = list_people_for_merge_target(self.conn, exclude_cluster_id=exclude_cluster_id)
+        label_by_cid = {cid: label for cid, label in self._all_targets}
+        if prev_cid is not None and prev_cid in label_by_cid:
+            self.target_var.set(label_by_cid[prev_cid])
+        elif self._all_targets:
+            self.target_var.set(self._all_targets[0][1])
         else:
-            self.target_combo.set("")
+            self.target_var.set("")
+        # Setting target_var above fires _filter_target_combo via its own
+        # trace (typing and a programmatic set look identical to a
+        # StringVar), which would otherwise leave the dropdown showing only
+        # the ONE entry that happens to self-match the text just set --
+        # reset to the FULL list explicitly afterward, so opening the
+        # dropdown right after a cluster switch/local edit shows every real
+        # option, not just whichever one is currently selected.
+        self.target_combo["values"] = [label for _, label in self._all_targets]
+
+    def _filter_target_combo(self, *_args) -> None:
+        """Direct user request: live-filters the Target-person dropdown's
+        own values to whatever's currently typed, so a real match is a few
+        keystrokes away instead of a scroll through everyone -- fired on
+        every keystroke via self.target_var's trace. Only ever touches the
+        dropdown's "values" (what the popup offers), never the entry's own
+        text (self.target_var, already whatever was just typed) -- so
+        typing is never fought or overwritten mid-keystroke."""
+        typed = self.target_var.get().strip().lower()
+        if not typed:
+            matches = self._all_targets
+        else:
+            matches = [(cid, label) for cid, label in self._all_targets if typed in label.lower()]
+        self.target_combo["values"] = [label for _, label in matches]
 
     def _remove_faces_from_current_view(self, face_ids: set[int]) -> None:
         """Applied after Split/Move/Remove-from-Cluster/Mark/Un-mark --
@@ -4020,7 +4085,7 @@ class FaceLabelingWindow(tk.Toplevel):
         cluster, never as an unrequested side effect of taking an action.
         The left list's counts and the Target-person dropdown (whose face
         counts also just changed) are still kept fresh -- see
-        _refresh_left_list_after_local_edit/_refresh_target_combo -- just
+        _refresh_left_list_after_local_edit/_populate_target_combo -- just
         without touching the right-hand page/scroll state."""
         if not face_ids:
             return
@@ -4030,7 +4095,7 @@ class FaceLabelingWindow(tk.Toplevel):
         if self._current_view == "cluster":
             summary = self._current_summary()
             if summary is not None:
-                self._refresh_target_combo(exclude_cluster_id=summary.cluster_id)
+                self._populate_target_combo(exclude_cluster_id=summary.cluster_id)
         self._refresh_left_list_after_local_edit()
 
     # -------------------------------------------------- safety + undo
@@ -4229,12 +4294,11 @@ class FaceLabelingWindow(tk.Toplevel):
                 "them normally.",
             )
             return
-        sel = self.target_combo.current()
-        if sel < 0 or sel >= len(self._merge_target_ids):
-            messagebox.showinfo("Face Labeling", "Choose a target person first.")
+        dest_cid = self._resolve_target_cluster_id()
+        if dest_cid is None:
+            messagebox.showinfo("Face Labeling", "Choose a target person first (type a name or pick from the dropdown).")
             return
-        dest_cid = self._merge_target_ids[sel]
-        dest_label = self.target_combo.get()
+        dest_label = self.target_var.get()
         if not self._confirm_if_selection_spans_pages(f'move the selected faces to "{dest_label}"'):
             return
         face_ids = sorted(self._selected_face_ids)
@@ -4259,12 +4323,11 @@ class FaceLabelingWindow(tk.Toplevel):
                 '"Move Selected Faces Here" instead.',
             )
             return
-        sel = self.target_combo.current()
-        if sel < 0 or sel >= len(self._merge_target_ids):
-            messagebox.showinfo("Face Labeling", "Choose a target person first.")
+        target_cid = self._resolve_target_cluster_id()
+        if target_cid is None:
+            messagebox.showinfo("Face Labeling", "Choose a target person first (type a name or pick from the dropdown).")
             return
-        target_cid = self._merge_target_ids[sel]
-        target_label = self.target_combo.get()
+        target_label = self.target_var.get()
         if not messagebox.askyesno(
             "Face Labeling",
             f"Merge this whole group ({summary.face_count} face(s)) into the selected person?\n\n"
