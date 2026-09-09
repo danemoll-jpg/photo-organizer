@@ -441,3 +441,25 @@
 
 **Explicitly out of scope:**
 - Any editing from this full-photo view — purely a viewing aid to help with labeling decisions made back in the main cluster view.
+
+## Phase 3k — Investigate + reset three problem clusters, plus two detection-quality questions
+
+**Part A — Why did "Joanne Sanders" become a false-positive magnet, and reset three specific clusters.**
+
+Context: user noticed Joanne Sanders' named cluster has become "a dumping ground for anything the facial recognition didn't match," the same pattern already found and fixed for pet clusters (`auto_match_locked`). Unlike a pet, she's a real person — likely with genuinely few real photos, which is exactly the condition (a weak/small-sample centroid) that made pet clusters an easy false-positive target once `face_match_existing_threshold` was set to a lenient 0.55.
+
+- **Investigate first, against real data, before resetting anything** — same discipline as the cat-cluster and cluster-81 investigations: how many faces are actually in Joanne Sanders' cluster right now, what was her count before automatic matching started pulling faces in, what's the mean pairwise similarity of her cluster's members (a low number, like cluster 81's 0.07, indicates contamination — a real person's genuine cluster should look more like the 0.39-0.78 range already established for correctly-formed clusters). Confirm the same root cause (small/weak centroid + lenient threshold = magnet) actually explains this case, don't just assume it does.
+- **This is ONE target, not two: the large UNNAMED cluster currently containing 1,375 photos** — user described it as a photo count, not a cluster ID; do not assume `cluster_id=1375`. Look up which real unnamed cluster actually has ~1,375 photos/faces in it against the live DB right now. Report back what's actually found before resetting.
+- **Reset both** (Joanne Sanders, and the large unnamed 1,375-photo cluster) back to Unclustered — same mechanism already used for cluster 81/5783 (`remove_faces_from_cluster`), with a safety backup taken first, same precedent as every prior real-data-touching session.
+- **After reset, use the existing "Sort by likely match to" ranking tool** (built in a recent session) to help the user re-sort these faces back into correct clusters by hand, rather than leaving them to blind re-clustering alone.
+
+**Part B — Can non-face false-positive detections be filtered out before they ever show up?**
+
+Context: user is spending real time paging through detections that aren't faces at all (and separately, faces from people deep in the background of a crowd shot) — both add noise to an already-large labeling task.
+
+- **Investigate whether `det_score` (the detector's own confidence score, already stored per face) reliably separates genuine faces from false-positive garbage detections** — pull a real sample of low-`det_score` detections and check whether they're actually mostly non-faces, the same evidence-based approach already used for every clustering-parameter decision in this project. Don't assume a specific threshold works without checking real examples.
+- If a real, reliable threshold is found: propose (don't unilaterally apply) either (a) filtering these out at detection time going forward (a config threshold, so future `detect-faces` runs skip saving very-low-confidence detections), or (b) a bulk cleanup tool to mark existing low-confidence detections as `not_a_person` in bulk rather than one at a time — flag the tradeoff and let the user decide which they want, same "flag, don't act unilaterally on a real clustering-parameter change" posture already established for `face_cluster_similarity_threshold`/`face_match_existing_threshold`.
+- **Crowd/background faces are a separate, harder problem — investigate but don't force a fix if there isn't a clean one.** These are often genuine, real faces (not detector false-positives), just not faces the user cares about labeling. `det_score` likely won't distinguish them (a small, distant, background face can still be a confident detection). Worth checking whether face SIZE (bounding box area relative to the photo) correlates with "background crowd noise nobody wants to label" — but this is explicitly framed as "just want to throw these out there," not a hard requirement — investigate and report findings/options rather than committing to a specific fix.
+
+**Explicitly out of scope:**
+- Any change to the drop-folder pipeline (Phase 5) — user has explicitly tabled that for now, stay focused on face-recognition quality this session.
