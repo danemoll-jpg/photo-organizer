@@ -506,3 +506,16 @@ Context: user is spending real time paging through detections that aren't faces 
 - **Fix must address both symptoms**: the popup should never be able to end up blank (either it shows the real content, or it fails visibly/gracefully with an error rather than an empty gray box), and it must never be stuck always-on-top independent of the user's actual window focus — closable on its own, not just by killing its parent window.
 - Given this touches the exact same popup Phase 3m's Part 4 (add date) and Part 5 (dialog parenting) are already modifying, fix this as part of the same pass over that code, not as an unrelated afterthought.
 - **This is the highest-priority item in this session** — genuinely disruptive (blocks other applications, not just this tool) and should be fixed before the other, less urgent Phase 3l/3m items if there's any real tradeoff in ordering.
+
+## Phase 3o — URGENT: single-click "Mark as Not a Person" sometimes applies to the whole selection, not just the clicked face
+
+**Context:** Real, intermittent bug the user found: clicking "this is not a person" on a single face thumbnail sometimes marks ALL currently checkbox-selected faces as not-a-person, not just the one clicked. Not every time. This is a real data-correctness risk (incorrectly flagging faces as false-positive detections, which permanently excludes them from future clustering until manually un-flagged).
+
+**Requirements:**
+
+**Part 1 — Investigate and fix the actual root cause, for real.** All mutating handlers (Remove from Cluster, Mark as Not a Person, Assign to Target Person) funnel through the same shared function (`_remove_faces_from_rendered_page` or its equivalent post-Phase-3n-fix state) — but Phase 3n's fix addressed a hover-timing race, NOT which faces an action targets, so do not assume this bug is already covered by that fix. Reproduce for real (same discipline as Phase 3n's investigation): does the per-face single-click handler sometimes read the current checkbox-selection state instead of (or in addition to) the specifically-clicked face's identity? Is there a stale-selection or event-binding issue where a prior bulk selection isn't properly cleared/ignored when a single-item action fires? Find the actual mechanism before fixing it.
+
+**Part 2 — Defense-in-depth safety net, in addition to the real fix, not instead of it.** Any action (not just this one — apply this generally to every mutating action in `FaceLabelingWindow`) that is about to affect more than 1 face must show a confirmation first — clearly stating how many faces will be affected — giving the user a chance to cancel before anything happens. This mirrors the same "fix root cause AND add a backstop" philosophy Phase 3n's fix already used. An action that only ever affects exactly the one face genuinely intended (the common case, once Part 1 is fixed) should NOT show this confirmation every time — only when the actual affected count is more than 1, so this doesn't become an annoying extra click for normal single-face actions.
+
+**Explicitly out of scope:**
+- Any change to the existing Phase 2c precedent (grid page's own bulk-action confirmation for cross-page selections) — that's a separate, already-existing mechanism in `review_tool.py`, not this Tkinter window.
