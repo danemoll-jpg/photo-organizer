@@ -3657,9 +3657,29 @@ class FaceLabelingWindow(tk.Toplevel):
         self.thumb_canvas.bind(
             "<Configure>", lambda e: self.thumb_canvas.itemconfigure(thumb_window_id, width=e.width)
         )
-        self.thumb_canvas.bind(
-            "<MouseWheel>", lambda e: self.thumb_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        )
+        # Phase 3q: mouse wheel scrolling over the grid. Windows delivers
+        # <MouseWheel> with event.delta as a signed multiple of 120 per
+        # notch (WHEEL_DELTA) -- positive when the wheel is rolled away from
+        # the user (scroll up/content moves down), negative when rolled
+        # toward the user (scroll down) -- so `-delta/120` is the correct
+        # "units" argument to yview_scroll, not a value that happens to work
+        # by luck (this project's own main-dashboard canvas already
+        # establishes this exact convention -- see DashboardApp's
+        # _on_main_mousewheel). This alone only fires while the cursor is
+        # directly over thumb_canvas's own background (the gaps around the
+        # grid, or below its content when a page is short) -- Tk delivers
+        # <MouseWheel> to whichever widget is actually under the cursor,
+        # and nearly the entire grid area is covered by per-face
+        # Checkbutton widgets, not the canvas itself. _render_face_page()
+        # below binds this same handler on every Checkbutton it creates
+        # (plus thumb_frame, for the small gaps between them) so wheel
+        # scrolling works everywhere over the grid, not just its margins.
+        # Bound with add="+" everywhere so it layers onto -- never
+        # replaces -- the checkbox-toggle/double-click/hover/right-click
+        # bindings already on those same widgets (purely additive, per
+        # spec).
+        self.thumb_canvas.bind("<MouseWheel>", self._on_thumb_mousewheel, add="+")
+        self.thumb_frame.bind("<MouseWheel>", self._on_thumb_mousewheel, add="+")
 
         # URGENT fix: pagination controls for _render_face_page() -- see the
         # class docstring/FACES_PER_PAGE comment above. Sits between the
@@ -4031,6 +4051,19 @@ class FaceLabelingWindow(tk.Toplevel):
         # call needed here.
         self.face_sort_field.set_text_programmatic("")
 
+    def _on_thumb_mousewheel(self, event) -> None:
+        """Shared <MouseWheel> handler for the face-thumbnail grid -- see
+        the binding comment where thumb_canvas/thumb_frame are built for the
+        Windows delta convention this relies on. Bound identically on the
+        canvas, its frame, and every per-face Checkbutton (see
+        _render_face_page), so it fires the same way regardless of exactly
+        which of those the cursor happens to be over; works unchanged for
+        both the normal cluster view and the Phase 3p ranked-by-likeness
+        view, since both render through this same thumb_canvas via
+        _render_face_page -- there's only one grid widget, not two."""
+        if event.delta:
+            self.thumb_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
     def _render_face_page(self) -> None:
         """Renders only the current FACES_PER_PAGE-sized slice of
         self._current_faces -- the actual fix for the 61k-face crash (see
@@ -4146,6 +4179,15 @@ class FaceLabelingWindow(tk.Toplevel):
             # Phase 3m Part 6: right-click context menu (Windows convention
             # -- Button-3) with the three quick actions.
             cb.bind("<Button-3>", lambda e, f=face: self._on_face_right_click(e, f))
+            # Phase 3q: each thumbnail covers most of the grid's visible
+            # area, so without this, wheel events over an actual face never
+            # reach thumb_canvas at all -- add="+" layers this on top of
+            # the toggle/double-click/hover/right-click bindings above
+            # rather than replacing any of them (all different event
+            # names/patterns, so there's no real collision risk either way,
+            # but add="+" is the correct, explicit way to say "purely
+            # additive").
+            cb.bind("<MouseWheel>", self._on_thumb_mousewheel, add="+")
             self._face_widgets[face.face_id] = cb
             self._page_face_ids.append(face.face_id)
 
