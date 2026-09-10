@@ -519,3 +519,20 @@ Context: user is spending real time paging through detections that aren't faces 
 
 **Explicitly out of scope:**
 - Any change to the existing Phase 2c precedent (grid page's own bulk-action confirmation for cross-page selections) — that's a separate, already-existing mechanism in `review_tool.py`, not this Tkinter window.
+
+## Phase 3p — Bulk-confirm proposed matches from the similarity-ranking view, and investigate the new 425-face cluster
+
+**Context:** The user has been using the existing "Sort faces by likeness to [target]" tool to find real matches (found 4+ full pages that were 100% her daughter), but manually checking dozens/hundreds of individual faces one at a time to move them is too tedious. Re-running `cluster-faces` doesn't help — DBSCAN requires faces to be mutually close to EACH OTHER within a tight distance, not just individually close to one reference target, so it can't pick up what a human looking at a ranked list can plainly see across a wider, non-contiguous similarity range (different ages/lighting/angles of the same person). A new attempt at growing this via clustering produced a 425-face group the user describes as "all random" — very likely another instance of the same chaining failure already diagnosed multiple times this session (Joeanne Sanders, cluster 6367, the pet-cluster incident), not yet confirmed.
+
+**Goal:** Let the user bulk-approve a batch of faces the ranking tool surfaces as likely matches to a chosen person, in one action — a human-confirmed batch action, NOT automatic/algorithmic clustering. This must stay fundamentally different from the DBSCAN-based approach that's repeatedly produced false-positive chaining this session — the human's judgment (looking at a ranked page and recognizing it's clearly one person) is the actual filter, not a similarity threshold applied blindly.
+
+**Requirements:**
+- When viewing Unclustered sorted by likeness to a chosen target person, confirm whether "Select This Page" already works correctly in this ranked-view context — don't assume, verify.
+- Add a clear bulk action — "Confirm & Assign Selected to [Target Person]" — using the Target field's currently-selected person as the destination, reusing the existing move-to-person logic (same as the per-face "Assign to Target Person" right-click action, just applied to the current selection in one action).
+- Unchecked/unconfirmed faces simply remain in Unclustered, available for the user to review again later — no new "rejected/denied" tracking state is needed for this first pass, keep it simple.
+- The existing >1-face confirmation dialog (Phase 3o) should apply naturally here too, showing the real count before committing — no special-casing needed, it should already compose correctly since it's a generalized gate.
+- **Separately, investigate the new 425-face cluster the user's earlier clustering attempt produced** — same real-evidence approach already used for every prior chaining incident this session (mean pairwise similarity check, visual sample). Report findings plainly; if it's another chaining case, reset it the same way the others were handled.
+
+**Explicitly out of scope:**
+- Building a new "propose batches automatically" system that runs without the user actively choosing a target person and reviewing the results first — this stays human-driven, not automated matching.
+- Any change to Phase 5 (still tabled).
