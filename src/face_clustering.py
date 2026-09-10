@@ -658,8 +658,10 @@ def merge_people(conn: sqlite3.Connection, keep_cluster_id: int, other_cluster_i
 # silently reassigned all 17,764 faces, ~17,738 of which the user had never
 # actually looked at) motivated two things: a confirmation before any bulk
 # action whose selection reaches beyond the current page (see
-# FaceLabelingWindow._confirm_if_selection_spans_pages in dashboard.py),
-# and this real "Undo Last Action" mechanism, not just better warnings.
+# FaceLabelingWindow._confirm_if_multiple_faces_affected in dashboard.py --
+# Phase 3o later generalized this to fire whenever more than one face is
+# affected at all, not just the off-page case), and this real "Undo Last
+# Action" mechanism, not just better warnings.
 # `dashboard.py`'s FaceLabelingWindow owns the actual undo STACK (session-
 # only UI state, cleared when the window closes -- not persisted, since
 # every mutation is already logged structurally via the `photo_edits`-style

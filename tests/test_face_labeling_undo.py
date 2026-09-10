@@ -1,9 +1,22 @@
 """URGENT follow-up session: "Undo Last Action" for FaceLabelingWindow's
 mutating operations (src/face_clustering.py::snapshot_faces_for_undo/
 restore_faces_from_undo/snapshot_before_merge/undo_merge), plus a source-
-presence check that dashboard.py's off-page-selection confirmation
-(_confirm_if_selection_spans_pages) is actually wired into every action
-that reassigns cluster_id/not_a_person.
+presence check that dashboard.py's affected-face-count confirmation
+(_confirm_if_multiple_faces_affected -- renamed and generalized by Phase 3o,
+see below; was _confirm_if_selection_spans_pages) is actually wired into
+every action that reassigns cluster_id/not_a_person.
+
+Phase 3o update: this method used to warn ONLY when the selection reached
+beyond the currently-rendered page. A real incident found that gap: a
+same-page multi-face selection (e.g. two faces checked earlier and
+forgotten) produced ZERO warning, so a single right-click "Mark as Not a
+Person" on just ONE of those faces -- Phase 3m Part 6's own by-design "act
+on the whole selection if the clicked face is part of it" convention --
+silently flagged BOTH with no confirmation at all. Fixed by dropping the
+off-page-only condition: it now fires whenever the actual affected count
+is more than 1, period (see dashboard.py's own docstring on the renamed
+method for the full writeup and the ad hoc repro that confirmed the exact
+mechanism before fixing it).
 
 Real trigger: a real incident where "Select All" (whole cluster, not just
 the visible page) was mistaken for a page-scoped select, and a Move
@@ -35,12 +48,14 @@ Tk() script, same precedent as every other FaceLabelingWindow session):
      adopts other's name" case) is fully reversible -- the deleted
      `other` row reappears with its real name/notes and its exact face
      set, and `keep`'s pre-merge name/notes are restored too.
-  6. dashboard.py source check: _confirm_if_selection_spans_pages is
+  6. dashboard.py source check: _confirm_if_multiple_faces_affected is
      called from _on_split/_on_move/_on_remove_from_cluster/
-     _on_mark_not_a_person/_on_unmark_not_a_person, and "Select This
-     Page"/"Select All"/"Undo Last Action" all exist as real buttons --
-     a regression guard against silently dropping the safety check in a
-     future edit.
+     _on_mark_not_a_person/_on_unmark_not_a_person, its own body no longer
+     contains the old off-page-only early return (the exact Phase 3o gap),
+     and "Select This Page"/"Select All"/"Undo Last Action" all exist as
+     real buttons -- a regression guard against silently dropping the
+     safety check (or quietly reintroducing its off-page-only blind spot)
+     in a future edit.
 
 Usage:
     venv\\Scripts\\python tests\\test_face_labeling_undo.py
@@ -290,16 +305,35 @@ def test_dashboard_wires_confirmation_and_undo_everywhere() -> None:
         ("_on_remove_from_cluster", True),
         ("_on_mark_not_a_person", True),
         ("_on_unmark_not_a_person", True),
-        ("_on_save_name", False),  # not selection-based -- no off-page risk
+        ("_on_save_name", False),  # not selection-based -- no multi-face risk
     ]:
         start = text.index(f"def {handler}(")
         end = text.index("\n    def ", start + 1)
         body = text[start:end]
         if needs_confirm:
-            assert "_confirm_if_selection_spans_pages" in body, f"{handler} is missing the off-page confirmation"
+            assert "_confirm_if_multiple_faces_affected" in body, f"{handler} is missing the affected-count confirmation"
         assert "_push_faces_undo" in body or "_push_undo" in body, f"{handler} is missing an undo-stack push"
-    print("  every selection-based action confirms off-page selections AND pushes an undo entry  OK")
-    print("  _on_save_name pushes an undo entry (no off-page confirmation needed -- not selection-based)  OK")
+    print("  every selection-based action confirms multi-face effects AND pushes an undo entry  OK")
+    print("  _on_save_name pushes an undo entry (no confirmation needed -- not selection-based)  OK")
+
+    # Phase 3o: guard against the exact regression this session fixed --
+    # the confirmation must fire based on the AFFECTED COUNT, not merely
+    # whether part of the selection is off-page. If a future edit
+    # reintroduces an early "if not off_page: return True"-style check
+    # before the total>1 check, this will catch it.
+    fn_start = text.index("def _confirm_if_multiple_faces_affected(")
+    fn_end = text.index("\n    def ", fn_start + 1)
+    fn_body = text[fn_start:fn_end]
+    assert "total <= 1" in fn_body or "total > 1" in fn_body, (
+        "_confirm_if_multiple_faces_affected no longer appears to gate on the total affected count"
+    )
+    off_page_check_pos = fn_body.find("off_page")
+    total_check_pos = fn_body.find("total <= 1")
+    assert total_check_pos != -1 and (off_page_check_pos == -1 or total_check_pos < off_page_check_pos), (
+        "the total-affected-count check must be evaluated before any off-page-only logic, "
+        "or a same-page multi-face selection could silently skip confirmation again"
+    )
+    print("  _confirm_if_multiple_faces_affected gates on total affected count, not just off-page  OK")
 
 
 def main() -> None:

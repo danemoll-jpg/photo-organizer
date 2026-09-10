@@ -3331,12 +3331,15 @@ class FaceLabelingWindow(tk.Toplevel):
     # current page -- caused a Move to silently reassign 17,764 faces, most
     # never actually looked at) motivated two safety additions: a
     # confirmation before any bulk action whose selection reaches beyond
-    # the current page (_confirm_if_selection_spans_pages), and a real,
-    # session-only "Undo Last Action" stack (self._undo_stack) capped at
-    # MAX_UNDO entries -- not persisted across window/dashboard restarts
-    # (a live mistake needs a fast, no-questions-asked reversal right now,
-    # not a durable audit trail; every mutation this window makes is a
-    # plain DB write same as always, nothing new added there).
+    # the current page, and a real, session-only "Undo Last Action" stack
+    # (self._undo_stack) capped at MAX_UNDO entries -- not persisted across
+    # window/dashboard restarts (a live mistake needs a fast, no-questions-
+    # asked reversal right now, not a durable audit trail; every mutation
+    # this window makes is a plain DB write same as always, nothing new
+    # added there). Phase 3o generalized that confirmation from "only
+    # warns about off-page faces" to "warns whenever more than one face is
+    # affected, period" -- see _confirm_if_multiple_faces_affected's own
+    # docstring for the real incident that motivated the change.
     MAX_UNDO = 20
 
     def __init__(self, master: tk.Misc, cfg: Config):
@@ -4072,9 +4075,17 @@ class FaceLabelingWindow(tk.Toplevel):
         for i, face in enumerate(page_faces):
             var = tk.BooleanVar(value=face.face_id in self._selected_face_ids)
             self._face_check_vars[face.face_id] = var
+            # Phase 3o: padx/pady=4 (there was none before) so a checked
+            # face's selectcolor actually renders as a clearly visible
+            # colored margin around the thumbnail instead of a near-
+            # invisible sliver -- a real contributing factor to how a
+            # stale/forgotten selection could go unnoticed at a glance
+            # across a busy grid (see _confirm_if_multiple_faces_affected's
+            # docstring for the actual data-correctness fix; this is a
+            # supporting improvement, not the fix itself).
             cb = tk.Checkbutton(
                 self.thumb_frame, image=placeholder, variable=var, indicatoron=False,
-                selectcolor="#8fc7ff", borderwidth=2,
+                selectcolor="#3b82f6", borderwidth=2, padx=4, pady=4,
                 command=lambda fid=face.face_id, v=var: self._on_face_toggle(fid, v),
             )
             cb.grid(row=i // self.THUMB_COLS, column=i % self.THUMB_COLS, padx=3, pady=3)
@@ -4669,19 +4680,52 @@ class FaceLabelingWindow(tk.Toplevel):
         self._refresh_left_list_after_local_edit()
 
     # -------------------------------------------------- safety + undo
-    def _confirm_if_selection_spans_pages(self, action_desc: str, face_ids: set[int] | None = None) -> bool:
+    def _confirm_if_multiple_faces_affected(self, action_desc: str, face_ids: set[int] | None = None) -> bool:
         """Returns True if the caller should proceed, False if the user
-        backed out of a warning. URGENT follow-up session, directly from a
-        real incident: the selection can include face_ids that aren't on
-        the CURRENTLY RENDERED page (most commonly because "Select All" --
-        whole cluster -- was clicked, but also possible via manually
-        checking faces across more than one page without ever clearing the
-        selection in between) -- acting on those without a beat to
-        reconsider is exactly what silently reassigned 17,764 faces,
-        ~17,738 of them never actually looked at, in the incident that
-        motivated this. The check is deliberately about what's VISIBLE
-        right now, not about which button produced the selection -- that's
-        the actual risk, regardless of how the selection came to be.
+        backed out of a warning.
+
+        URGENT follow-up session, directly from a real incident: the
+        selection can include face_ids that aren't on the CURRENTLY
+        RENDERED page (most commonly because "Select All" -- whole cluster
+        -- was clicked, but also possible via manually checking faces
+        across more than one page without ever clearing the selection in
+        between) -- acting on those without a beat to reconsider is
+        exactly what silently reassigned 17,764 faces, ~17,738 of them
+        never actually looked at, in the incident that motivated this.
+
+        Phase 3o (this method used to be called
+        _confirm_if_selection_spans_pages, and only warned in the
+        off-page case above): a SEPARATE real incident found this had a
+        real gap -- it stayed completely silent whenever every affected
+        face was on the CURRENT page, no matter how many there were.
+        Reproduced for real (see TODO.md's Phase 3o entry): check two
+        faces on the one and only page of a small cluster (e.g. leftover
+        from an earlier "Select This Page"/manual review the user forgot
+        about), then right-click just ONE of those two faces and choose
+        "Mark as Not a Person" from the context menu -- Phase 3m Part 6's
+        own by-design convention ("if the right-clicked face is already
+        selected, act on the WHOLE selection") silently marked BOTH faces,
+        with this method returning True instantly and no dialog ever
+        appearing, since neither face was off-page. That's the actual
+        mechanism behind "clicking 'not a person' on a single face
+        thumbnail sometimes marks ALL currently checkbox-selected faces"
+        -- not a stale-selection desync (self._selected_face_ids and the
+        checkbox widgets were always in sync) and not a bad target_ids
+        computation (it correctly computed the whole selection, exactly as
+        Phase 3m specified) -- the actual gap was that NOTHING warned the
+        user before acting whenever the surprising multi-face case landed
+        entirely on one page, which is the common case for a small
+        cluster or a small leftover selection.
+
+        Fixed by dropping the off-page-only condition: this now fires
+        whenever the actual affected count is more than 1, full stop,
+        regardless of whether everything is on the current page or not --
+        closing the exact gap above for every mutating action that calls
+        this (toolbar button OR right-click menu, selection-based or an
+        explicit single/multi-face target) -- while still calling out the
+        off-page count specifically when that applies, since it's useful,
+        more specific context. A genuine single-face action (count == 1)
+        is intentionally never interrupted by this.
 
         face_ids (Phase 3m Part 6): the right-click context menu's
         "Assign to Target Person"/"Remove from Cluster"/"Mark as Not a
@@ -4692,22 +4736,28 @@ class FaceLabelingWindow(tk.Toplevel):
         when omitted, so every existing toolbar-button call site is
         unaffected."""
         target = face_ids if face_ids is not None else self._selected_face_ids
+        total = len(target)
+        if total <= 1:
+            return True
         visible = set(self._face_check_vars.keys())
         off_page = target - visible
-        if not off_page:
-            return True
-        total = len(target)
-        visible_selected = total - len(off_page)
+        off_page_detail = ""
+        if off_page:
+            visible_selected = total - len(off_page)
+            off_page_detail = (
+                f"Only {visible_selected} of those are on the page you're currently looking at "
+                f"— the other {len(off_page)} are on other pages, not necessarily reviewed just now.\n\n"
+            )
         return messagebox.askyesno(
-            "Face Labeling — confirm bulk action",
+            "Face Labeling — confirm action",
             f"You're about to {action_desc}.\n\n"
-            f"That's {total} face(s) total, but only {visible_selected} are on "
-            f"the page you're currently looking at — the other {len(off_page)} "
-            f"are on other pages, not necessarily reviewed just now.\n\n"
-            f'If this isn\'t what you meant, click "No" and use "Select This '
-            f'Page" instead of "Select All." This can also be reversed '
-            f'afterward with "Undo Last Action" if needed.\n\n'
-            f"Continue with all {total} selected face(s)?",
+            f"That's {total} face(s) total.\n\n"
+            f"{off_page_detail}"
+            f'If this isn\'t what you meant, click "No" and check the "N selected" count '
+            f'(and use "Clear Selection" or "Select This Page" instead of "Select All" if needed) '
+            f'before trying again. This can also be reversed afterward with "Undo Last Action" '
+            f"if needed.\n\n"
+            f"Continue with all {total} face(s)?",
             icon="warning",
             parent=self,
         )
@@ -4888,7 +4938,7 @@ class FaceLabelingWindow(tk.Toplevel):
                 parent=self,
             )
             return
-        if not self._confirm_if_selection_spans_pages("split the selected faces into a new person"):
+        if not self._confirm_if_multiple_faces_affected("split the selected faces into a new person"):
             return
         result = self._ask_new_person_details()
         # None means Cancel -- (name_or_None, lock) means "Create Person"
@@ -4956,7 +5006,7 @@ class FaceLabelingWindow(tk.Toplevel):
             )
             return
         target_ids = set(face_ids) if explicit else self._selected_face_ids
-        if not self._confirm_if_selection_spans_pages(
+        if not self._confirm_if_multiple_faces_affected(
             "remove the selected faces from this cluster", face_ids=target_ids
         ):
             return
@@ -4997,7 +5047,7 @@ class FaceLabelingWindow(tk.Toplevel):
             return
         dest_label = self.target_field.get_text()
         target_ids = set(face_ids) if explicit else self._selected_face_ids
-        if not self._confirm_if_selection_spans_pages(
+        if not self._confirm_if_multiple_faces_affected(
             f'move the selected faces to "{dest_label}"', face_ids=target_ids
         ):
             return
@@ -5070,7 +5120,7 @@ class FaceLabelingWindow(tk.Toplevel):
             messagebox.showinfo("Face Labeling", "These faces are already marked as not a person.", parent=self)
             return
         target_ids = set(face_ids) if explicit else self._selected_face_ids
-        if not self._confirm_if_selection_spans_pages(
+        if not self._confirm_if_multiple_faces_affected(
             "mark the selected faces as not a person", face_ids=target_ids
         ):
             return
@@ -5097,7 +5147,7 @@ class FaceLabelingWindow(tk.Toplevel):
                 parent=self,
             )
             return
-        if not self._confirm_if_selection_spans_pages("un-mark the selected faces"):
+        if not self._confirm_if_multiple_faces_affected("un-mark the selected faces"):
             return
         face_ids = sorted(self._selected_face_ids)
         self._push_faces_undo(f"Un-mark {len(face_ids)} face(s)", face_ids)
