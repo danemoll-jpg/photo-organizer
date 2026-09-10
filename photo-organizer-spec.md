@@ -536,3 +536,13 @@ Context: user is spending real time paging through detections that aren't faces 
 **Explicitly out of scope:**
 - Building a new "propose batches automatically" system that runs without the user actively choosing a target person and reviewing the results first — this stays human-driven, not automated matching.
 - Any change to Phase 5 (still tabled).
+
+## Phase 3q — Mouse wheel scrolling in the face-thumbnail grid
+
+**Context:** The user wants to scroll through the face-thumbnail grid (`FaceLabelingWindow`'s cluster/ranked-view display) with the mouse wheel, rather than needing to use the scrollbar directly.
+
+**Requirements:**
+- Mouse wheel scrolling should work while the cursor is over the face-thumbnail grid area, scrolling it vertically — standard behavior, matching how scrollable areas normally work.
+- Windows-specific: Tkinter's `<MouseWheel>` event delta behaves differently across platforms — this only needs to work correctly on Windows (this project's only target platform), but implement it correctly for Windows' actual delta convention rather than assuming a value that happens to work by luck.
+- Should not interfere with or break any existing interaction in the grid (checkbox clicks, right-click context menu, double-click to view full photo, hover preview) — purely additive scrolling support.
+- Should work consistently whether the grid is showing a normal cluster view or the ranked-by-likeness view (Phase 3p) — same underlying scrollable widget either way, so this should be a single fix, not two separate ones, unless the two views turn out to use genuinely different scrollable containers (verify, don't assume).
