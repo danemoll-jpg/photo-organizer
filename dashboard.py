@@ -4179,7 +4179,22 @@ class FaceLabelingWindow(tk.Toplevel):
 
         Called by _remove_faces_from_current_view AFTER self._current_faces
         has already been filtered -- this only touches the widget grid/
-        self._page_face_ids, the DB-backed master list is handled there."""
+        self._page_face_ids, the DB-backed master list is handled there.
+
+        Phase 3n: this is the actual ROOT-CAUSE half of that fix (see
+        _show_hover_preview's own docstring for the defensive half) --
+        destroying a widget here without first cancelling any pending
+        hover-preview job/tooltip that references it is exactly the race
+        that used to leave a blank, always-on-top, unclosable window
+        behind (right-click an action on the face the mouse is currently
+        hovering, within the 350ms hover delay, and the widget vanishes
+        out from under the pending job). Cancelling unconditionally, up
+        front, is simplest and correct regardless of which face_id(s) are
+        actually being removed -- a pending hover job always targets
+        whichever face the mouse is CURRENTLY over, and if that face isn't
+        one of the ones being removed here, the user is still free to
+        re-hover it and get a fresh preview a moment later."""
+        self._cancel_hover_preview()
         removed_any = False
         for fid in face_ids:
             widget = self._face_widgets.pop(fid, None)
@@ -4246,7 +4261,24 @@ class FaceLabelingWindow(tk.Toplevel):
         require closing this popup and going to hunt for the photo's date
         some other way. FaceRecord already carries it (the underlying
         SELECT already joins `photos`, see list_faces_in_cluster/
-        list_not_a_person_faces), so this is free -- no extra query."""
+        list_not_a_person_faces), so this is free -- no extra query.
+
+        Phase 3n: a pending hover-preview job/tooltip for this SAME face
+        (see _show_hover_preview) is cancelled up front -- the widget
+        itself isn't destroyed by opening this popup, so without this a
+        stray preview could still pop up overlapping this window a moment
+        later. Also, everything from window creation through the final
+        widget pack is now wrapped in one try/except: this window is a
+        normal, non-topmost, framed Toplevel (unlike the hover tooltip),
+        so a build failure here was never able to produce the
+        stuck-on-top-of-everything symptom -- but it COULD still leave a
+        blank, title-bar-only window sitting behind if e.g. ImageTk.
+        PhotoImage() itself failed, which the task's own "must never end
+        up blank" requirement covers regardless of severity. On any
+        failure the half-built window is torn down and a real error is
+        shown instead, exactly like the pre-existing image-decode
+        failure path above."""
+        self._cancel_hover_preview()
         try:
             img = load_full_photo_with_bbox(face.current_path, face.bbox, max_size=self._popup_max_size())
         except Exception as exc:
@@ -4258,20 +4290,30 @@ class FaceLabelingWindow(tk.Toplevel):
             return
 
         win = tk.Toplevel(self)
-        win.title(Path(face.current_path).name)
-        photo = ImageTk.PhotoImage(img)
-        # Same ImageTk gotcha as self._photo_refs above -- stash a reference
-        # on the window itself so it survives for the window's own
-        # lifetime, independent of this method's local scope.
-        win._photo_ref = photo
-        ttk.Label(
-            win, text=f"Date taken: {_format_date_taken(getattr(face, 'date_taken', None))}",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(pady=(8, 2))
-        ttk.Label(win, image=photo).pack()
-        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(4, 8))
-        win.transient(self)
-        win.focus_set()
+        try:
+            win.title(Path(face.current_path).name)
+            photo = ImageTk.PhotoImage(img)
+            # Same ImageTk gotcha as self._photo_refs above -- stash a
+            # reference on the window itself so it survives for the
+            # window's own lifetime, independent of this method's local
+            # scope.
+            win._photo_ref = photo
+            ttk.Label(
+                win, text=f"Date taken: {_format_date_taken(getattr(face, 'date_taken', None))}",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(pady=(8, 2))
+            ttk.Label(win, image=photo).pack()
+            ttk.Button(win, text="Close", command=win.destroy).pack(pady=(4, 8))
+            win.transient(self)
+            win.focus_set()
+        except Exception as exc:
+            if win.winfo_exists():
+                win.destroy()
+            messagebox.showerror(
+                "Can't open photo",
+                f"Couldn't display the original photo for this face:\n{face.current_path}\n\n{exc}",
+                parent=self,
+            )
 
     def _cancel_hover_preview(self) -> None:
         if self._hover_after_id is not None:
@@ -4297,22 +4339,92 @@ class FaceLabelingWindow(tk.Toplevel):
         self._cancel_hover_preview()
 
     def _show_hover_preview(self, face, widget: tk.Widget) -> None:
+        """Phase 3n fix: this used to be able to leave a blank, orphaned,
+        always-on-top window stuck on screen -- reproduced for real (see
+        the ad hoc repro script referenced in TODO.md's Phase 3n entry)
+        before this fix, not just theorized.
+
+        Root cause: the 350ms delay between _on_face_hover_enter scheduling
+        this call and it actually firing is plenty of time for the hovered
+        face's own widget to be destroyed out from under it -- e.g. a
+        right-click "Remove from Cluster"/"Mark as Not a Person"/"Assign to
+        Target Person" (or a toolbar equivalent) on the SAME face the mouse
+        never left funnels through _remove_faces_from_rendered_page(),
+        which destroys that exact widget. The old code only guarded the
+        image-DECODE step (`load_full_photo_with_bbox`) with a try/except;
+        it created `tip` -- already overrideredirect + -topmost, i.e.
+        already an unclosable, always-on-top window the instant those two
+        lines ran -- and only assigned it to self._hover_tooltip (the one
+        thing _cancel_hover_preview() knows to clean up) on the VERY LAST
+        line. A `widget.winfo_rootx()` call against an already-destroyed
+        widget raises TclError, which Tkinter's default callback-exception
+        handling swallows (prints to stderr, keeps running) -- leaving
+        `tip` alive, visible, on top of every application, tracked
+        nowhere, destroyable only by killing this whole window (its
+        eventual Tk-hierarchy parent).
+
+        Fixed two ways, not just one, per the task's own "must never end
+        up blank" AND "must never be stuck always-on-top" requirements:
+        (1) bail out immediately, before creating any window at all, if
+        the widget is already gone -- the actual root-cause fix for THIS
+        race; (2) defensively wrap everything after `tip` is created in
+        try/except and destroy `tip` on any failure, and track it via
+        self._hover_tooltip from the moment it's created rather than the
+        moment it's fully built -- so ANY future failure mode in this same
+        shape (a different widget-access error, an image-encoding quirk)
+        can never again leave an orphaned window, even one this session's
+        own investigation didn't anticipate. See also
+        _remove_faces_from_rendered_page(), which now also calls
+        _cancel_hover_preview() up front -- the belt to this suspenders,
+        closing the race at its source so it ideally never reaches here."""
         self._hover_after_id = None
+        if not widget.winfo_exists():
+            return  # the hovered face was removed from the page before the delay elapsed
         try:
             img = load_full_photo_with_bbox(face.current_path, face.bbox, max_size=(420, 420))
         except Exception:
             return  # silent -- a hover preview failing shouldn't interrupt anything; double-click still reports the real error
 
         tip = tk.Toplevel(self)
-        tip.overrideredirect(True)  # borderless -- reads as a tooltip, not a window
-        tip.attributes("-topmost", True)
-        x = widget.winfo_rootx() + widget.winfo_width() + 8
-        y = widget.winfo_rooty()
-        tip.geometry(f"+{x}+{y}")
-        photo = ImageTk.PhotoImage(img)
-        tip._photo_ref = photo
-        tk.Label(tip, image=photo, borderwidth=2, relief="solid").pack()
-        self._hover_tooltip = tip
+        try:
+            tip.overrideredirect(True)  # borderless -- reads as a tooltip, not a window
+            tip.attributes("-topmost", True)
+            # Tracked as soon as it exists -- not after the (possibly
+            # failing) geometry/content steps below -- so a future failure
+            # here still leaves _cancel_hover_preview() able to find and
+            # destroy it, instead of leaking an untracked window.
+            self._hover_tooltip = tip
+            if not widget.winfo_exists():
+                raise tk.TclError("hovered widget was destroyed while the preview was being built")
+            x = widget.winfo_rootx() + widget.winfo_width() + 8
+            y = widget.winfo_rooty()
+            tip.geometry(f"+{x}+{y}")
+            photo = ImageTk.PhotoImage(img)
+            tip._photo_ref = photo
+            tk.Label(tip, image=photo, borderwidth=2, relief="solid").pack()
+            # A safety net independent of hover-leave/re-render/window-close
+            # ever firing correctly: this is a fleeting preview, not
+            # something meant to linger, so force it closed after a few
+            # seconds regardless -- and let a click on it dismiss it too,
+            # since an overrideredirect window has no other way to be
+            # closed directly by the user.
+            tip.bind("<Button-1>", lambda e: self._cancel_hover_preview())
+
+            def _safety_close() -> None:
+                # Guarded by identity: by the time this fires, the user may
+                # already have hovered a newer face (a normal _cancel_
+                # hover_preview()/_on_face_hover_enter() cycle has already
+                # replaced self._hover_tooltip with a different, unrelated
+                # tip) -- this must never reach in and destroy THAT one.
+                if self._hover_tooltip is tip:
+                    self._cancel_hover_preview()
+
+            tip.after(4000, _safety_close)
+        except Exception:
+            if tip.winfo_exists():
+                tip.destroy()
+            if self._hover_tooltip is tip:
+                self._hover_tooltip = None
 
     def _on_face_right_click(self, event, face) -> None:
         """Phase 3m Part 6: right-click context menu on a face thumbnail --
