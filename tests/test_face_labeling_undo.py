@@ -301,7 +301,10 @@ def test_dashboard_wires_confirmation_and_undo_everywhere() -> None:
 
     for handler, needs_confirm in [
         ("_on_split", True),
-        ("_on_move", True),
+        # Phase 3p: _on_move's own guarded-move body (confirm + undo push)
+        # was factored out into _assign_selected_to, shared with the new
+        # _on_confirm_assign_ranked -- checked directly below, not here.
+        ("_assign_selected_to", True),
         ("_on_remove_from_cluster", True),
         ("_on_mark_not_a_person", True),
         ("_on_unmark_not_a_person", True),
@@ -315,6 +318,27 @@ def test_dashboard_wires_confirmation_and_undo_everywhere() -> None:
         assert "_push_faces_undo" in body or "_push_undo" in body, f"{handler} is missing an undo-stack push"
     print("  every selection-based action confirms multi-face effects AND pushes an undo entry  OK")
     print("  _on_save_name pushes an undo entry (no confirmation needed -- not selection-based)  OK")
+
+    # Phase 3p: "Confirm & Assign Selected to [Target Person]" -- the
+    # bulk-confirm action for the "Sort faces by likeness to" ranking
+    # tool. Both _on_move (destination: target_field) and
+    # _on_confirm_assign_ranked (destination: face_sort_field) must
+    # delegate to the SAME shared _assign_selected_to body checked above,
+    # not reimplement the confirm/undo/move sequence a second time.
+    for helper in ("_on_move", "_on_confirm_assign_ranked"):
+        start = text.index(f"def {helper}(")
+        end = text.index("\n    def ", start + 1)
+        body = text[start:end]
+        assert "_assign_selected_to(" in body, (
+            f"{helper} no longer delegates to the shared _assign_selected_to body -- Phase 3p's "
+            "de-duplication regressed"
+        )
+    assert "confirm_assign_ranked_btn" in text, "the Phase 3p bulk-confirm button is missing"
+    assert '"Confirm & Assign Selected to Target Person"' in text, (
+        "the Phase 3p bulk-confirm button's default (no-target-chosen) label is missing"
+    )
+    print("  _on_move / _on_confirm_assign_ranked (Phase 3p) both delegate to the shared "
+          "_assign_selected_to body, and the bulk-confirm button exists  OK")
 
     # Phase 3o: guard against the exact regression this session fixed --
     # the confirmation must fire based on the AFFECTED COUNT, not merely

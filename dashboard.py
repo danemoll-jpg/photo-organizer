@@ -3617,6 +3617,30 @@ class FaceLabelingWindow(tk.Toplevel):
         self.face_sort_field.entry.pack(side="left", padx=(6, 0))
         self.face_sort_field.var.trace_add("write", lambda *_: self._on_face_sort_changed())
         ttk.Button(face_sort_frame, text="Clear", command=self._on_clear_face_sort).pack(side="left", padx=(4, 0))
+        # Phase 3p: the actual "bulk-confirm ranked matches" action -- the
+        # user reviews a page sorted by likeness to this same person,
+        # "Select This Page" (or hand-picks a subset), then this button
+        # assigns the whole current selection to THIS person in one shot.
+        # Deliberately resolves its destination from face_sort_field
+        # itself rather than the separate Target-person field below
+        # (action_bar2) -- in this workflow they're always the same
+        # person, and making the user re-type/re-pick that same name a
+        # second time would reintroduce exactly the tedium this button
+        # exists to remove. See _on_confirm_assign_ranked's own docstring
+        # -- everything past destination-resolution reuses the SAME
+        # guarded move path _on_move/the right-click "Assign to Target
+        # Person" action already use (_assign_selected_to), including the
+        # >1-face confirmation dialog (Phase 3o) -- this is a human
+        # reviewing a ranked list and confirming in bulk, NOT an
+        # automatic/algorithmic merge (see CLAUDE.md's Phase 3p writeup
+        # for why that distinction matters here). Disabled until a real
+        # person is actually resolved in the field above; label names the
+        # real destination so a click's effect is never ambiguous.
+        self.confirm_assign_ranked_btn = ttk.Button(
+            face_sort_frame, text="Confirm & Assign Selected to Target Person",
+            command=self._on_confirm_assign_ranked, state="disabled",
+        )
+        self.confirm_assign_ranked_btn.pack(side="left", padx=(12, 0))
 
         thumb_outer = ttk.Frame(right)
         thumb_outer.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -3974,6 +3998,25 @@ class FaceLabelingWindow(tk.Toplevel):
                 self._current_faces_base, key=lambda f: sims.get(f.face_id, -1.0), reverse=True
             )
         self._face_page = 0
+        self._update_confirm_assign_ranked_btn()
+
+    def _update_confirm_assign_ranked_btn(self) -> None:
+        """Phase 3p: keeps the "Confirm & Assign Selected to..." button's
+        label/enabled-state in sync with whatever face_sort_field currently
+        resolves to (or doesn't). Called from _apply_face_sort() -- the one
+        place already run on every path that could change what this field
+        resolves to (typing, Clear, switching clusters/buckets, or a
+        reload() refreshing the candidate list out from under an
+        already-typed name, e.g. after a merge)."""
+        dest_cid = self.face_sort_field.resolve_key()
+        if dest_cid is None:
+            self.confirm_assign_ranked_btn.configure(
+                text="Confirm & Assign Selected to Target Person", state="disabled"
+            )
+        else:
+            self.confirm_assign_ranked_btn.configure(
+                text=f'Confirm & Assign Selected to "{self.face_sort_field.get_text()}"', state="normal"
+            )
 
     def _on_face_sort_changed(self) -> None:
         """Trace callback for face_sort_field -- re-derives display order
@@ -5023,7 +5066,65 @@ class FaceLabelingWindow(tk.Toplevel):
         """face_ids (Phase 3m Part 6): see _on_remove_from_cluster's own
         docstring -- the right-click context menu's "Assign to Target
         Person" reuses this exact function, whatever's currently picked in
-        self.target_field either way."""
+        self.target_field either way. Phase 3p: the actual guarded-move
+        body is shared with _on_confirm_assign_ranked via
+        _assign_selected_to -- this method's own job is just resolving the
+        destination from self.target_field specifically."""
+        dest_cid = self.target_field.resolve_key()
+        if dest_cid is None:
+            messagebox.showinfo(
+                "Face Labeling", "Choose a target person first (type a name or pick from the dropdown).",
+                parent=self,
+            )
+            return
+        self._assign_selected_to(dest_cid, self.target_field.get_text(), face_ids=face_ids)
+
+    def _on_confirm_assign_ranked(self) -> None:
+        """Phase 3p: the bulk-confirm action for the "Sort faces by
+        likeness to" ranking tool (face_sort_field, above). The workflow
+        this exists for: the user picks a person there, the currently-open
+        group (most usefully "(Unclustered)") re-sorts by descending
+        similarity to them, the user reviews a page and recognizes it's
+        plainly that person -- a human looking at a ranked list, not a
+        similarity threshold applied blindly -- selects it (e.g. via
+        "Select This Page"), and confirms the whole selection at once
+        instead of moving each face individually. This is deliberately
+        NOT automatic/algorithmic clustering (re-running cluster-faces
+        can't do this at all -- DBSCAN needs faces mutually close to EACH
+        OTHER, not just individually close to one reference target, which
+        is exactly why a wide, non-contiguous similarity range like
+        "different ages/lighting of the same person" never chains
+        together on its own; see CLAUDE.md's Phase 3p writeup).
+
+        Resolves its destination from face_sort_field itself, not the
+        separate target_field _on_move uses -- in this workflow they're
+        always the same person, and everything past destination
+        resolution is the exact same guarded path _on_move already uses
+        (_assign_selected_to), including the >1-face confirmation dialog
+        (Phase 3o), which composes here for free since it's fully
+        generalized."""
+        dest_cid = self.face_sort_field.resolve_key()
+        if dest_cid is None:
+            messagebox.showinfo(
+                "Face Labeling",
+                'Choose a person in "Sort faces by likeness to" first -- that\'s who the selected faces '
+                "get assigned to.",
+                parent=self,
+            )
+            return
+        self._assign_selected_to(dest_cid, self.face_sort_field.get_text())
+
+    def _assign_selected_to(self, dest_cid: int, dest_label: str, face_ids: list[int] | None = None) -> None:
+        """Shared guarded-move body for _on_move (destination: target_field)
+        and _on_confirm_assign_ranked (destination: face_sort_field) --
+        the actual "move selected faces to a person" mechanics (guards,
+        the >1-face confirmation, undo, the DB write, and the view
+        refresh) are identical regardless of which field supplied the
+        destination, so this is the one place that does it -- not a
+        second parallel implementation. face_ids (Phase 3m Part 6): the
+        right-click context menu's "Assign to Target Person" also reaches
+        this, via _on_move, with an EXPLICIT target set rather than
+        reading self._selected_face_ids directly."""
         explicit = face_ids is not None
         if not explicit and not self._selected_face_ids:
             messagebox.showinfo(
@@ -5038,14 +5139,6 @@ class FaceLabelingWindow(tk.Toplevel):
                 parent=self,
             )
             return
-        dest_cid = self.target_field.resolve_key()
-        if dest_cid is None:
-            messagebox.showinfo(
-                "Face Labeling", "Choose a target person first (type a name or pick from the dropdown).",
-                parent=self,
-            )
-            return
-        dest_label = self.target_field.get_text()
         target_ids = set(face_ids) if explicit else self._selected_face_ids
         if not self._confirm_if_multiple_faces_affected(
             f'move the selected faces to "{dest_label}"', face_ids=target_ids
