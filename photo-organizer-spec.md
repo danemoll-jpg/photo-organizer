@@ -496,3 +496,13 @@ Context: user is spending real time paging through detections that aren't faces 
 
 **Explicitly out of scope:**
 - Any change to Phase 3l's own scope — this is bundled into the same session purely for efficiency (same file), not a redesign of anything Phase 3l is doing.
+
+## Phase 3n — URGENT: full-photo popup becomes a stuck, blank, always-on-top window
+
+**Context:** Real, reproduced-twice bug in Phase 3j's double-click "view full source photo" feature. After double-clicking a face thumbnail, a blank GRAY window sometimes appears that renders no image content at all, and stays on top of EVERY other application on the machine (not just the dashboard/labeling window) — confirmed by the user via a screenshot showing it floating over an unrelated browser tab. It does not go away on its own and does not appear closable directly — the only way to get rid of it is to close the entire `FaceLabelingWindow`.
+
+**Requirements:**
+- **Investigate and reproduce for real before fixing** — this doesn't happen every time ("seen it happen twice"), suggesting a race condition or intermittent failure in the image-loading path, not a deterministic bug. Check: does the popup Toplevel get created with `-topmost` set, and if so, is that ever properly cleared/reset? Does the image-loading (PIL/ImageTk) sometimes fail or hang, leaving a blank Toplevel that was already shown/topmost before its content populated? Is the popup missing a proper window frame/close button, explaining why it can't be dismissed directly?
+- **Fix must address both symptoms**: the popup should never be able to end up blank (either it shows the real content, or it fails visibly/gracefully with an error rather than an empty gray box), and it must never be stuck always-on-top independent of the user's actual window focus — closable on its own, not just by killing its parent window.
+- Given this touches the exact same popup Phase 3m's Part 4 (add date) and Part 5 (dialog parenting) are already modifying, fix this as part of the same pass over that code, not as an unrelated afterthought.
+- **This is the highest-priority item in this session** — genuinely disruptive (blocks other applications, not just this tool) and should be fixed before the other, less urgent Phase 3l/3m items if there's any real tradeoff in ordering.
