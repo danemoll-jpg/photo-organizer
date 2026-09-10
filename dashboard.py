@@ -2046,7 +2046,13 @@ class DashboardApp:
             )
             self.msg_queue.put(("cluster_log_started", log_path))
             init_db(cfg.db_path_abs, logger=logger)  # rule 12
-            logger.info("Starting Phase 3 Session 2 (face clustering) run from dashboard")
+            logger.info(
+                "Starting Phase 3 Session 2 (face clustering) run from dashboard — "
+                f"similarity_threshold={cfg.face_cluster_similarity_threshold} "
+                f"min_samples={cfg.face_cluster_min_samples} min_det_score={cfg.face_min_det_score} "
+                f"match_existing_threshold={cfg.face_match_existing_threshold} "
+                f"min_cluster_size_for_matching={cfg.face_min_cluster_size_for_matching}"
+            )
 
             conn = connect(cfg.db_path_abs)
             try:
@@ -3267,6 +3273,17 @@ class SuggestField:
         self.entry.select_range(0, "end")
 
 
+def _format_date_taken(date_taken: str | None) -> str:
+    """Phase 3m Part 4: a friendlier rendering of FaceRecord.date_taken
+    (ISO 8601 TEXT, e.g. "2020-06-08T14:32:10") for FaceLabelingWindow's
+    full-photo popup -- just swaps the 'T' separator for a space; a photo
+    with no resolvable date (schema.sql allows date_taken to be NULL) says
+    so plainly rather than showing an empty/blank line."""
+    if not date_taken:
+        return "Unknown"
+    return date_taken.replace("T", " ")
+
+
 class FaceLabelingWindow(tk.Toplevel):
     """Phase 3 Session 2's interactive labeling UI (photo-organizer-spec.md's
     Phase 3 section, user's explicit choice to live here rather than in
@@ -3450,6 +3467,12 @@ class FaceLabelingWindow(tk.Toplevel):
         self.min_size_var = tk.StringVar(value="3")
         self.min_size_var.trace_add("write", lambda *_: self._rebuild_display_list())
         self.hide_named_var = tk.BooleanVar(value=False)
+        # Phase 3m Part 7: the inverse of hide_named_var -- shows only
+        # already-named people, for reviewing/managing people already
+        # labeled without scrolling past everything still unnamed. Both
+        # coexist as fully independent options (see _rebuild_display_list),
+        # same as the spec's own explicit requirement.
+        self.hide_unnamed_var = tk.BooleanVar(value=False)
         self.show_not_a_person_var = tk.BooleanVar(value=False)
 
         self._build_ui()
@@ -3481,6 +3504,11 @@ class FaceLabelingWindow(tk.Toplevel):
             filter_frame, text="Hide already-named people",
             variable=self.hide_named_var, command=self._rebuild_display_list,
         ).pack(anchor="w", pady=(2, 0))
+        # Phase 3m Part 7.
+        ttk.Checkbutton(
+            filter_frame, text="Hide unnamed clusters",
+            variable=self.hide_unnamed_var, command=self._rebuild_display_list,
+        ).pack(anchor="w")
         ttk.Checkbutton(
             filter_frame, text="Show marked-as-not-a-person",
             variable=self.show_not_a_person_var, command=self._rebuild_display_list,
@@ -3716,10 +3744,11 @@ class FaceLabelingWindow(tk.Toplevel):
         return self._display_key_for(kind, payload)
 
     def _rebuild_display_list(self, prev_key=None, reload_current_page: bool = True) -> None:
-        """Phase 3c: rebuilds self._display from self._clusters/
-        self._not_a_person_count (already in memory -- no DB query here)
-        applying the min-size and hide-already-named filters, plus the
-        optional trailing "(Marked as not a person)" entry. Purely a
+        """Phase 3c (+ Phase 3m Part 7): rebuilds self._display from
+        self._clusters/self._not_a_person_count (already in memory -- no DB
+        query here) applying the min-size, hide-already-named, and (Phase
+        3m) hide-unnamed filters -- fully independent of each other, plus
+        the optional trailing "(Marked as not a person)" entry. Purely a
         display-layer operation: never changes clustering, cluster_id
         assignment, or which faces belong to which person -- see the spec's
         own explicit requirement on this.
@@ -3777,6 +3806,7 @@ class FaceLabelingWindow(tk.Toplevel):
         except (ValueError, tk.TclError):
             min_size = 0  # mid-edit/blank entry -- show everything rather than erroring
         hide_named = self.hide_named_var.get()
+        hide_unnamed = self.hide_unnamed_var.get()  # Phase 3m Part 7
 
         rank_target_cid = self.rank_field.resolve_key()
         similarities: dict[int, float] = {}
@@ -3801,6 +3831,8 @@ class FaceLabelingWindow(tk.Toplevel):
                 display.append(("cluster", c))
                 continue
             if hide_named and c.assigned_name:
+                continue
+            if hide_unnamed and not c.assigned_name:  # Phase 3m Part 7
                 continue
             if c.face_count < min_size:
                 continue
@@ -4057,6 +4089,9 @@ class FaceLabelingWindow(tk.Toplevel):
             cb.bind("<Double-Button-1>", lambda e, f=face: self._on_face_double_click(f))
             cb.bind("<Enter>", lambda e, f=face, w=cb: self._on_face_hover_enter(f, w))
             cb.bind("<Leave>", lambda e: self._on_face_hover_leave())
+            # Phase 3m Part 6: right-click context menu (Windows convention
+            # -- Button-3) with the three quick actions.
+            cb.bind("<Button-3>", lambda e, f=face: self._on_face_right_click(e, f))
             self._face_widgets[face.face_id] = cb
             self._page_face_ids.append(face.face_id)
 
@@ -4203,7 +4238,15 @@ class FaceLabelingWindow(tk.Toplevel):
         crop_face_thumbnail's own PIL loading approach via
         src.face_clustering.load_full_photo_with_bbox (no second
         image-loading path); purely a viewing aid, nothing here writes to
-        the DB or the file."""
+        the DB or the file.
+
+        Phase 3m Part 4: also shows the photo's date_taken -- another real
+        identifying clue (e.g. "this must be from summer 2019, so it's
+        probably not the same kid as that other cluster") that used to
+        require closing this popup and going to hunt for the photo's date
+        some other way. FaceRecord already carries it (the underlying
+        SELECT already joins `photos`, see list_faces_in_cluster/
+        list_not_a_person_faces), so this is free -- no extra query."""
         try:
             img = load_full_photo_with_bbox(face.current_path, face.bbox, max_size=self._popup_max_size())
         except Exception as exc:
@@ -4221,6 +4264,10 @@ class FaceLabelingWindow(tk.Toplevel):
         # on the window itself so it survives for the window's own
         # lifetime, independent of this method's local scope.
         win._photo_ref = photo
+        ttk.Label(
+            win, text=f"Date taken: {_format_date_taken(getattr(face, 'date_taken', None))}",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(pady=(8, 2))
         ttk.Label(win, image=photo).pack()
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=(4, 8))
         win.transient(self)
@@ -4266,6 +4313,59 @@ class FaceLabelingWindow(tk.Toplevel):
         tip._photo_ref = photo
         tk.Label(tip, image=photo, borderwidth=2, relief="solid").pack()
         self._hover_tooltip = tip
+
+    def _on_face_right_click(self, event, face) -> None:
+        """Phase 3m Part 6: right-click context menu on a face thumbnail --
+        three actions, each reusing the EXACT SAME handler/business logic
+        the toolbar buttons already use (Remove from Cluster: Phase 3f;
+        Mark as Not a Person: Phase 3c; Assign to Target Person: the
+        existing Move logic, whatever's currently picked in the
+        Target-person field) -- no new mutation logic here, just a second,
+        faster way to reach the same three actions.
+
+        Scope is unambiguous by construction, not left for the user to
+        guess (per the spec's own explicit requirement): if the
+        right-clicked face is already part of the current checkbox
+        selection, the WHOLE selection is acted on (the standard
+        right-click convention -- e.g. a file manager); otherwise ONLY the
+        right-clicked face is, regardless of whatever else happens to be
+        checked elsewhere. The menu's own (disabled) header line always
+        states which applies before any action is chosen."""
+        if self._current_view == "not_a_person":
+            # All three actions already refuse to act on this bucket
+            # (Un-mark is the toolbar-only action for it) -- skip showing a
+            # menu of guaranteed-refused actions entirely.
+            return
+        if face.face_id in self._selected_face_ids:
+            target_ids = set(self._selected_face_ids)
+            scope_text = (
+                f"Apply to: {len(target_ids)} selected face(s)" if len(target_ids) > 1
+                else "Apply to: this face (currently selected)"
+            )
+        else:
+            target_ids = {face.face_id}
+            scope_text = "Apply to: this face only (not currently selected)"
+
+        target_label = self.target_field.get_text().strip() or "(no target person chosen)"
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label=scope_text, state="disabled")
+        menu.add_separator()
+        menu.add_command(
+            label="Remove from Cluster",
+            command=lambda: self._on_remove_from_cluster(face_ids=sorted(target_ids)),
+        )
+        menu.add_command(
+            label="Mark as Not a Person",
+            command=lambda: self._on_mark_not_a_person(face_ids=sorted(target_ids)),
+        )
+        menu.add_command(
+            label=f'Assign to Target Person ("{target_label}")',
+            command=lambda: self._on_move(face_ids=sorted(target_ids)),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _on_prev_page(self) -> None:
         if self._face_page > 0:
@@ -4457,7 +4557,7 @@ class FaceLabelingWindow(tk.Toplevel):
         self._refresh_left_list_after_local_edit()
 
     # -------------------------------------------------- safety + undo
-    def _confirm_if_selection_spans_pages(self, action_desc: str) -> bool:
+    def _confirm_if_selection_spans_pages(self, action_desc: str, face_ids: set[int] | None = None) -> bool:
         """Returns True if the caller should proceed, False if the user
         backed out of a warning. URGENT follow-up session, directly from a
         real incident: the selection can include face_ids that aren't on
@@ -4469,12 +4569,22 @@ class FaceLabelingWindow(tk.Toplevel):
         ~17,738 of them never actually looked at, in the incident that
         motivated this. The check is deliberately about what's VISIBLE
         right now, not about which button produced the selection -- that's
-        the actual risk, regardless of how the selection came to be."""
+        the actual risk, regardless of how the selection came to be.
+
+        face_ids (Phase 3m Part 6): the right-click context menu's
+        "Assign to Target Person"/"Remove from Cluster"/"Mark as Not a
+        Person" reuse these same handlers with an EXPLICIT target set
+        (either the current checkbox selection, or just the one
+        right-clicked face) rather than always reading self.
+        _selected_face_ids directly -- defaults to self._selected_face_ids
+        when omitted, so every existing toolbar-button call site is
+        unaffected."""
+        target = face_ids if face_ids is not None else self._selected_face_ids
         visible = set(self._face_check_vars.keys())
-        off_page = self._selected_face_ids - visible
+        off_page = target - visible
         if not off_page:
             return True
-        total = len(self._selected_face_ids)
+        total = len(target)
         visible_selected = total - len(off_page)
         return messagebox.askyesno(
             "Face Labeling — confirm bulk action",
@@ -4487,6 +4597,7 @@ class FaceLabelingWindow(tk.Toplevel):
             f'afterward with "Undo Last Action" if needed.\n\n'
             f"Continue with all {total} selected face(s)?",
             icon="warning",
+            parent=self,
         )
 
     def _push_faces_undo(self, label: str, face_ids: list[int]) -> None:
@@ -4536,7 +4647,7 @@ class FaceLabelingWindow(tk.Toplevel):
         elif kind == "name":
             set_person_name(self.conn, entry["cluster_id"], entry["old_name"], entry["old_notes"])
         self._refresh_undo_button()
-        messagebox.showinfo("Face Labeling", f"Undid: {entry['label']}")
+        messagebox.showinfo("Face Labeling", f"Undid: {entry['label']}", parent=self)
         self.reload()
 
     def _on_save_name(self) -> None:
@@ -4546,6 +4657,7 @@ class FaceLabelingWindow(tk.Toplevel):
                 'Can\'t name the "(Marked as not a person)" bucket -- these are flagged false-positive '
                 'detections, not a person. Select some and click "Un-mark Selected" if they were flagged '
                 'by mistake.',
+                parent=self,
             )
             return
         summary = self._current_summary()
@@ -4556,6 +4668,7 @@ class FaceLabelingWindow(tk.Toplevel):
                 "Face Labeling",
                 'Can\'t name the "(Unclustered)" group directly -- select some of its faces and use '
                 '"Split Selected Into New Person..." to create a real, nameable person first.',
+                parent=self,
             )
             return
         name = self.name_var.get().strip() or None
@@ -4574,37 +4687,125 @@ class FaceLabelingWindow(tk.Toplevel):
         # cluster before naming it.
         self._refresh_left_list_after_local_edit()
 
+    def _ask_new_person_details(self) -> tuple[str | None, bool] | None:
+        """Phase 3l Part 2: a single combined dialog for "Split Selected
+        Into New Person..." -- replaces the old bare simpledialog.askstring
+        (name only). Real incident this closes: creating "Luna" (a 2-photo
+        pet) via the old flow, the user had no way to lock her against
+        automatic matching AS PART OF creating her -- only afterward, via
+        the separate header checkbox, by which point a `cluster-faces` run
+        had already matched 1,947 more faces to her weak, 2-face centroid
+        (see Part 3's systemic size-gate fix below/in src/face_clustering.py
+        for the OTHER half of this fix -- this dialog closes the race for
+        anyone who actually wants a NEW person locked immediately,
+        regardless of whether they'd cross the size gate quickly or not;
+        the gate is the safety net that doesn't depend on remembering to
+        check this box).
+
+        Returns (name_or_None, lock) on "Create Person", or None on
+        Cancel/closing the dialog -- exactly like simpledialog.askstring's
+        own None-on-cancel convention, so _on_split's own "if name is
+        None: return" pattern (now "if result is None: return") reads the
+        same way.
+
+        Modal (grab_set) and explicitly parented to `self` (this
+        FaceLabelingWindow), per Phase 3m Part 5 -- a dialog spawned from
+        this window must stay associated with it, not fall back to the
+        main Dashboard window."""
+        dlg = tk.Toplevel(self)
+        dlg.title("New Person")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        result: dict = {"value": None}
+
+        ttk.Label(dlg, text="Name for the new person (optional -- you can name it later):").pack(
+            anchor="w", padx=10, pady=(10, 2)
+        )
+        name_var = tk.StringVar()
+        entry = ttk.Entry(dlg, textvariable=name_var, width=40)
+        entry.pack(padx=10, pady=(0, 8), fill="x")
+
+        lock_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            dlg,
+            text='Lock automatic matching for this person right away\n'
+            '(same as the "Lock automatic matching" checkbox above -- recommended for a '
+            "small/uncertain group, e.g. a pet, that you never want future clustering runs to "
+            "grow on their own)",
+            variable=lock_var,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(pady=(0, 10))
+
+        def _ok(event=None) -> None:
+            result["value"] = (name_var.get().strip() or None, lock_var.get())
+            dlg.destroy()
+
+        def _cancel(event=None) -> None:
+            result["value"] = None
+            dlg.destroy()
+
+        ttk.Button(btn_row, text="Create Person", command=_ok).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side="left", padx=4)
+        dlg.bind("<Return>", _ok)
+        dlg.bind("<Escape>", _cancel)
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
+        entry.focus_set()
+        # grab_set AFTER the window has real content/geometry, same
+        # ordering every other modal-ish popup in this class already uses
+        # (see _show_hover_preview/SuggestField._show for the analogous
+        # "position/fill before showing" pattern) -- avoids grabbing input
+        # before the dialog is actually visible on some window managers.
+        dlg.grab_set()
+        dlg.wait_window()
+        return result["value"]
+
     def _on_split(self) -> None:
         if not self._selected_face_ids:
-            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            messagebox.showinfo(
+                "Face Labeling", "Select one or more faces first (click their thumbnails).", parent=self
+            )
             return
         if self._current_view == "not_a_person":
             messagebox.showerror(
                 "Face Labeling",
                 'These faces are flagged as not a person. Click "Un-mark Selected" first, then split/move '
                 "them normally.",
+                parent=self,
             )
             return
         if not self._confirm_if_selection_spans_pages("split the selected faces into a new person"):
             return
-        from tkinter import simpledialog
-        name = simpledialog.askstring(
-            "New Person", "Name for the new person (optional -- you can name it later):", parent=self
-        )
-        # askstring returns None on Cancel -- an empty string (user cleared
-        # the field but clicked OK) is a valid "leave unnamed for now".
-        if name is None:
+        result = self._ask_new_person_details()
+        # None means Cancel -- (name_or_None, lock) means "Create Person"
+        # was clicked, matching simpledialog.askstring's own None-on-cancel
+        # convention this replaces.
+        if result is None:
             return
+        name, lock = result
         face_ids = sorted(self._selected_face_ids)
         self._push_faces_undo(f"Split {len(face_ids)} face(s) into a new person", face_ids)
-        new_cid = create_person_from_faces(self.conn, face_ids, name=(name.strip() or None))
+        new_cid = create_person_from_faces(self.conn, face_ids, name=name)
+        # Phase 3l Part 2: locking happens HERE, immediately, as part of
+        # this same action -- before showing any dialog or returning
+        # control to the user, so there's no window at all in which a
+        # separately-triggered clustering run could match against this
+        # brand-new centroid before the lock takes effect (on top of, not
+        # instead of, Part 3's systemic minimum-size gate below).
+        if lock:
+            set_person_auto_match_locked(self.conn, new_cid, True)
+        lock_note = " (locked against automatic matching)" if lock else ""
         messagebox.showinfo(
-            "Face Labeling", f"Created a new person (cluster {new_cid}) with {len(face_ids)} face(s)."
+            "Face Labeling",
+            f"Created a new person (cluster {new_cid}) with {len(face_ids)} face(s){lock_note}.",
+            parent=self,
         )
         self._remove_faces_from_current_view(set(face_ids))
 
-    def _on_remove_from_cluster(self) -> None:
-        """Phase 3f: "half of Split" -- sends the selected faces back to
+    def _on_remove_from_cluster(self, face_ids: list[int] | None = None) -> None:
+        """Phase 3f: "half of Split" -- sends the given faces back to
         "(Unclustered)" WITHOUT creating a new person, unlike _on_split
         above. The right tool for a handful of miscellaneous outliers
         wrongly grouped into an otherwise-correct cluster (real example: a
@@ -4614,61 +4815,91 @@ class FaceLabelingWindow(tk.Toplevel):
         and selecting the hundreds of CORRECT faces to Move instead would
         be far more clicking than selecting the few wrong ones. Does NOT
         touch not_a_person -- these are still real, valid faces, just
-        wrongly grouped (not Phase 3c's false-positive case)."""
-        if not self._selected_face_ids:
-            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
-            return
+        wrongly grouped (not Phase 3c's false-positive case).
+
+        face_ids (Phase 3m Part 6): when given explicitly (the right-click
+        context menu), acts on exactly that set instead of the toolbar
+        button's self._selected_face_ids -- same underlying function
+        either way, no duplicated logic."""
+        explicit = face_ids is not None
+        if not explicit:
+            if not self._selected_face_ids:
+                messagebox.showinfo(
+                    "Face Labeling", "Select one or more faces first (click their thumbnails).", parent=self
+                )
+                return
         if self._current_view == "not_a_person":
             messagebox.showerror(
                 "Face Labeling",
                 'These faces are flagged as not a person. Click "Un-mark Selected" first, then split/move '
                 "them normally.",
+                parent=self,
             )
             return
         summary = self._current_summary()
         if summary is not None and summary.cluster_id is None:
             messagebox.showinfo(
-                "Face Labeling", 'These faces are already in "(Unclustered)" -- nothing to remove them from.'
+                "Face Labeling", 'These faces are already in "(Unclustered)" -- nothing to remove them from.',
+                parent=self,
             )
             return
-        if not self._confirm_if_selection_spans_pages("remove the selected faces from this cluster"):
+        target_ids = set(face_ids) if explicit else self._selected_face_ids
+        if not self._confirm_if_selection_spans_pages(
+            "remove the selected faces from this cluster", face_ids=target_ids
+        ):
             return
-        face_ids = sorted(self._selected_face_ids)
-        self._push_faces_undo(f'Remove {len(face_ids)} face(s) from this cluster', face_ids)
-        remove_faces_from_cluster(self.conn, face_ids)
+        ids = sorted(target_ids)
+        self._push_faces_undo(f'Remove {len(ids)} face(s) from this cluster', ids)
+        remove_faces_from_cluster(self.conn, ids)
         messagebox.showinfo(
-            "Face Labeling", f'Removed {len(face_ids)} face(s) from this cluster -- sent back to "(Unclustered)".'
+            "Face Labeling", f'Removed {len(ids)} face(s) from this cluster -- sent back to "(Unclustered)".',
+            parent=self,
         )
-        self._remove_faces_from_current_view(set(face_ids))
+        self._remove_faces_from_current_view(set(ids))
 
-    def _on_move(self) -> None:
-        if not self._selected_face_ids:
-            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+    def _on_move(self, face_ids: list[int] | None = None) -> None:
+        """face_ids (Phase 3m Part 6): see _on_remove_from_cluster's own
+        docstring -- the right-click context menu's "Assign to Target
+        Person" reuses this exact function, whatever's currently picked in
+        self.target_field either way."""
+        explicit = face_ids is not None
+        if not explicit and not self._selected_face_ids:
+            messagebox.showinfo(
+                "Face Labeling", "Select one or more faces first (click their thumbnails).", parent=self
+            )
             return
         if self._current_view == "not_a_person":
             messagebox.showerror(
                 "Face Labeling",
                 'These faces are flagged as not a person. Click "Un-mark Selected" first, then split/move '
                 "them normally.",
+                parent=self,
             )
             return
         dest_cid = self.target_field.resolve_key()
         if dest_cid is None:
-            messagebox.showinfo("Face Labeling", "Choose a target person first (type a name or pick from the dropdown).")
+            messagebox.showinfo(
+                "Face Labeling", "Choose a target person first (type a name or pick from the dropdown).",
+                parent=self,
+            )
             return
         dest_label = self.target_field.get_text()
-        if not self._confirm_if_selection_spans_pages(f'move the selected faces to "{dest_label}"'):
+        target_ids = set(face_ids) if explicit else self._selected_face_ids
+        if not self._confirm_if_selection_spans_pages(
+            f'move the selected faces to "{dest_label}"', face_ids=target_ids
+        ):
             return
-        face_ids = sorted(self._selected_face_ids)
-        self._push_faces_undo(f'Move {len(face_ids)} face(s) to "{dest_label}"', face_ids)
-        move_faces_to_person(self.conn, face_ids, dest_cid)
-        self._remove_faces_from_current_view(set(face_ids))
+        ids = sorted(target_ids)
+        self._push_faces_undo(f'Move {len(ids)} face(s) to "{dest_label}"', ids)
+        move_faces_to_person(self.conn, ids, dest_cid)
+        self._remove_faces_from_current_view(set(ids))
 
     def _on_merge(self) -> None:
         if self._current_view == "not_a_person":
             messagebox.showerror(
                 "Face Labeling",
                 'Can\'t merge the "(Marked as not a person)" bucket -- these aren\'t a person.',
+                parent=self,
             )
             return
         summary = self._current_summary()
@@ -4679,11 +4910,15 @@ class FaceLabelingWindow(tk.Toplevel):
                 "Face Labeling",
                 'Can\'t merge the "(Unclustered)" group as a whole -- select individual faces and use '
                 '"Move Selected Faces Here" instead.',
+                parent=self,
             )
             return
         target_cid = self.target_field.resolve_key()
         if target_cid is None:
-            messagebox.showinfo("Face Labeling", "Choose a target person first (type a name or pick from the dropdown).")
+            messagebox.showinfo(
+                "Face Labeling", "Choose a target person first (type a name or pick from the dropdown).",
+                parent=self,
+            )
             return
         target_label = self.target_field.get_text()
         if not messagebox.askyesno(
@@ -4691,6 +4926,7 @@ class FaceLabelingWindow(tk.Toplevel):
             f"Merge this whole group ({summary.face_count} face(s)) into the selected person?\n\n"
             "Every face currently in this group moves to the target person, and this group's own "
             'entry is removed. This can be reversed afterward with "Undo Last Action" if needed.',
+            parent=self,
         ):
             return
         snapshot = snapshot_before_merge(self.conn, keep_cluster_id=target_cid, other_cluster_id=summary.cluster_id)
@@ -4702,24 +4938,34 @@ class FaceLabelingWindow(tk.Toplevel):
         merge_people(self.conn, keep_cluster_id=target_cid, other_cluster_id=summary.cluster_id)
         self.reload()
 
-    def _on_mark_not_a_person(self) -> None:
-        """Phase 3c: flags the selected faces as confirmed false-positive
+    def _on_mark_not_a_person(self, face_ids: list[int] | None = None) -> None:
+        """Phase 3c: flags the given faces as confirmed false-positive
         detections (a pattern/object/pet misdetected as a face) -- reversible
         via _on_unmark_not_a_person below, never a delete. Pulls each face
         out of its current cluster (mark_faces_not_a_person's own job) and
-        excludes it from every future `cluster-faces` run."""
-        if not self._selected_face_ids:
-            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+        excludes it from every future `cluster-faces` run.
+
+        face_ids (Phase 3m Part 6): see _on_remove_from_cluster's own
+        docstring -- the right-click context menu's "Mark as Not a Person"
+        reuses this exact function."""
+        explicit = face_ids is not None
+        if not explicit and not self._selected_face_ids:
+            messagebox.showinfo(
+                "Face Labeling", "Select one or more faces first (click their thumbnails).", parent=self
+            )
             return
         if self._current_view == "not_a_person":
-            messagebox.showinfo("Face Labeling", "These faces are already marked as not a person.")
+            messagebox.showinfo("Face Labeling", "These faces are already marked as not a person.", parent=self)
             return
-        if not self._confirm_if_selection_spans_pages("mark the selected faces as not a person"):
+        target_ids = set(face_ids) if explicit else self._selected_face_ids
+        if not self._confirm_if_selection_spans_pages(
+            "mark the selected faces as not a person", face_ids=target_ids
+        ):
             return
-        face_ids = sorted(self._selected_face_ids)
-        self._push_faces_undo(f"Mark {len(face_ids)} face(s) as not a person", face_ids)
-        mark_faces_not_a_person(self.conn, face_ids)
-        self._remove_faces_from_current_view(set(face_ids))
+        ids = sorted(target_ids)
+        self._push_faces_undo(f"Mark {len(ids)} face(s) as not a person", ids)
+        mark_faces_not_a_person(self.conn, ids)
+        self._remove_faces_from_current_view(set(ids))
 
     def _on_unmark_not_a_person(self) -> None:
         """Reverses a "Mark as Not a Person" flag. Only meaningful while
@@ -4727,13 +4973,16 @@ class FaceLabelingWindow(tk.Toplevel):
         silently no-op'd elsewhere, since a user clicking this from a normal
         cluster view most likely meant "Mark", not "Un-mark"."""
         if not self._selected_face_ids:
-            messagebox.showinfo("Face Labeling", "Select one or more faces first (click their thumbnails).")
+            messagebox.showinfo(
+                "Face Labeling", "Select one or more faces first (click their thumbnails).", parent=self
+            )
             return
         if self._current_view != "not_a_person":
             messagebox.showinfo(
                 "Face Labeling",
                 'Switch to the "(Marked as not a person)" view (check "Show marked-as-not-a-person" on '
                 "the left) to un-mark faces.",
+                parent=self,
             )
             return
         if not self._confirm_if_selection_spans_pages("un-mark the selected faces"):

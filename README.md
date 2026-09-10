@@ -654,7 +654,11 @@ by default — a separate, optionally more lenient threshold used ONLY for
 matching a new face against an EXISTING, already-named person; DBSCAN's
 new-cluster formation always keeps using `face_cluster_similarity_threshold`
 unchanged, so lowering this can't reintroduce the chaining risk described
-below — see the next follow-up entry for why this exists).
+below — see the next follow-up entry for why this exists), and
+`face_min_cluster_size_for_matching` (default `6` — a person needs at least
+this many faces before automatic matching will target them at all,
+independent of the "Lock automatic matching" checkbox — see "Phase 3l"
+below).
 
 **Follow-up session, direct user feedback ("it should recognize us better
 — it's identified us plenty of times"): `face_match_existing_threshold`
@@ -826,6 +830,58 @@ pre-existing production-shaped DB.
 **Explicitly not built this session** (see TODO.md): any face/people data
 surfaced in `review_tool.py` — Phase 2c's people/faces filter placeholder
 stays inert until a future session wires it up to this real data.
+
+### Phase 3l — a systemic safeguard against new/tiny people becoming false-positive magnets
+
+Three real incidents ("Joeanne Sanders" at 1 face, an unnamed cluster at 5,
+a new pet person ("Luna") at 2) all showed the same pattern: a brand-new
+person's centroid is built from very few faces, and once
+`face_match_existing_threshold` makes matching against an EXISTING person
+lenient, that weak centroid becomes a magnet for unrelated faces the moment
+a `cluster-faces` run touches it — sometimes before anyone has a chance to
+lock it by hand.
+
+- **`Config.face_min_cluster_size_for_matching`** (default `6`, `config.yaml`)
+  — a person needs at least this many faces before they're even ELIGIBLE to
+  be an automatic-matching TARGET during `cluster-faces`, regardless of
+  whether they're locked. This is independent of, and additive to, the
+  existing **"Lock automatic matching"** checkbox in the Face Labeling
+  window's header (`people.auto_match_locked`) — that's still a manual,
+  permanent per-person override (e.g. for a pet that will never
+  legitimately need more automatic matches even once it grows past this
+  floor); the size gate is the systemic safeguard that doesn't depend on
+  anyone remembering to check a box. Checked against this library's real
+  data before picking 6: of 150 real named people, only 5 sat at
+  `face_count <= 5` at the time, so the gate is narrow and evidence-backed,
+  not a guess (see `src/config.py`'s own field comment for the full
+  numbers). Doesn't affect manual assignment (Move/Merge Selected Faces
+  Here) at all, and doesn't retroactively re-evaluate any already-named
+  person.
+- **Split Selected Into New Person...** now asks for a name AND whether to
+  lock the new person against automatic matching, in one combined dialog —
+  locking (if checked) happens immediately, before the dialog even closes,
+  so there's no window between creating a small/uncertain person (a pet, a
+  rarely-seen relative) and a later clustering run touching them.
+
+## Phase 3m — small Face Labeling window improvements
+
+- Double-clicking a face thumbnail's full-photo popup (see Phase 3j below)
+  now also shows that photo's **date taken**, next to the highlighted face.
+- Every dialog raised from the Face Labeling window (warnings, confirmations,
+  the New Person prompt) is now explicitly attached to the Face Labeling
+  window itself, not the main Dashboard — it no longer steals focus to the
+  wrong window.
+- **Right-click a face thumbnail** for a quick context menu: **Remove from
+  Cluster**, **Mark as Not a Person**, or **Assign to Target Person**
+  (whichever person is currently picked in the Target-person field) —
+  each is the exact same action as its toolbar-button counterpart, just
+  reachable without first clicking a checkbox. If the right-clicked face is
+  already part of your current checkbox selection, the action applies to
+  the whole selection (like a file manager); otherwise it applies to just
+  that one face — the menu's own header line always says which.
+- **"Hide unnamed clusters"** — the inverse of "Hide already-named people"
+  (Phase 3c above) — for reviewing people you've already labeled without
+  scrolling past everything still unnamed. Both filters can be on at once.
 
 ## Phase 3i — manual person tagging in the review tool
 

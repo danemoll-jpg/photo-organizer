@@ -211,6 +211,41 @@ class Config:
     # deliberate per-library tuning choice for the user to make after
     # seeing real match-rate numbers, not something to guess at here.
     face_match_existing_threshold: float | None = None
+    # Phase 3l (URGENT follow-up session): a real incident -- creating a
+    # brand-new 2-photo person ("Luna", a pet) via Split, the user couldn't
+    # lock it against automatic matching before a later `cluster-faces` run
+    # matched 1,947 more faces to it in one pass -- confirmed the SAME
+    # weak/small-sample-centroid-plus-lenient-face_match_existing_threshold
+    # mechanism already diagnosed for "Joeanne Sanders" (1 face) and
+    # cluster 6367 (5 faces) in the immediately prior session. Both of
+    # those were fixed reactively, one at a time, after the fact --
+    # auto_match_locked (above) only helps if a user remembers to set it
+    # BEFORE a clustering run happens, which is exactly the race that kept
+    # losing. This is the systemic, evidence-based safeguard instead: a
+    # person is EXCLUDED from _load_existing_centroids() -- cannot be an
+    # automatic-matching TARGET at all -- until their face_count reaches
+    # this minimum, regardless of auto_match_locked (additive, not a
+    # replacement for it -- a person can still be locked forever even
+    # after crossing this floor, e.g. a pet that will never legitimately
+    # need more automatic matches). Manual assignment (Move/Merge Selected
+    # Faces Here) is completely unaffected either way -- same "automatic
+    # vs. manual" split auto_match_locked already established.
+    #
+    # Default of 6 is evidence-based, not guessed: checked against the real
+    # production DB before picking it -- all three real incidents found so
+    # far had a pre-contamination face_count of 1 (Joeanne Sanders), 5
+    # (cluster 6367), and 2 (Luna) respectively, so the gate must exclude
+    # at least up to 5 to have prevented every one of them; of the 150
+    # currently-named real people in the DB, only 5 have face_count <= 5
+    # (two of which -- "Shadow" and "Chuckles" -- read as pets themselves,
+    # worth the user locking by hand too), confirming a floor around here
+    # affects only a narrow, genuinely-tiny real slice rather than
+    # penalizing established people. Also consistent with
+    # face_cluster_min_samples=4 (DBSCAN's own evidence-tuned floor for
+    # forming a brand-new cluster at all) being too low a bar on its own
+    # for a *matching target*, a different, arguably higher-risk decision
+    # than initial cluster formation.
+    face_min_cluster_size_for_matching: int = 6
 
     # --- derived, absolute paths ---
     @property
@@ -328,6 +363,9 @@ def load_config(path: Path | None = None) -> Config:
         face_cluster_similarity_threshold=raw.get("face_cluster_similarity_threshold", 0.65),
         face_cluster_min_samples=raw.get("face_cluster_min_samples", 4),
         face_match_existing_threshold=raw.get("face_match_existing_threshold"),
+        # Phase 3l: see the Config dataclass field comment above for the
+        # real-data-backed default (6).
+        face_min_cluster_size_for_matching=raw.get("face_min_cluster_size_for_matching", 6),
     )
 
 

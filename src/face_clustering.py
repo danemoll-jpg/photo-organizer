@@ -211,10 +211,17 @@ class ClusterStats:
     faces_in_new_clusters: int = 0
     remained_unclustered: int = 0       # DBSCAN noise, or too few candidates to reach min_samples
     people_total: int = 0
+    # Phase 3l (URGENT): how many existing people were skipped as automatic-
+    # matching TARGETS this run because their face_count was below
+    # Config.face_min_cluster_size_for_matching -- logged for the same
+    # observability reason excluded_low_confidence already is (so a small/
+    # new person's exclusion is visible in the run summary, not silent).
+    excluded_small_centroids: int = 0
 
     def summary(self) -> str:
         return (
             f"candidates={self.candidates} excluded_low_confidence={self.excluded_low_confidence} "
+            f"excluded_small_centroids={self.excluded_small_centroids} "
             f"matched_existing={self.matched_existing} new_clusters_formed={self.new_clusters_formed} "
             f"faces_in_new_clusters={self.faces_in_new_clusters} "
             f"remained_unclustered={self.remained_unclustered} people_total={self.people_total}"
@@ -246,7 +253,7 @@ def _recompute_person_centroid(conn: sqlite3.Connection, cluster_id: int) -> Non
     )
 
 
-def _load_existing_centroids(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
+def _load_existing_centroids(conn: sqlite3.Connection, min_face_count: int) -> tuple[list[int], np.ndarray]:
     """Every named/unnamed person's centroid, used by run_face_clustering()'s
     Step 1 to match new candidate faces against EXISTING people --
     EXCEPT a person flagged auto_match_locked (see schema.sql's own
@@ -257,10 +264,25 @@ def _load_existing_centroids(conn: sqlite3.Connection) -> tuple[list[int], np.nd
     person out of this step entirely is the fix the user asked for
     ("lock those off to automatic matching and just selecting them
     myself"), leaving manual Move/Merge assignment in the labeling UI
-    completely unaffected (this function is ONLY ever used here)."""
+    completely unaffected (this function is ONLY ever used here).
+
+    Phase 3l (URGENT): ALSO excludes any person whose face_count is below
+    min_face_count (Config.face_min_cluster_size_for_matching) -- a
+    systemic, evidence-based safeguard independent of auto_match_locked,
+    covering a real incident this project hit three separate times
+    (Joeanne Sanders: 1 face, cluster 6367: 5 faces, a brand-new "Luna"
+    person: 2 faces -- every one a tiny, weak centroid that became a
+    false-positive magnet the moment matching against it got lenient).
+    auto_match_locked is a MANUAL, permanent, per-person opt-in a user has
+    to remember to set; this is the reverse -- a person is excluded BY
+    DEFAULT until they have accumulated enough real evidence to be a
+    trustworthy matching target, no user action required, closing the
+    exact race window (create a person, then a `cluster-faces` run
+    happens before anyone thinks to lock it) that kept causing this."""
     rows = conn.execute(
         "SELECT cluster_id, representative_embedding FROM people "
-        "WHERE representative_embedding IS NOT NULL AND auto_match_locked = 0"
+        "WHERE representative_embedding IS NOT NULL AND auto_match_locked = 0 AND face_count >= ?",
+        (min_face_count,),
     ).fetchall()
     if not rows:
         return [], np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
@@ -401,7 +423,13 @@ def run_face_clustering(
     done = 0
 
     # --- Step 1: match each candidate against every EXISTING person's centroid
-    existing_ids, existing_mat = _load_existing_centroids(conn)
+    min_cluster_size = cfg.face_min_cluster_size_for_matching
+    stats.excluded_small_centroids = conn.execute(
+        "SELECT COUNT(*) FROM people WHERE representative_embedding IS NOT NULL "
+        "AND auto_match_locked = 0 AND face_count < ?",
+        (min_cluster_size,),
+    ).fetchone()[0]
+    existing_ids, existing_mat = _load_existing_centroids(conn, min_cluster_size)
     unmatched_idx = list(range(len(face_ids)))
     if existing_ids:
         sims = embeddings @ existing_mat.T  # (n_faces, n_people), both sides already L2-normalized -> cosine similarity
@@ -864,6 +892,10 @@ class FaceRecord:
     bbox: tuple[int, int, int, int]
     current_path: str
     det_score: float | None
+    # Phase 3m Part 4: carried along so FaceLabelingWindow's full-photo
+    # popup (Phase 3j) can display it without a second query -- the SELECT
+    # already joins `photos` for current_path, so this is free.
+    date_taken: str | None = None
 
 
 def list_faces_in_cluster(conn: sqlite3.Connection, cluster_id: int | None) -> list[FaceRecord]:
@@ -884,13 +916,16 @@ def list_faces_in_cluster(conn: sqlite3.Connection, cluster_id: int | None) -> l
     where = "f.cluster_id IS NULL" if cluster_id is None else "f.cluster_id = ?"
     params = () if cluster_id is None else (cluster_id,)
     rows = conn.execute(
-        "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score "
+        "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score, ph.date_taken "
         f"FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash WHERE {where} AND f.not_a_person = 0 "
         "ORDER BY (ph.date_taken IS NULL), ph.date_taken, f.face_id",
         params,
     ).fetchall()
     return [
-        FaceRecord(face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6], det_score=r[7])
+        FaceRecord(
+            face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6],
+            det_score=r[7], date_taken=r[8],
+        )
         for r in rows
     ]
 
@@ -907,12 +942,15 @@ def list_not_a_person_faces(conn: sqlite3.Connection) -> list[FaceRecord]:
     list_faces_in_cluster() above, for consistency across every bucket the
     same thumbnail grid can display."""
     rows = conn.execute(
-        "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score "
+        "SELECT f.face_id, f.file_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, ph.current_path, f.det_score, ph.date_taken "
         "FROM faces f JOIN photos ph ON ph.file_hash = f.file_hash "
         "WHERE f.not_a_person = 1 ORDER BY (ph.date_taken IS NULL), ph.date_taken, f.face_id"
     ).fetchall()
     return [
-        FaceRecord(face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6], det_score=r[7])
+        FaceRecord(
+            face_id=r[0], file_hash=r[1], bbox=(r[2], r[3], r[4], r[5]), current_path=r[6],
+            det_score=r[7], date_taken=r[8],
+        )
         for r in rows
     ]
 

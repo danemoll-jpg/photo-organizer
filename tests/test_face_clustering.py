@@ -82,6 +82,15 @@ def _make_cfg(dbp: Path, **overrides) -> Config:
         unsorted_subfolder="_unsorted", dry_run=True, hash_algorithm="sha256",
         collision_suffix_length=8, db_path=str(dbp), log_dir=str(dbp.parent / "logs"),
         face_min_det_score=0.5, face_cluster_similarity_threshold=0.45, face_cluster_min_samples=2,
+        # Phase 3l (URGENT): defaults to 0 (i.e. no gate -- today's
+        # pre-Phase-3l behavior) so every EXISTING test above/below, most
+        # of which deliberately use small (often 3-face) synthetic people
+        # to test matching-against-an-existing-person logic, keeps working
+        # unmodified -- the new gate itself gets its own dedicated test
+        # (test_face_min_cluster_size_for_matching_gate below), same
+        # isolation convention this fixture already uses for every other
+        # face_cluster_* knob.
+        face_min_cluster_size_for_matching=0,
     )
     kwargs.update(overrides)
     return Config(**kwargs)
@@ -337,6 +346,80 @@ def test_auto_match_locked_migration(tmp: Path) -> None:
     set_person_auto_match_locked(conn, 1, True)
     assert conn.execute("SELECT auto_match_locked FROM people WHERE cluster_id = 1").fetchone() == (1,)
     print("  auto_match_locked added + backfilled to 0 on migration, set_person_auto_match_locked works post-migration  OK")
+    conn.close()
+
+
+def test_face_min_cluster_size_for_matching_gate(tmp: Path) -> None:
+    print("\n=== Phase 3l (URGENT): face_min_cluster_size_for_matching gates automatic-matching TARGETS by face_count ===")
+    dbp, conn = _fresh_db(tmp, "min_cluster_size_gate.db")
+
+    # "Luna": the real incident's exact shape -- a brand-new person with
+    # only 2 faces, well under the evidence-based default of 6 (see
+    # Config.face_min_cluster_size_for_matching's own comment). A
+    # candidate at 0.99 similarity would obviously match her under any
+    # normal threshold if she were eligible as a target at all.
+    e1 = np.zeros(EMBEDDING_DIM, dtype=np.float32); e1[0] = 1.0
+    conn.execute("INSERT INTO people (cluster_id, assigned_name, face_count) VALUES (1, 'Luna', 0)")
+    conn.commit()
+    for j in range(2):
+        fh = f"luna_{j}"
+        _insert_photo(conn, fh, f"E:\\Pics\\luna_{j}.jpg")
+        _insert_face(conn, fh, e1.copy(), cluster_id=1)
+    _recompute_person_centroid(conn, 1)
+    assert conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0] == 2
+
+    _insert_photo(conn, "candidate", "E:\\Pics\\candidate.jpg")
+    _insert_face(conn, "candidate", _embedding_at_cosine(e1, np.roll(e1, 1), 0.99))
+
+    # With the gate active (min size 6, Luna has 2), Luna must be
+    # completely invisible to Step 1 matching, no matter how similar the
+    # candidate is -- unlike auto_match_locked, nobody had to remember to
+    # set anything for this to hold.
+    cfg_gated = _make_cfg(
+        dbp, face_cluster_similarity_threshold=0.65, face_cluster_min_samples=2,
+        face_min_cluster_size_for_matching=6,
+    )
+    stats = run_face_clustering(cfg_gated, conn, _logger)
+    print(f"  gated (min size 6, Luna has 2): {stats.summary()}")
+    assert stats.matched_existing == 0, "Luna (2 faces) must be excluded as a matching target below the size gate"
+    assert stats.excluded_small_centroids == 1, "exactly one existing person (Luna) sits below the gate"
+    row = conn.execute("SELECT cluster_id FROM faces WHERE file_hash = 'candidate'").fetchone()
+    assert row[0] != 1, "the candidate must NOT have joined Luna's cluster"
+    assert conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0] == 2, \
+        "Luna's face_count must be completely unchanged"
+    print("  Luna (below the gate) received zero automatic matches despite a 0.99-similar candidate  OK")
+
+    # Growing Luna to (at least) the gate via MANUAL assignment only --
+    # never automatic -- must make her a normal matching target on the
+    # very next run, with no other config change needed.
+    conn.execute("UPDATE faces SET cluster_id = NULL WHERE file_hash = 'candidate'")
+    conn.commit()
+    for j in range(4):
+        fh = f"luna_grow_{j}"
+        _insert_photo(conn, fh, f"E:\\Pics\\luna_grow_{j}.jpg")
+        fid = _insert_face(conn, fh, e1.copy())
+        move_faces_to_person(conn, [fid], 1)
+    assert conn.execute("SELECT face_count FROM people WHERE cluster_id = 1").fetchone()[0] == 6
+
+    stats2 = run_face_clustering(cfg_gated, conn, _logger)
+    print(f"  after growing to 6 (the gate): {stats2.summary()}")
+    assert stats2.matched_existing == 1, "once Luna reaches the gate, she must become a normal matching target"
+    assert stats2.excluded_small_centroids == 0, "nobody left below the gate now"
+    row2 = conn.execute("SELECT cluster_id FROM faces WHERE file_hash = 'candidate'").fetchone()
+    assert row2[0] == 1
+    print("  Luna became a normal matching target the instant her face_count reached the gate  OK")
+
+    # auto_match_locked and the size gate are independent, additive checks:
+    # a person ABOVE the gate must still be excluded if manually locked --
+    # the manual override still works once a person "grows out of" needing
+    # the systemic safeguard, per the spec's own "additive, not a
+    # replacement" requirement.
+    conn.execute("UPDATE faces SET cluster_id = NULL WHERE file_hash = 'candidate'")
+    conn.commit()
+    set_person_auto_match_locked(conn, 1, True)
+    stats3 = run_face_clustering(cfg_gated, conn, _logger)
+    assert stats3.matched_existing == 0, "a person ABOVE the size gate must still be excluded if manually locked"
+    print("  auto_match_locked still applies independently once a person is above the size gate  OK")
     conn.close()
 
 
@@ -750,6 +833,7 @@ def main() -> None:
         test_face_match_existing_threshold_decoupled_from_dbscan(tmp)
         test_auto_match_locked_excluded_from_matching(tmp)
         test_auto_match_locked_migration(tmp)
+        test_face_min_cluster_size_for_matching_gate(tmp)
         test_rank_clusters_by_similarity(tmp)
         test_rank_faces_by_similarity(tmp)
         test_incremental_reclustering_preserves_names(tmp)

@@ -200,3 +200,18 @@ face_cluster_min_samples: 4
 # face_cluster_similarity_threshold once you've seen real match-rate
 # numbers for your own named people (see src/config.py's own comment).
 # face_match_existing_threshold: 0.55
+#
+# face_min_cluster_size_for_matching (Phase 3l, URGENT follow-up session):
+# a person needs at least this many faces before they're even ELIGIBLE to
+# be an automatic-matching target in a `cluster-faces` run -- a systemic
+# safeguard, independent of auto_match_locked above, against a real,
+# repeated incident: a brand-new person created with just a couple of
+# photos (a pet, a rarely-seen relative) has a weak centroid that becomes
+# a false-positive magnet the moment face_match_existing_threshold makes
+# matching lenient -- hit for real three times (1-face "Joeanne Sanders",
+# 5-face cluster 6367, 2-face "Luna" -- see src/config.py's own comment
+# for the full real-data-backed reasoning behind the default of 6).
+# auto_match_locked is still there as a manual, PERMANENT per-person
+# override (e.g. for a pet you never want auto-matched even once it grows
+# past this floor) -- this is additive, not a replacement for it.
+face_min_cluster_size_for_matching: 6

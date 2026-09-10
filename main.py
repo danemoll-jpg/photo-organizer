@@ -276,7 +276,9 @@ def cmd_cluster_faces(args) -> None:
     logger.info(
         f"Starting Phase 3 Session 2 face clustering run — "
         f"similarity_threshold={cfg.face_cluster_similarity_threshold} min_samples={cfg.face_cluster_min_samples} "
-        f"min_det_score={cfg.face_min_det_score}"
+        f"min_det_score={cfg.face_min_det_score} "
+        f"match_existing_threshold={cfg.face_match_existing_threshold} "
+        f"min_cluster_size_for_matching={cfg.face_min_cluster_size_for_matching}"
     )
     init_db(cfg.db_path_abs, logger=logger)  # rule 12: every entry point that opens the DB calls this first
 

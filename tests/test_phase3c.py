@@ -75,6 +75,11 @@ def _make_cfg(dbp: Path, **overrides) -> Config:
         unsorted_subfolder="_unsorted", dry_run=True, hash_algorithm="sha256",
         collision_suffix_length=8, db_path=str(dbp), log_dir=str(dbp.parent / "logs"),
         face_min_det_score=0.5, face_cluster_similarity_threshold=0.45, face_cluster_min_samples=2,
+        # Phase 3l: this file predates the size gate and doesn't exercise
+        # it -- default to 0 (no gate) so its own small synthetic clusters
+        # keep matching exactly as before. See test_face_clustering.py's
+        # own _make_cfg comment/dedicated test for the feature itself.
+        face_min_cluster_size_for_matching=0,
     )
     kwargs.update(overrides)
     return Config(**kwargs)
