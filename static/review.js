@@ -162,6 +162,18 @@
  *   same scope line Phase 3d drew for the filter (editing stays in the
  *   Tkinter labeling window only).
  *
+ * Follow-up session (click-to-filter): grid cards' tag/location/person
+ *   badges are now clickable -- see applyQuickFilter/addPersonChipById
+ *   below. Each badge gets a `badge-clickable` class + `data-filter-*`
+ *   attributes at render time (renderGrid/peopleHtml), and a per-card click
+ *   listener (bound the same way the existing checkbox/select-label
+ *   listeners already are, each render -- see renderGrid) stops the click
+ *   from bubbling to the card's own "open the viewer" handler, then sets
+ *   (tag/location) or adds (person, via the existing chip mechanism) that
+ *   one filter and calls the existing applyFilters() -- so it composes with
+ *   whatever other filters are already set, same as every other filter
+ *   control on the page, rather than resetting the rest.
+ *
  * Phase 3h (this session): per-user favorites.
  *   - A star badge on the grid card for favorited-by-ME only (per spec,
  *     "keep cards visually clean") -- see cardFavoriteBadge/renderGrid.
@@ -424,7 +436,11 @@
     if (!people.length) return "";
     const shown = people.slice(0, GRID_PEOPLE_VISIBLE);
     const rest = people.slice(GRID_PEOPLE_VISIBLE);
-    let html = shown.map(p => `<span class="badge person">${escapeHtml(p.name)}</span>`).join("");
+    // Click-to-filter: each named badge is clickable (see renderGrid's
+    // .badge-clickable binding); the "+N" overflow badge is left plain --
+    // it represents several different people at once, so there's no single
+    // value it could filter by.
+    let html = shown.map(p => `<span class="badge person badge-clickable" data-filter-type="person" data-cluster-id="${p.cluster_id}" data-filter-value="${escapeHtml(p.name)}" title="Filter by person: ${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>`).join("");
     if (rest.length) {
       const allNames = people.map(p => p.name).join(", ");
       html += `<span class="badge person-more" title="${escapeHtml(allNames)}">+${rest.length}</span>`;
@@ -697,8 +713,8 @@
           ${captionHtml(item)}
           <div class="card-tags">
             ${item.excluded ? `<span class="badge hidden-flag">Hidden</span>` : ""}
-            ${(item.tags || []).slice(0, 6).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join("")}
-            ${item.location_name ? `<span class="badge location">📍 ${escapeHtml(item.location_name)}</span>` : ""}
+            ${(item.tags || []).slice(0, 6).map(t => `<span class="badge badge-clickable" data-filter-type="tag" data-filter-value="${escapeHtml(t)}" title="Filter by tag: ${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("")}
+            ${item.location_name ? `<span class="badge location badge-clickable" data-filter-type="location" data-filter-value="${escapeHtml(item.location_name)}" title="Filter by location: ${escapeHtml(item.location_name)}">📍 ${escapeHtml(item.location_name)}</span>` : ""}
           </div>
           ${peopleHtml(item)}
         </div>`;
@@ -710,6 +726,15 @@
       selectLabel.addEventListener("click", (e) => e.stopPropagation());
       const checkbox = card.querySelector(".card-select-checkbox");
       checkbox.addEventListener("change", () => toggleSelect(item.file_hash, checkbox.checked, card));
+      // Click-to-filter: same stopPropagation-before-it-bubbles-to-the-card
+      // pattern as the checkbox above, so clicking a tag/location/person
+      // badge filters instead of also opening the viewer.
+      card.querySelectorAll(".badge-clickable").forEach((badge) => {
+        badge.addEventListener("click", (e) => {
+          e.stopPropagation();
+          applyQuickFilter(badge.dataset.filterType, badge.dataset.filterValue, badge.dataset.clusterId);
+        });
+      });
       gridEl.appendChild(card);
     }
     forEach(gridPrevBtnEls, (btn) => { btn.disabled = !state.grid.hasPrev; });
@@ -952,6 +977,41 @@
     if (state.viewer.open && state.viewer.order === "random") startRandomOrder();
     else { state.viewer.randomSeed = null; state.viewer.randomIdx = 0; }
   }
+
+  // Click-to-filter (grid badges): adds a person chip directly from an
+  // already-known {cluster_id, name} pair (item.people, straight from the
+  // server) -- unlike addPersonChip above, this never needs to resolve
+  // typed text against allPeople's disambiguated labels, since the badge
+  // that was clicked already carries the real cluster_id. Still prefers
+  // allPeople's own (possibly "(#cluster_id)"-suffixed) label when
+  // available, so the resulting chip reads identically either way.
+  function addPersonChipById(clusterId, name) {
+    if (peopleChips.some((p) => p.cluster_id === clusterId)) return;
+    const known = allPeople.find((p) => p.cluster_id === clusterId);
+    peopleChips.push({ cluster_id: clusterId, label: known ? known.label : name });
+    renderPeopleChips();
+  }
+
+  // Click-to-filter: a tag/location/person badge on a grid card (see
+  // renderGrid/peopleHtml) was clicked -- set (tag/location) or add
+  // (person) that one filter's value and immediately re-apply, same as
+  // clicking "Apply" after typing/picking it by hand. Deliberately additive
+  // -- whatever else is already filtered stays filtered, same composition
+  // every other filter control on this page already gets for free via
+  // _build_filters.
+  function applyQuickFilter(type, value, clusterId) {
+    if (type === "tag") {
+      el("f-tag").value = value;
+    } else if (type === "location") {
+      el("f-location").value = value;
+    } else if (type === "person") {
+      addPersonChipById(Number(clusterId), value);
+    } else {
+      return;
+    }
+    applyFilters();
+  }
+
   el("f-apply").addEventListener("click", applyFilters);
   // Note: "f-person" is deliberately NOT in this list -- its own keydown
   // handler above (addPersonChip) handles Enter, since here Enter commits
