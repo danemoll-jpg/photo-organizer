@@ -401,12 +401,16 @@ body {
 .badge.person::before { content: "\1F464\FE0E "; } /* small "person" glyph, text-style variant selector so it renders flat, not as a colorful emoji */
 .badge.person-more { background: var(--badge-bg); font-weight: 600; cursor: default; }
 
-/* Click-to-filter: tag/location/person badges on a grid card (see
-   renderGrid/peopleHtml in review.js) are clickable -- cursor + a subtle
-   hover affordance so it reads as "click to filter" rather than static
-   text. .badge.location already sets its own background (transparent), so
-   the hover rule below only touches --badge-bg on plain (tag) badges --
-   fine either way since a location badge already has its own border. */
+/* Click-to-filter: tag/location/person badges on a grid card AND inside the
+   viewer's Tags/Location/People rows (see renderGrid/peopleHtml/
+   renderViewerItem/personBadge in review.js) are clickable -- cursor + a
+   subtle hover affordance so it reads as "click to filter" rather than
+   static text. .badge.location already sets its own background
+   (transparent), so the hover rule below only touches --badge-bg on plain
+   (tag) badges -- fine either way since a location badge already has its
+   own border. The viewer's location badge doesn't use the .badge class at
+   all (it never did, pre-dating this feature) -- badge-clickable alone
+   still supplies cursor+hover there. */
 .badge-clickable { cursor: pointer; }
 .badge-clickable:hover { filter: brightness(1.15); text-decoration: underline; }
 

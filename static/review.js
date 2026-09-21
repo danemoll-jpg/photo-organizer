@@ -173,6 +173,21 @@
  *   one filter and calls the existing applyFilters() -- so it composes with
  *   whatever other filters are already set, same as every other filter
  *   control on the page, rather than resetting the rest.
+ *   Direct same-session follow-up: the identical behavior now also applies
+ *   to the badges shown inside the open viewer (#viewer-tags/
+ *   #viewer-location/#viewer-people), not just the grid cards -- since the
+ *   viewer's own content is rebuilt wholesale per renderViewerItem call
+ *   (same as the grid's per-card innerHTML), each of those three containers
+ *   gets ONE delegated click listener bound once (not re-bound per render),
+ *   same pattern #viewer-people's Phase 3i remove-button/"+N more" toggle
+ *   listener already used. The People row's existing listener gets a third,
+ *   lowest-priority branch for a plain name-badge click, checked AFTER the
+ *   "×" remove button and "+N more" toggle so those two keep winning when
+ *   that's what was actually clicked (both sit inside/next to a
+ *   badge-clickable span and would otherwise also match a generic
+ *   .closest(".badge-clickable") lookup). Clicking a badge in the viewer
+ *   never closes it -- the item being viewed always still has the value
+ *   just clicked, so it keeps matching the newly-applied filter.
  *
  * Phase 3h (this session): per-user favorites.
  *   - A star badge on the grid card for favorited-by-ME only (per spec,
@@ -382,9 +397,13 @@
 
   // Phase 3i: each name badge gets a small "×" (reusing the People filter's
   // own .chip-remove look, see review.css) to remove that person from
-  // THIS photo -- see removePersonFromCurrent below.
+  // THIS photo -- see removePersonFromCurrent below. Click-to-filter
+  // (follow-up): the badge itself (not the "×") is also clickable, same
+  // data-filter-* contract renderGrid/viewerTags/viewerLocation use -- see
+  // the viewerPeople delegated listener below for how the two clicks (name
+  // vs. remove) stay mutually exclusive.
   function personBadge(p) {
-    return `<span class="badge person" data-cluster-id="${p.cluster_id}">${escapeHtml(p.name)}` +
+    return `<span class="badge person badge-clickable" data-filter-type="person" data-cluster-id="${p.cluster_id}" data-filter-value="${escapeHtml(p.name)}" title="Filter by person: ${escapeHtml(p.name)}">${escapeHtml(p.name)}` +
       `<button type="button" class="chip-remove person-remove" data-cluster-id="${p.cluster_id}" ` +
       `title="Remove ${escapeHtml(p.name)} from this photo">&times;</button></span>`;
   }
@@ -408,18 +427,40 @@
   // innerHTML is replaced wholesale every time renderViewerItem runs) --
   // same reasoning review.js already uses elsewhere for content that's
   // rebuilt from scratch per item.
+  // Click-to-filter (follow-up): a click on the name badge itself (not the
+  // "×" remove button, not the "+N more" toggle) filters by that person --
+  // checked last/lowest-priority so the existing remove/toggle actions
+  // (both of which sit visually inside or right next to a badge-clickable
+  // element) still win when that's what was actually clicked.
   viewerPeople.addEventListener("click", (e) => {
     const removeBtn = e.target.closest(".person-remove");
     if (removeBtn) {
       removePersonFromCurrent(Number(removeBtn.dataset.clusterId));
       return;
     }
-    const btn = e.target.closest(".people-more-toggle");
-    if (!btn) return;
-    const restEl = viewerPeople.querySelector(".people-rest");
-    if (!restEl) return;
-    restEl.hidden = !restEl.hidden;
-    btn.textContent = restEl.hidden ? `+${btn.dataset.count} more` : "Show fewer";
+    const toggleBtn = e.target.closest(".people-more-toggle");
+    if (toggleBtn) {
+      const restEl = viewerPeople.querySelector(".people-rest");
+      if (!restEl) return;
+      restEl.hidden = !restEl.hidden;
+      toggleBtn.textContent = restEl.hidden ? `+${toggleBtn.dataset.count} more` : "Show fewer";
+      return;
+    }
+    const badge = e.target.closest(".badge-clickable");
+    if (badge) applyQuickFilter(badge.dataset.filterType, badge.dataset.filterValue, badge.dataset.clusterId);
+  });
+
+  // Click-to-filter (viewer tags/location, follow-up): same delegated-
+  // listener-on-the-persistent-container pattern as viewerPeople above --
+  // #viewer-tags/#viewer-location are also rebuilt wholesale on every
+  // renderViewerItem call.
+  viewerTags.addEventListener("click", (e) => {
+    const badge = e.target.closest(".badge-clickable");
+    if (badge) applyQuickFilter(badge.dataset.filterType, badge.dataset.filterValue);
+  });
+  viewerLocation.addEventListener("click", (e) => {
+    const badge = e.target.closest(".badge-clickable");
+    if (badge) applyQuickFilter(badge.dataset.filterType, badge.dataset.filterValue);
   });
 
   // Grid: much more compact than the viewer (small cards, per spec) -- only
@@ -1069,11 +1110,17 @@
       : (item.is_video
           ? `<span class="placeholder">No caption</span>`
           : `<span class="placeholder">Not yet captioned — the background Phase 2 run hasn't reached this photo yet.</span>`);
+    // Click-to-filter (viewer): same badge-clickable markup/behavior as the
+    // grid cards (see renderGrid) -- clicking a tag or the location badge
+    // here filters the grid the same way, without leaving the viewer (the
+    // currently-open item always still has the value just clicked, so it
+    // keeps matching and the viewer stays open). See the delegated
+    // viewerTags/viewerLocation click listeners below.
     viewerTags.innerHTML = (item.tags && item.tags.length)
-      ? item.tags.map(t => `<span class="badge">${escapeHtml(t)}</span>`).join(" ")
+      ? item.tags.map(t => `<span class="badge badge-clickable" data-filter-type="tag" data-filter-value="${escapeHtml(t)}" title="Filter by tag: ${escapeHtml(t)}">${escapeHtml(t)}</span>`).join(" ")
       : `<span class="placeholder">—</span>`;
     viewerLocation.innerHTML = item.location_name
-      ? `📍 ${escapeHtml(item.location_name)}`
+      ? `<span class="badge-clickable" data-filter-type="location" data-filter-value="${escapeHtml(item.location_name)}" title="Filter by location: ${escapeHtml(item.location_name)}">📍 ${escapeHtml(item.location_name)}</span>`
       : (item.gps_checked
           ? `<span class="placeholder">No location available</span>`
           : `<span class="placeholder">Not yet checked for GPS data</span>`);
