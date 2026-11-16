@@ -197,6 +197,23 @@ def restart_review_tool(
         return RestartResult(killed_pids=killed, port_freed=False, launched=False, new_pid=None)
 
     from src.config import REPO_ROOT  # local import: keep listening_pids() usable with zero src.config dependency
+    from src.paths import FROZEN
+
+    if FROZEN and python_exe is None and script_path is None:
+        # Packaged app: there is no python.exe/review_tool.py on disk; the app
+        # exe itself runs the review tool when given --review-tool (see
+        # app_entry.py).
+        args = [sys.executable, "--review-tool", "--port", str(port)]
+        if not open_browser:
+            args.append("--no-browser")
+        proc = subprocess.Popen(
+            args,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return RestartResult(killed_pids=killed, port_freed=True, launched=True, new_pid=proc.pid)
 
     if python_exe is None:
         python_exe = REPO_ROOT / "venv" / "Scripts" / "python.exe"

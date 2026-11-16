@@ -973,6 +973,66 @@ cached preview is now stale) — re-run Preview to check for anything left.
 Not built: automatically re-running this after every future date edit — a
 manual trigger is enough for now, same posture as Phase 3's re-clustering.
 
+## Downloadable app + auto-update (core edition)
+
+A packaged Windows build for people who don't have Python, in the same shape as the Chastain Rush download: a small launcher, a versions folder, and a public GitHub releases repo that the app checks for updates. **Core edition** = Phase 1/1b organizer, the dashboard, the review tool, GPS/thumbnail/date tools. The GPU/face stack (insightface, onnxruntime, faiss, scikit-learn) is not bundled, and the dashboard hides the two face panels when those libraries are absent. Running from source (everything above) is unchanged.
+
+### What a user gets
+
+1. Download `PhotoOrganizer-<ver>-windows.zip`, extract anywhere writable, run `PhotoOrganizer.exe`.
+2. The first run creates `config.yaml` with `dest_root` under `Pictures\Photo Organizer` and `dry_run: true` (nothing moves until they turn it off).
+3. **Dashboard → Updates** checks GitHub shortly after opening (one small GET; set `check_for_updates: false` in `config.yaml` to stop that). *Download & Install* is always a click, never automatic. The new version starts on the next launch (*Restart Now* does that when no job is running); *Restore Previous Version* goes back.
+4. **Open Review Tool** (Run panel) opens the web viewer. It needs the library database (created by the first Phase 1 run) and a login (add one in the *Review Users* panel); the button says which is missing.
+5. Settings, database, thumbnails and logs live in `%LOCALAPPDATA%\PhotoOrganizer` (override: `PHOTO_ORGANIZER_HOME`), not the install folder, so an update or re-extract never touches them. *Open Data Folder* in the Updates panel opens it.
+
+`main.py check-update` does the check from a shell. The exe is not code-signed, so Windows SmartScreen shows "More info → Run anyway" once.
+
+### How the pieces fit
+
+| Piece | File |
+|---|---|
+| Version + releases repo | `src/version.py` |
+| Check / download / verify / install / restore (stdlib only) | `src/updater.py` |
+| Dashboard panel | `src/dashboard_updates.py` |
+| Source-vs-packaged path roots | `src/paths.py` |
+| First-run config | `src/first_run.py` |
+| Launcher (reads `state.json`, starts the current version, rolls back a version that dies at startup) | `launcher/launcher.py` |
+| One exe, several jobs (`--review-tool`, `--cli`, `--selftest`) | `app_entry.py` |
+| Build + stage | `Tools/build_release.py` |
+| Publish | `Tools/publish_release.py` |
+
+An update is never applied in place: download → check size and SHA-256 → extract to `versions/<ver>.staging` → check the exe is there → rename → atomically flip `state.json`. Any failure before the flip leaves the installed version exactly as it was. The previous version is kept.
+
+**Trust model:** the SHA-256 catches a corrupt or truncated download. It does not protect against someone who can publish to the releases repo. The download URL is built from the fixed repo and a validated tag/name, never taken from the manifest. If this is ever distributed beyond friends and family, sign the manifest (Chastain Rush pins a key) before relying on it.
+
+### Cutting a release
+
+```bash
+# 1. bump __version__ in src/version.py. gh isn't on PATH here: set GH to a gh.exe (e.g. Chastain Rush's copy under Racer\Builds\PublisherTools)
+venv\Scripts\python Tools\build_release.py --notes "What changed"
+venv\Scripts\python Tools\publish_release.py Builds\release\v1.1.0                      # dry run: verifies every file
+venv\Scripts\python Tools\publish_release.py Builds\release\v1.1.0 --publish --confirm-repository danemoll-jpg/photo-organizer-releases
+```
+
+The build runs the built exe's `--selftest` (imports every module, finds the bundled schema/templates, serves the review tool's login page) and stages nothing if it fails. One-time, your call because it's a public repo: `gh repo create danemoll-jpg/photo-organizer-releases --public`.
+
+### Game hub card (add after the first release is published)
+
+Not added yet on purpose: the link would be dead until a release exists. Paste into `game-hub/games.js`:
+
+```js
+  {
+    id: 'photo-organizer',
+    name: 'Photo Organizer',
+    tagline: 'Sort decades of photos and videos into year/month folders by their real dates, then browse them in a local web viewer. Updates itself.',
+    icon: '📷',
+    url: 'https://github.com/danemoll-jpg/photo-organizer-releases/releases/latest',
+    tags: ['PC only', 'download', 'photos'],
+    accent: '#4fa3e0',
+    download: true,
+  },
+```
+
 ## Viewing the database
 
 `data/photo_organizer.db` is a plain SQLite file — no server, no login.

@@ -316,7 +316,12 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-app = Flask(__name__)
+# Templates/static are explicit (not Flask's module-relative default) so the
+# packaged app finds them in its bundle -- src/paths.py::APP_ROOT is the repo
+# root when run from source, so nothing changes there.
+from src.paths import APP_ROOT as _APP_ROOT  # noqa: E402
+
+app = Flask(__name__, template_folder=str(_APP_ROOT / "templates"), static_folder=str(_APP_ROOT / "static"))
 
 # Set by main() at startup from config.yaml — read-only globals for the
 # lifetime of this process (a single-user local tool, not multi-tenant).

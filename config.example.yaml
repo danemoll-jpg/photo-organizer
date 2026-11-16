@@ -215,3 +215,9 @@ face_cluster_min_samples: 4
 # override (e.g. for a pet you never want auto-matched even once it grows
 # past this floor) -- this is additive, not a replacement for it.
 face_min_cluster_size_for_matching: 6
+
+# --- Packaged app: updates ---
+# Look for a newer release shortly after the dashboard opens (one small GET
+# to GitHub). Installing is always your click. Set false to only check when
+# you press "Check for Updates" in the dashboard. See README: "Downloadable app".
+check_for_updates: true

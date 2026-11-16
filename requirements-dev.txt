@@ -2,3 +2,6 @@
 # tests/make_sample_library.py (writes synthetic EXIF for test fixtures).
 -r requirements.txt
 piexif>=1.1.3
+
+# Packaging the downloadable app (Tools/build_release.py)
+pyinstaller>=6.16

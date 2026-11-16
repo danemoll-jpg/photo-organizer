@@ -653,11 +653,36 @@ def cmd_load_captions(args) -> None:
     print(stats.summary())
 
 
+def cmd_check_update(args) -> None:
+    """Shell front end for src/updater.py (same call the dashboard's Updates
+    panel makes). Source runs can only check; the packaged app installs from
+    the dashboard."""
+    from src import updater
+    from src.version import RELEASES_REPO, __version__
+
+    print(f"Installed version: {__version__}")
+    try:
+        info = updater.check_for_update(__version__, RELEASES_REPO)
+    except updater.UpdateError as e:
+        print(f"Couldn't check: {e}")
+        raise SystemExit(1)
+    if info is None:
+        print("You're up to date.")
+        return
+    print(f"Update available: {info.version} ({info.asset_bytes / 2**20:.0f} MB)")
+    if info.notes:
+        print()
+        print(info.notes)
+    print()
+    print("Install it from the dashboard's Updates panel (packaged app), or git pull if running from source.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Photo Organizer — Phase 0/1/1b/2/2b/3")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-db", help="Create the SQLite database and schema").set_defaults(func=cmd_init_db)
+    sub.add_parser("check-update", help="Check whether a newer packaged release is available").set_defaults(func=cmd_check_update)
     sub.add_parser("pick-sources", help="Interactively choose source folders (folder picker)").set_defaults(func=cmd_pick_sources)
     sub.add_parser("scan", help="Preview Phase 1 (always dry-run, never touches files)").set_defaults(func=cmd_scan)
 

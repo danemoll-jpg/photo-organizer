@@ -40,3 +40,9 @@ Thumbs.db
 samples/
 test_images/
 phase2_sample/
+
+# --- Packaging (Tools/build_release.py) ---
+Builds/
+build/
+dist/
+*.spec

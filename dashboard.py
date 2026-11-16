@@ -270,6 +270,7 @@ whole loop down with it.
 """
 from __future__ import annotations
 
+import importlib.util
 import queue
 import shutil
 import subprocess
@@ -293,6 +294,7 @@ from src.config import (
     remove_review_user,
     save_source_folders,
 )
+from src.dashboard_updates import UpdatesPanel
 from src.date_audit import (
     BATCH_FIX_EDITOR,
     DEFAULT_MIN_COUNT,
@@ -598,6 +600,7 @@ class DashboardApp:
         self.run_btn.pack(side="left", padx=(6, 0))
         self.cancel_btn = ttk.Button(act_btn_row, text="Cancel", command=self._on_cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(act_btn_row, text="Open Review Tool", command=self._on_open_review_tool).pack(side="right")
 
         prog_row = ttk.Frame(act_frame)
         prog_row.pack(fill="x", padx=6, pady=(0, 6))
@@ -1134,6 +1137,24 @@ class DashboardApp:
         ra_log_scroll = ttk.Scrollbar(ra_log_body, orient="vertical", command=self.tunnel_log_text.yview)
         ra_log_scroll.pack(side="right", fill="y")
         self.tunnel_log_text.configure(yscrollcommand=ra_log_scroll.set)
+
+        # --- Updates panel (packaged app self-update; see src/updater.py) ---
+        up_frame = self._make_collapsible("Updates", start_expanded=False)
+        self.updates_panel = UpdatesPanel(
+            up_frame,
+            self.root,
+            busy_reason=self._busy_reason,
+            on_quit=self._on_close,
+            auto_check=lambda: getattr(getattr(self, "cfg", None), "check_for_updates", True),
+        )
+
+        # The packaged "core" build doesn't ship the GPU/face libraries, so
+        # their panels would only error. Hide them when those libraries are
+        # absent -- running from source on a machine that has them is
+        # unchanged.
+        if not all(importlib.util.find_spec(m) for m in ("insightface", "faiss", "sklearn")):
+            for body in (faces_frame, cluster_frame):
+                body.master.pack_forget()
 
         # --- Log viewer panel ---
         log_frame = self._make_collapsible("Log viewer", fill="both", expand=True)
@@ -3066,6 +3087,56 @@ class DashboardApp:
         except Exception:
             pass
         self.root.after(500, self._tail_tick)
+
+    def _on_open_review_tool(self) -> None:
+        """Opens review_tool.py's web UI in the browser, starting it first if
+        nothing is listening. Source users have Launch Review Tool.bat; the
+        packaged app has no .bat or python.exe, so this is its way in. Both
+        first-run dead ends (no DB yet, no login yet) are explained here
+        rather than left as a silently-exiting process."""
+        import webbrowser
+
+        cfg = self.cfg
+        if not cfg.db_path_abs.exists():
+            messagebox.showinfo(
+                "Open Review Tool",
+                "There's nothing to review yet: the library database is created by the first Phase 1 run "
+                "(Dry Run previews, Run for real... organizes).",
+                parent=self.root,
+            )
+            return
+        if not cfg.review_users:
+            messagebox.showinfo(
+                "Open Review Tool",
+                "The review tool needs a login first. Open the \"Review Users\" panel below and add a username "
+                "and password (min 8 characters), then click this again.",
+                parent=self.root,
+            )
+            return
+        url = f"http://127.0.0.1:{cfg.review_tool_port}/"
+        try:
+            if listening_pids(cfg.review_tool_port):
+                webbrowser.open(url)
+                return
+            restart_review_tool(cfg, open_browser=True)  # nothing to kill; launches and opens the browser itself
+        except Exception as e:  # never let a button click raise into Tk's silent handler
+            messagebox.showerror("Open Review Tool", f"Couldn't start the review tool: {e}", parent=self.root)
+
+    def _busy_reason(self) -> str | None:
+        """A human-readable name for a still-running batch job, or None.
+        Looks at every `*_worker` thread attribute so a panel added later is
+        covered without touching this."""
+        names = {
+            "worker": "A Phase 1 run", "caption_worker": "Captioning", "gps_worker": "GPS extraction",
+            "thumbs_worker": "Thumbnail extraction", "faces_worker": "Face detection",
+            "cluster_worker": "Face clustering", "date_audit_worker": "A date audit",
+            "relocate_worker": "A relocate run",
+        }
+        for attr, label in names.items():
+            w = getattr(self, attr, None)
+            if isinstance(w, threading.Thread) and w.is_alive():
+                return label
+        return None
 
     # ------------------------------------------------------------- close
     def _on_close(self) -> None:

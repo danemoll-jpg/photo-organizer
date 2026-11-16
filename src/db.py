@@ -14,8 +14,10 @@ import logging
 import sqlite3
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_PATH = REPO_ROOT / "schema.sql"
+from .paths import APP_ROOT
+
+REPO_ROOT = APP_ROOT
+SCHEMA_PATH = APP_ROOT / "schema.sql"
 
 _module_logger = logging.getLogger("photo_organizer")
 

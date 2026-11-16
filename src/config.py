@@ -9,9 +9,15 @@ from pathlib import Path
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = REPO_ROOT / "config.yaml"
-EXAMPLE_CONFIG_PATH = REPO_ROOT / "config.example.yaml"
+from .paths import APP_ROOT, DATA_ROOT
+
+# REPO_ROOT is the root relative config/data paths resolve against. Running
+# from source it is the repo root (unchanged); in the packaged app it is the
+# per-user data folder, since the install folder is replaced by updates.
+# See src/paths.py.
+REPO_ROOT = DATA_ROOT
+CONFIG_PATH = DATA_ROOT / "config.yaml"
+EXAMPLE_CONFIG_PATH = APP_ROOT / "config.example.yaml"
 
 
 @dataclass
@@ -95,6 +101,10 @@ class Config:
     # README.md's "Remote access" section), so this is config-driven per
     # rule 4 rather than hardcoded in dashboard.py. Default matches this
     # user's own already-confirmed-working tunnel (see CLAUDE.md).
+    # Packaged app: look for a newer release shortly after the dashboard opens
+    # (one small GET to GitHub; see src/updater.py). Set false to only check
+    # when you click Check for Updates.
+    check_for_updates: bool = True
     cloudflare_tunnel_name: str = "photo-viewer"
 
     # Phase 2g: cached video first-frame thumbnails (src/thumbnail_backfill.py,
@@ -351,6 +361,7 @@ def load_config(path: Path | None = None) -> Config:
         login_rate_limit_window_seconds=raw.get("login_rate_limit_window_seconds", 900),
         storage_backend=raw.get("storage_backend", "local"),
         cloudflare_tunnel_name=raw.get("cloudflare_tunnel_name", "photo-viewer"),
+        check_for_updates=raw.get("check_for_updates", True),
         thumbnail_dir=raw.get("thumbnail_dir", "data/thumbnails"),
         thumbnail_max_dimension=raw.get("thumbnail_max_dimension", 480),
         faces_path=raw.get("faces_path", "data/faces.jsonl"),
